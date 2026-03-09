@@ -1,0 +1,53 @@
+name: dsm2ui
+channels:
+  - cadwr-dms
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python<3.14
+  - numpy
+  - pip
+  # first our packages
+  - pyhecdss
+  - vtools3
+  - dms-datastore
+  - pydsm
+  # then basics
+  - click
+  - aiohttp
+  - numba
+  - dask
+  - pandas
+  - xarray
+  - h5py
+  - scipy
+  # geo stuff
+  - geopandas
+  # then plot stuff
+  - matplotlib
+  - jupyter_bokeh
+  - holoviews
+  - geoviews
+  - hvplot
+  - networkx
+  # for ui
+  - panel
+  - param
+  - bokeh
+  - colorcet
+  # for different file formats
+  - fastparquet
+  - python-snappy
+  - pyarrow
+  - pytables
+  - openpyxl
+  - jinja2
+  - diskcache
+  # misc
+  - lxml
+  - tqdm
+  - pyyaml
+  - ipykernel
+  - pip:
+    - dvue @ git+https://github.com/CADWRDeltaModeling/dvue
+    - -e .
