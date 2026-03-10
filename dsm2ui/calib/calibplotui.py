@@ -236,7 +236,8 @@ import click
 @click.argument("config_file", type=click.Path(exists=True, readable=True))
 @click.option("--base_dir", required=False, help="Base directory for config file")
 def calib_plot_ui(config_file, base_dir=None, **kwargs):
-    """
+    """Launch the interactive calibration plot UI from a YAML config file.
+
     config_file: str
         yaml file containing configuration
 

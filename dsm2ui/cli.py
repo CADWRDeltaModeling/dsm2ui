@@ -44,6 +44,7 @@ def main():
     "--base-file", "-b", type=click.Path(dir_okay=False, exists=True, readable=True)
 )
 def map_channels_colored(flowline_shapefile, hydro_echo_file, colored_by, base_file):
+    """Show an interactive map of DSM2 channels colored by Manning's n, dispersion, or length."""
     mapui = DSM2FlowlineMap(flowline_shapefile, hydro_echo_file, base_file)
     if colored_by == "ALL":
         return pn.panel(
@@ -66,6 +67,7 @@ def map_channels_colored(flowline_shapefile, hydro_echo_file, colored_by, base_f
     "hydro_echo_file", type=click.Path(dir_okay=False, exists=True, readable=True)
 )
 def node_map_flow_splits(node_shapefile, hydro_echo_file):
+    """Show an interactive panel map of DSM2 network nodes and flow splits."""
     netmap = dsm2ui.DSM2GraphNetworkMap(node_shapefile, hydro_echo_file)
     pn.serve(
         netmap.get_panel(), kwargs={"websocket-max-message-size": 100 * 1024 * 1024}
@@ -91,7 +93,7 @@ def node_map_flow_splits(node_shapefile, hydro_echo_file):
 @click.argument("json_config_file")
 @click.option("--dask/--no-dask", default=False)
 def exec_postpro_dsm2(process_name, json_config_file, dask):
-    print(process_name, dask, json_config_file)
+    """Run a DSM2 post-processing step (observed, model, plots, heatmaps, validation_bar_charts, or copy_plot_files)."""
     postpro_dsm2.run_process(process_name, json_config_file, dask)
 
 
@@ -118,6 +120,7 @@ def exec_dsm2_chan_mann_disp(
     dsm2_channels_input_filename,
     dsm2_channels_output_filename,
 ):
+    """Apply group-based Manning's n and dispersion values to a DSM2 channels input file."""
     dsm2_chan_mann_disp.prepro(
         chan_to_group_filename,
         chan_group_mann_disp_filename,
@@ -134,7 +137,7 @@ def exec_dsm2_chan_mann_disp(
 )
 @click.argument("json_config_file")
 def exec_checklist_dsm2(process_name, json_config_file):
-    print(process_name, json_config_file)
+    """Run a DSM2 calibration checklist step (resample, extract, or plot)."""
     checklist_dsm2.run_checklist(process_name, json_config_file)
 
 

@@ -86,6 +86,7 @@ def cache_calcs(df, dsm2_chan_geom_map):
 @click.argument("hydro_file", type=click.Path(exists=True))
 @click.argument("flowlines_shape_file", type=click.Path(exists=True))
 def ptm_animate(ptm_file, hydro_file, flowlines_shape_file):
+    """Animate PTM particle tracks on an interactive map using a PTM animation file and Hydro tidefile."""
     # Tiles always in pseudo mercator epsg=3857
     # Load PTM animation file
     # ptm_file = 'D:/delta/dsm2_v8.2.0b1/studies/historical/output/anim_db.bin'
