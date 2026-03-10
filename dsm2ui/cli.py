@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Console script for dsm2ui."""
-from dsm2ui import channel_orient, dsm2ui
+from dsm2ui import dsm2ui
 from dsm2ui.dsm2ui import DSM2FlowlineMap, build_output_plotter
 from dsm2ui.calib import postpro_dsm2
 from dsm2ui.calib import checklist_dsm2
@@ -310,7 +310,5 @@ main.add_command(calibplotui.calib_plot_ui, "calib-ui")
 main.add_command(ptm_animator.ptm_animate, "ptm-animate")
 main.add_command(deltacduimgr.show_deltacd_ui, "dcd-ui")
 main.add_command(dsm2ui.show_dsm2_tidefile_xsect_ui, "xsect-ui")
-main.add_command(channel_orient.generate_channel_orientation, "chan-orient")
-
 if __name__ == "__main__":
     sys.exit(main())  # pragma: no cover
