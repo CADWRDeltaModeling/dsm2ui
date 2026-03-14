@@ -2,6 +2,7 @@
 # organize imports by category
 from datetime import datetime, timedelta
 from functools import lru_cache
+import logging
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -21,8 +22,84 @@ pn.extension()
 import pyhecdss as dss
 from vtools.functions.filter import cosine_lanczos
 
+from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
 from dvue.dataui import DataUI, full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager
+
+logger = logging.getLogger(__name__)
+
+
+class DSSReader(DataReferenceReader):
+    """Reads a single DSS time series given DSS path-part attributes.
+
+    A single ``DSSReader`` instance is shared across all
+    :class:`~dvue.catalog.DataReference` objects that point to the same
+    set of open DSS file handles (flyweight pattern).
+
+    When ``time_range`` is present in the attributes passed by
+    :meth:`~dvue.catalog.DataReference.getData`, only that window is read
+    from disk.  The result is cached per ``(start, end)`` pair inside the
+    ``DataReference``, so repeated requests for the same window avoid
+    re-reading.
+
+    Parameters
+    ----------
+    dssfh_map : dict
+        ``{filepath: pyhecdss.DSSFile}`` — open DSS file handles.
+    dss_catalog_map : dict
+        ``{filepath: DataFrame}`` — per-file catalog DataFrames that include
+        a ``pathname`` column built from the A–F path parts.
+    """
+
+    def __init__(self, dssfh_map: dict, dss_catalog_map: dict) -> None:
+        self._dssfh_map = dssfh_map
+        self._dss_catalog_map = dss_catalog_map
+
+    def load(self, **attributes) -> pd.DataFrame:
+        dssfile = attributes["filename"]
+        a = attributes["A"]
+        b = attributes["B"]
+        c = attributes["C"]
+        e = attributes["E"]
+        f = attributes["F"]
+        pathname = f"/{a}/{b}/{c}//{e}/{f}/"
+
+        dssfh = self._dssfh_map[dssfile]
+        dfcatp = self._dss_catalog_map[dssfile]
+        dfcatp_match = dfcatp[dfcatp["pathname"] == pathname]
+        pathnames = dssfh.get_pathnames(dfcatp_match)
+        if not pathnames:
+            logger.warning("No DSS pathname found for %s", pathname)
+            return pd.DataFrame()
+        actual_pathname = pathnames[0]
+
+        is_irregular = e.startswith("IR-")
+        time_range = attributes.get("time_range")
+        if time_range is not None:
+            start_str = pd.Timestamp(time_range[0]).strftime("%Y-%m-%d")
+            end_str = pd.Timestamp(time_range[1]).strftime("%Y-%m-%d")
+        else:
+            start_str = "1753-01-01"
+            end_str = "2200-12-31"
+
+        try:
+            if is_irregular:
+                df, unit, ptype = dssfh.read_its(actual_pathname, start_str, end_str)
+            else:
+                df, unit, ptype = dssfh.read_rts(actual_pathname, start_str, end_str)
+            fvi = df.first_valid_index()
+            lvi = df.last_valid_index()
+            if fvi is not None and lvi is not None:
+                df = df[fvi:lvi]
+            df.attrs["unit"] = unit.lower() if unit else unit
+            df.attrs["ptype"] = ptype
+            return df
+        except Exception as exc:
+            logger.error("Error reading DSS pathname %s: %s", actual_pathname, exc)
+            return pd.DataFrame()
+
+    def __repr__(self) -> str:
+        return f"DSSReader(files={list(self._dssfh_map.keys())!r})"
 
 
 class DSSDataUIManager(TimeSeriesDataUIManager):
@@ -69,11 +146,42 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
             )
         self.dssfiles = dssfiles
         self.dfcatpath = self._build_map_pathname_to_catalog(self.dfcat)
+
+        # Build DataCatalog backed by DSSReader references
+        self._reader = DSSReader(self.dssfh, self.dsscats)
+        geo_crs = (
+            str(self.geo_locations.crs)
+            if self.geo_locations is not None and hasattr(self.geo_locations, "crs")
+            else None
+        )
+        self._dvue_catalog = self._build_dvue_catalog(geo_crs)
+
         super().__init__(**kwargs)
         self.color_cycle_column = "B"
         self.dashed_line_cycle_column = "filename"
         self.marker_cycle_column = "F"
 
+    def _build_dvue_catalog(self, crs=None) -> DataCatalog:
+        catalog = DataCatalog(crs=crs)
+        for _, row in self.dfcat.iterrows():
+            pathname = self.build_pathname(row)
+            attrs = {k: v for k, v in row.items() if k != "geometry"}
+            if "geometry" in row.index and row["geometry"] is not None:
+                attrs["geometry"] = row["geometry"]
+            try:
+                catalog.add(DataReference(
+                    self._reader,
+                    name=pathname,
+                    cache=True,
+                    **attrs,
+                ))
+            except ValueError:
+                pass  # duplicate pathname (same DSS entry in multiple files)
+        return catalog
+
+    @property
+    def data_catalog(self) -> DataCatalog:
+        return self._dvue_catalog
 
     def __del__(self):
         if hasattr(self, "dssfiles"):
@@ -94,10 +202,6 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         dfcatpath = dfcat.copy()
         dfcatpath["pathname"] = dfcatpath.apply(self.build_pathname, axis=1)
         return dfcatpath
-
-    # data related methods
-    def get_data_catalog(self):
-        return self.dfcat
 
     def get_time_range(self, dfcat):
         """
@@ -174,26 +278,11 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         )
 
     def get_data_for_time_range(self, r, time_range):
-        irreg = self.is_irregular(r)
-        dssfile = r[self.filename_column]
-        dssfh = self.dssfh[dssfile]
-        dfcatp = self.dsscats[dssfile]
-        dfcatp = dfcatp[dfcatp["pathname"] == self.build_pathname(r)]
-        pathname = dssfh.get_pathnames(dfcatp)[0]
-        if irreg:
-            df, unit, ptype = lru_cache(maxsize=32)(dssfh.read_its)(
-                pathname,
-                time_range[0].strftime("%Y-%m-%d"),
-                time_range[1].strftime("%Y-%m-%d"),
-            )
-        else:
-            df, unit, ptype = lru_cache(maxsize=32)(dssfh.read_rts)(
-                pathname,
-                time_range[0].strftime("%Y-%m-%d"),
-                time_range[1].strftime("%Y-%m-%d"),
-            )
-        df = df[slice(df.first_valid_index(), df.last_valid_index())]
-        unit = unit.lower() if unit else unit
+        pathname = self.build_pathname(r)
+        ref = self._dvue_catalog.get(pathname)
+        df = ref.getData(time_range=time_range)
+        unit = df.attrs.get("unit", "")
+        ptype = df.attrs.get("ptype", "inst-val")
         return df, unit, ptype
 
     # methods below if geolocation data is available
@@ -214,6 +303,7 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
     def get_map_marker_columns(self):
         """return the columns that can be used to color the map"""
         return ["C", "A", "F"]
+
 
 
 import glob

@@ -46,8 +46,42 @@ def import_vtk_modules():
 import pyhecdss as dss
 from vtools.functions.filter import cosine_lanczos
 from pydsm.analysis.dsm2study import *
+from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
 from dvue.dataui import full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager
+
+import logging
+logger = logging.getLogger(__name__)
+
+
+class DSM2DSSReader(DataReferenceReader):
+    """Reads a DSM2 DSS output channel time series via pydsm.dss.
+
+    Loads the **full** series on first call; subsequent calls for the same
+    channel are served from the :class:`~dvue.catalog.DataReference` cache.
+
+    The ``time_range`` attribute is ignored at read time — slicing happens
+    in :meth:`DSM2DataUIManager.get_data_for_time_range` so the full cached
+    series can be reused for any window.
+    """
+
+    def load(self, **attributes) -> "pd.DataFrame":
+        dssfile = attributes["FILE"]
+        name = attributes["NAME"]
+        variable = attributes["VARIABLE"]
+        pathname = f"//{name}/{variable}////"
+        try:
+            df, unit, ptype = next(dss.get_matching_ts(dssfile, pathname))
+            df.attrs["unit"] = unit
+            df.attrs["ptype"] = ptype
+            return df
+        except StopIteration:
+            logger.warning("No matching DSS time series for %s in %s", pathname, dssfile)
+            import pandas as pd
+            return pd.DataFrame()
+
+    def __repr__(self) -> str:
+        return "DSM2DSSReader()"
 
 
 class DSM2DataUIManager(TimeSeriesDataUIManager):
@@ -67,20 +101,51 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
                 lambda x: unique_files.tolist().index(x)
             )
         self.station_id_column = "NAME"
+
+        # Build DataCatalog before super().__init__() because the parent
+        # calls get_data_catalog() during initialisation.
+        _reader = DSM2DSSReader()
+        geo_crs = (
+            str(output_channels.crs)
+            if hasattr(output_channels, "crs") and output_channels.crs is not None
+            else None
+        )
+        self._dvue_catalog = self._build_dvue_catalog(output_channels, _reader, geo_crs)
+
         super().__init__(file_number_column_name="FILE_NO", **kwargs)
         self.color_cycle_column = "NAME"
         self.dashed_line_cycle_column = "FILE"
         self.marker_cycle_column = "VARIABLE"
+
+    @staticmethod
+    def _ref_name(row) -> str:
+        """Unique DataReference name reconstructable from any selected table row."""
+        return f'{row["FILE"]}::{row["NAME"]}/{row["VARIABLE"]}/{row["CHAN_NO"]}/{row["DISTANCE"]}'
+
+    def _build_dvue_catalog(self, output_channels, reader, crs=None) -> DataCatalog:
+        import pandas as pd
+        catalog = DataCatalog(crs=crs)
+        for _, row in output_channels.iterrows():
+            attrs = {k: v for k, v in row.items() if k != "geometry"}
+            if "geometry" in row.index and row["geometry"] is not None:
+                attrs["geometry"] = row["geometry"]
+            catalog.add(DataReference(
+                reader,
+                name=self._ref_name(row),
+                cache=True,  # full series cached; sliced per request in get_data_for_time_range
+                **attrs,
+            ))
+        return catalog
+
+    @property
+    def data_catalog(self) -> DataCatalog:
+        return self._dvue_catalog
 
     def build_station_name(self, r):
         if self.display_fileno:
             return f'{r["FILE_NO"]}:{r["NAME"]}'
         else:
             return f'{r["NAME"]}'
-
-    # data related methods
-    def get_data_catalog(self):
-        return self.output_channels
 
     def get_time_range(self, dfcat):
         return self.time_range
@@ -150,11 +215,11 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         )
 
     def get_data_for_time_range(self, r, time_range):
-        dssfile = r[self.filename_column]
-        pathname = f'//{r["NAME"]}/{r["VARIABLE"]}////'
-        df, unit, ptype = next(
-            lru_cache(maxsize=32)(dss.get_matching_ts)(dssfile, pathname)
-        )  # get first matching time series
+        ref = self._dvue_catalog.get(self._ref_name(r))
+        # Load full series (cached); slice to the requested window here.
+        df = ref.getData()
+        unit = df.attrs.get("unit", "")
+        ptype = df.attrs.get("ptype", "inst-val")
         df = df[slice(*time_range)]
         return df, unit, ptype
 
