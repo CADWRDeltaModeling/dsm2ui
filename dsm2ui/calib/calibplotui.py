@@ -14,6 +14,7 @@ from pydsm.analysis import postpro
 from dsm2ui.calib import postpro_dsm2
 
 from dvue.dataui import DataUI, DataUIManager
+from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
 
 
 # substitue the base_dir in location_files_dict, observed_files_dict, study_files_dict
@@ -32,6 +33,22 @@ def load_location_file(location_file):
 
 
 import param
+
+
+class CalibNullReader(DataReferenceReader):
+    """Placeholder reader for CalibPlotUIManager entries.
+
+    Calibration plots are built lazily inside :meth:`CalibPlotUIManager.create_panel`
+    via ``postpro_dsm2.build_plot()``; ``getData()`` is never called on these refs.
+    """
+
+    def load(self, **attributes) -> pd.DataFrame:
+        raise NotImplementedError(
+            "CalibPlotUIManager entries are rendered via create_panel(), not getData()."
+        )
+
+    def __repr__(self) -> str:
+        return "CalibNullReader()"
 
 
 class CalibPlotUIManager(DataUIManager):
@@ -63,6 +80,63 @@ class CalibPlotUIManager(DataUIManager):
             base_dir, config["study_files_dict"]
         )
         self.config = config
+        # Build catalog once — avoids re-reading location files on every get_data_catalog() call.
+        self._dvue_catalog = self._build_dvue_catalog()
+
+    def _build_raw_catalog(self) -> gpd.GeoDataFrame:
+        """Build the merged GeoDataFrame from all configured location files."""
+        gdfs = []
+        for tkey, tvalue in self.config["vartype_timewindow_dict"].items():
+            if tvalue is None:
+                continue
+            value = self.config["location_files_dict"][tkey]
+            gdf = postpro.load_location_file(value)
+            gdf.Latitude = pd.to_numeric(gdf.Latitude, errors="coerce")
+            gdf.Longitude = pd.to_numeric(gdf.Longitude, errors="coerce")
+            gdf.threshold_value = pd.to_numeric(gdf.threshold_value, errors="coerce")
+            gdf = gpd.GeoDataFrame(
+                gdf,
+                geometry=gpd.points_from_xy(gdf.Longitude, gdf.Latitude),
+                crs="EPSG:4326",
+            )
+            gdf["vartype"] = str(tkey)
+            gdfs.append(gdf)
+        gdf = pd.concat(gdfs, axis=0).reset_index(drop=True)
+        gdf = gdf.astype(
+            {
+                "Name": "str",
+                "BPart": "str",
+                "Description": "str",
+                "subtract": "str",
+                "time_window_exclusion_list": "str",
+                "vartype": "str",
+            },
+            errors="raise",
+        )
+        gdf = gdf.dropna(subset=["Latitude", "Longitude"])
+        if self.polygon_bounds:
+            gdf = gdf.loc[gdf.within(self.polygon_bounds)]
+        return gdf
+
+    def _build_dvue_catalog(self) -> DataCatalog:
+        dfcat = self._build_raw_catalog()
+        reader = CalibNullReader()
+        catalog = DataCatalog(crs="EPSG:4326")
+        for _, row in dfcat.iterrows():
+            attrs = {k: v for k, v in row.items() if k != "geometry"}
+            if row.get("geometry") is not None:
+                attrs["geometry"] = row["geometry"]
+            catalog.add(DataReference(
+                reader,
+                name=f'{row["Name"]}_{row["vartype"]}',
+                cache=False,
+                **attrs,
+            ))
+        return catalog
+
+    @property
+    def data_catalog(self) -> DataCatalog:
+        return self._dvue_catalog
 
     def get_studies(self, varname):
         studies = list(self.config["study_files_dict"].keys())
@@ -91,42 +165,6 @@ class CalibPlotUIManager(DataUIManager):
 
     def get_widgets(self):
         return pn.Column(pn.pane.Markdown("UI Controls Placeholder"))
-
-    # data related methods
-    def get_data_catalog(self):
-        gdfs = []
-        for tkey, tvalue in self.config["vartype_timewindow_dict"].items():
-            if tvalue is None:
-                continue
-            value = self.config["location_files_dict"][tkey]
-            gdf = postpro.load_location_file(value)
-            gdf.Latitude = pd.to_numeric(gdf.Latitude, errors="coerce")
-            gdf.Longitude = pd.to_numeric(gdf.Longitude, errors="coerce")
-            gdf.threshold_value = pd.to_numeric(gdf.threshold_value, errors="coerce")
-            gdf = gpd.GeoDataFrame(
-                gdf,
-                geometry=gpd.points_from_xy(gdf.Longitude, gdf.Latitude),
-                crs="EPSG:4326",
-            )
-            gdf["vartype"] = str(tkey)
-            gdfs.append(gdf)
-        gdf = pd.concat(gdfs, axis=0)
-        gdf = gdf.reset_index(drop=True)
-        gdf = gdf.astype(
-            {
-                "Name": "str",
-                "BPart": "str",
-                "Description": "str",
-                "subtract": "str",
-                "time_window_exclusion_list": "str",
-                "vartype": "str",
-            },
-            errors="raise",
-        )
-        gdf = gdf.dropna(subset=["Latitude", "Longitude"])
-        if self.polygon_bounds:
-            gdf = gdf.loc[gdf.within(self.polygon_bounds)]
-        return gdf
 
     def get_table_column_width_map(self):
         """only columns to be displayed in the table should be included in the map"""
