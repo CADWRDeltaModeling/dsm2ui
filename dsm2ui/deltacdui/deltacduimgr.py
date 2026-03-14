@@ -10,6 +10,44 @@ import geopandas as gpd
 import numpy as np
 import holoviews as hv
 from dvue import tsdataui
+from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
+
+class DeltaCDAreaReader(DataReferenceReader):
+    """Flyweight reader that extracts a time-series slice from an open xarray Dataset
+    for a specific area_id (+ optionally crop) and variable.
+
+    ``time_range`` is forwarded to ``.loc`` so the sliced series is cached keyed
+    by window in :class:`~dvue.catalog.DataReference`.
+    """
+
+    def __init__(self, datasets: dict):
+        self._datasets = datasets
+
+    def load(self, **attributes) -> pd.DataFrame:
+        filename = attributes["source"]
+        area_id = attributes["area_id"]
+        variable = attributes["variable"]
+        crop = attributes.get("crop")
+        time_range = attributes.get("time_range")
+        ds = self._datasets[filename]
+        try:
+            if crop is not None and not pd.isna(crop) and "crop" in ds.dims:
+                data = ds[variable].sel(area_id=area_id, crop=crop)
+            else:
+                data = ds[variable].sel(area_id=area_id)
+            df = data.to_pandas().to_frame()
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
+            if time_range and len(time_range) == 2:
+                df = df.loc[time_range[0]:time_range[1]]
+            return df
+        except Exception as e:
+            logger.debug("Error extracting data for area_id=%s, variable=%s: %s", area_id, variable, e)
+            return pd.DataFrame()
+
+    def __repr__(self) -> str:
+        return "DeltaCDAreaReader()"
+
 
 class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
     """
@@ -67,10 +105,15 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
         else:
             # If no GeoDataFrame, just use the DataFrame
             catalog = dfcat
-        self.dfcat = catalog
-        # Initialize data cache
-        self.data_cache = {}
-        
+        # Build DataCatalog (before super().__init__ which calls get_data_catalog).
+        _reader = DeltaCDAreaReader(self.datasets)
+        geo_crs = (
+            str(catalog.crs)
+            if isinstance(catalog, gpd.GeoDataFrame) and catalog.crs is not None
+            else None
+        )
+        self._dvue_catalog = self._build_dvue_catalog(catalog, _reader, geo_crs)
+
         kwargs['filename_column'] = "source"
         super().__init__(**kwargs)
         # Set up columns for visualization
@@ -79,8 +122,36 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
         self.marker_cycle_column = "area_id"
         
 
-    def get_data_catalog(self):
-        return self.dfcat
+    @staticmethod
+    def _ref_name(row) -> str:
+        """Unique DataReference name reconstructable from any table row."""
+        area_id = row["area_id"]
+        variable = row["variable"]
+        source = row["source"]
+        crop = row.get("crop") if hasattr(row, "get") else (
+            row["crop"] if "crop" in row.index else None
+        )
+        if crop is not None and not pd.isna(crop):
+            return f"{source}::{area_id}/{crop}/{variable}"
+        return f"{source}::{area_id}/{variable}"
+
+    def _build_dvue_catalog(self, dfcat, reader, crs=None) -> DataCatalog:
+        catalog = DataCatalog(crs=crs)
+        for _, row in dfcat.iterrows():
+            attrs = {k: v for k, v in row.items() if k != "geometry"}
+            if "geometry" in row.index and row["geometry"] is not None:
+                attrs["geometry"] = row["geometry"]
+            catalog.add(DataReference(
+                reader,
+                name=self._ref_name(row),
+                cache=True,
+                **attrs,
+            ))
+        return catalog
+
+    @property
+    def data_catalog(self) -> DataCatalog:
+        return self._dvue_catalog
 
     def get_data_catalog_for_dataset(self, ds, nc_file_path):
         """
@@ -216,55 +287,9 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
         return False  # Assuming all time series are regular
 
     def get_data_for_time_range(self, r, time_range):
-        """
-        Extract time series data for a specific area_id, crop, and variable combination
-        within the specified time range.
-        
-        Parameters:
-        -----------
-        r : pandas.Series
-            Row from data catalog containing area_id and variable (crop may be optional)
-        time_range : tuple
-            Start and end time for data extraction
-    
-        Returns:
-        --------
-        tuple
-            (time series DataFrame, unit, data type)
-        """
-        area_id = r["area_id"]
-        variable = r["variable"]
-        unit = r["unit"]
-        filename = r["source"]
-        ds = self.datasets[filename]
-        try:
-            # Check if 'crop' exists in the row before trying to access it
-            if 'crop' in r and not pd.isna(r['crop']):
-                crop = r["crop"]
-                # Extract data from xarray for the specific area_id, crop, and variable
-                data = ds[variable].sel(area_id=area_id, crop=crop)
-            else:
-                # Handle case where crop is not in the data catalog
-                data = ds[variable].sel(area_id=area_id)
-        
-            # Convert to pandas Series and then DataFrame
-            df = data.to_pandas().to_frame()
-            # Ensure the index is a datetime index
-            if not isinstance(df.index, pd.DatetimeIndex):
-                # Try to convert the index to a datetime index
-                df.index = pd.to_datetime(df.index)
-            
-            # Filter by time range if specified
-            if time_range and len(time_range) == 2:
-                start_time, end_time = time_range
-                df = df.loc[start_time:end_time]
-                
-            return df, unit, "instantaneous"
-        
-        except Exception as e:
-            # Handle any exception that occurs during data extraction
-            logger.debug(f"Error extracting data for area_id={area_id}, variable={variable}: {e}")
-            return pd.DataFrame(), unit, "instantaneous"
+        ref = self._dvue_catalog.get(self._ref_name(r))
+        df = ref.getData(time_range=time_range)
+        return df, r["unit"], "instantaneous"
 
     def get_tooltips(self):
         """Define tooltips for map visualization"""
