@@ -32,6 +32,44 @@ def load_location_file(location_file):
     return gdf
 
 
+def _get_cached_bparts(dssfile, vartype):
+    """Return the set of B-parts that have valid (non-error) cache entries for *vartype*.
+
+    Opens the diskcache written by ``postpro_dsm2.run_process`` alongside *dssfile*
+    and returns the upper-cased B-parts whose ``/{BPART}/{VARTYPE}/15MIN/`` key
+    contains actual data (i.e. the stored value is a DataFrame, not an error string).
+    """
+    import diskcache
+    cache_dir = postpro.get_cache_dir(dssfile)
+    if not pathlib.Path(cache_dir).exists():
+        return set()
+    cache = diskcache.Cache(cache_dir)
+    bparts = set()
+    cpart_upper = vartype.upper()
+    try:
+        for key in cache:
+            # Key format: /{BPART}/{CPART}/{EPART}/
+            parts = str(key).strip("/").split("/")
+            if len(parts) != 3:
+                continue
+            key_bpart, key_cpart, key_epart = parts
+            if key_cpart != cpart_upper:
+                continue
+            try:
+                value, *_ = cache[key]
+            except KeyError:
+                continue
+            # Filter out error strings stored by store_processed on failure
+            if isinstance(value, str):
+                continue
+            if hasattr(value, "empty") and value.empty:
+                continue
+            bparts.add(key_bpart.upper())
+    finally:
+        cache.close()
+    return bparts
+
+
 import param
 
 
@@ -84,7 +122,13 @@ class CalibPlotUIManager(DataUIManager):
         self._dvue_catalog = self._build_dvue_catalog()
 
     def _build_raw_catalog(self) -> gpd.GeoDataFrame:
-        """Build the merged GeoDataFrame from all configured location files."""
+        """Build the merged GeoDataFrame from all configured location files.
+
+        Rows are filtered to only those whose B-part has valid cached data in
+        **both** the observed DSS cache and at least one model DSS cache.
+        This removes duplicate CSV rows and stations that were never in the
+        model output or have no observed data.
+        """
         gdfs = []
         for tkey, tvalue in self.config["vartype_timewindow_dict"].items():
             if tvalue is None:
@@ -100,6 +144,22 @@ class CalibPlotUIManager(DataUIManager):
                 crs="EPSG:4326",
             )
             gdf["vartype"] = str(tkey)
+
+            # --- filter to stations with valid cached data ---
+            obs_bparts = _get_cached_bparts(
+                self.config["observed_files_dict"][tkey], tkey
+            )
+            model_bparts = set()
+            for dssfile in self.config["study_files_dict"].values():
+                model_bparts |= _get_cached_bparts(dssfile, tkey)
+
+            if obs_bparts or model_bparts:
+                # Keep rows whose BPart is in both observed AND at least one model cache.
+                # Fall back to no filtering if caches are empty (e.g. pre-postpro run).
+                valid_bparts = obs_bparts & model_bparts
+                if valid_bparts:
+                    gdf = gdf[gdf["BPart"].str.upper().isin(valid_bparts)]
+
             gdfs.append(gdf)
         gdf = pd.concat(gdfs, axis=0).reset_index(drop=True)
         gdf = gdf.astype(
