@@ -56,7 +56,7 @@ def run_all(processors):
     #     dask.compute(tasks, scheduler='single-threaded')
 
 
-def postpro_model(cluster, config_data, use_dask):
+def postpro_model(cluster, config_data, use_dask, skip_if_cached=False):
     # Setup for EC, FLOW, STAGE
     # import logging
     # logging.basicConfig(filename='postpro-model.log', level=logging.DEBUG)
@@ -87,9 +87,9 @@ def postpro_model(cluster, config_data, use_dask):
                         run_all(processors)
                     else:
                         for p in processors:
-                            postpro.run_processor(p)
-    except e:
-        print("exception caught in postpro-model.py.run_processes. exiting.")
+                            postpro.run_processor(p, skip_if_cached=skip_if_cached)
+    except Exception as e:
+        print("exception caught in postpro-model.py.run_processes. exiting. " + str(e))
     finally:
         # Always shut down the cluster when done.
         if use_dask:
@@ -143,8 +143,8 @@ def export_svg(plot, fname):
 def save_to_graphics_format(calib_plot_template, fname):
     try:
         calib_plot_template.save(fname)
-    except:
-        print('unable to create plot for ' + fname)
+    except Exception as e:
+        print(f'unable to create plot for {fname}: {type(e).__name__}: {e}')
 
 
 def build_plot(
@@ -750,7 +750,7 @@ def check_config_data(config_data):
         exit(0)
 
 
-def run_process(process_name, config_filename, use_dask):
+def run_process(process_name, config_filename, use_dask, skip_if_cached=False):
     """
     process_name (str): should be 'model', 'observed', 'plots', or 'bars'
     config_filename (str): filename of config (json) file
@@ -790,7 +790,7 @@ def run_process(process_name, config_filename, use_dask):
         print(c_link)
     c_link
     if process_name.lower() == "model":
-        postpro_model(cluster, config_data, use_dask)
+        postpro_model(cluster, config_data, use_dask, skip_if_cached=skip_if_cached)
     elif process_name.lower() == "observed":
         postpro_observed(cluster, config_data, use_dask)
     elif process_name.lower() == "plots":
