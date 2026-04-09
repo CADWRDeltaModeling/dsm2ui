@@ -1,24 +1,70 @@
 # -*- coding: utf-8 -*-
 """Console script for dsm2ui."""
-from dsm2ui import dsm2ui
-from dsm2ui.dsm2ui import DSM2FlowlineMap, build_output_plotter
-from dsm2ui.calib import postpro_dsm2
-from dsm2ui.calib import checklist_dsm2
-from dsm2ui import dsm2_chan_mann_disp
-from dsm2ui import create_ann_inputs
-from dsm2ui import datastore2dss
-from dsm2ui._version import __version__
 import sys
 import click
-import panel as pn
-
-pn.extension()
-
+from dsm2ui._version import __version__
 
 CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
 
-@click.group(context_settings=CONTEXT_SETTINGS)
+class _LazyGroup(click.Group):
+    """Click Group that defers importing subcommands until they are actually invoked.
+
+    Pass ``lazy_subcommands`` as a dict mapping command name to
+    ``(module_path, attribute, help_text)`` tuples (help_text is optional), e.g.::
+
+        {"calib-ui": ("dsm2ui.calib.calibplotui", "calib_plot_ui", "Launch calib UI")}
+    """
+
+    def __init__(self, *args, lazy_subcommands=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lazy_subcommands = lazy_subcommands or {}
+
+    def list_commands(self, ctx):
+        return sorted(set(super().list_commands(ctx)) | set(self._lazy_subcommands))
+
+    def get_command(self, ctx, name):
+        if name in self._lazy_subcommands:
+            import importlib
+            entry = self._lazy_subcommands[name]
+            mod = importlib.import_module(entry[0])
+            return getattr(mod, entry[1])
+        return super().get_command(ctx, name)
+
+    def format_commands(self, ctx, formatter):
+        """Override to avoid importing lazy subcommands just to get help text."""
+        commands = []
+        for name in self.list_commands(ctx):
+            if name in self._lazy_subcommands:
+                entry = self._lazy_subcommands[name]
+                help_text = entry[2] if len(entry) > 2 else ""
+                commands.append((name, help_text))
+            else:
+                cmd = self.commands.get(name)
+                if cmd and not cmd.hidden:
+                    commands.append((name, cmd.get_short_help_str(limit=formatter.width)))
+        if commands:
+            with formatter.section("Commands"):
+                formatter.write_dl(commands)
+
+
+@click.group(
+    cls=_LazyGroup,
+    context_settings=CONTEXT_SETTINGS,
+    lazy_subcommands={
+        "output-ui":   ("dsm2ui.dsm2ui",                 "show_dsm2_output_ui",            "Show DSM2 model output UI"),
+        "tide-ui":     ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_ui",           "Show DSM2 tidefile UI"),
+        "xsect-ui":    ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_xsect_ui",     "Show DSM2 tidefile cross-section UI"),
+        "dss-ui":      ("dsm2ui.dssui.dssui",            "show_dss_ui",                     "Show DSS file browser UI"),
+        "geo-heatmap": ("dsm2ui.calib.geoheatmap",       "show_metrics_geo_heatmap",        "Show calibration metrics geo heatmap"),
+        "geolocate":   ("pydsm.viz.dsm2gis",             "geolocate_output_locations",      "Geolocate DSM2 output locations"),
+        "dcd-map":     ("dsm2ui.deltacdui.deltacdui",    "dcd_geomap",                      "Show Delta CD geographic map"),
+        "dcd-nodes":   ("dsm2ui.deltacdui.deltacdui",    "show_deltacd_nodes_ui",           "Show Delta CD nodes UI"),
+        "calib-ui":    ("dsm2ui.calib.calibplotui",      "calib_plot_ui",                   "Launch interactive calibration plot viewer"),
+        "ptm-animate": ("dsm2ui.ptm.ptm_animator",       "ptm_animate",                     "Animate PTM particle tracks"),
+        "dcd-ui":      ("dsm2ui.deltacdui.deltacduimgr", "show_deltacd_ui",                 "Show Delta CD UI"),
+    },
+)
 @click.version_option(
     __version__, "-v", "--version", message="%(prog)s, version %(version)s"
 )
@@ -27,7 +73,11 @@ def main():
     pass
 
 
-@click.command(name="channel-map")
+# ---------------------------------------------------------------------------
+# channel-map
+# ---------------------------------------------------------------------------
+
+@main.command(name="channel-map")
 @click.argument(
     "flowline_shapefile", type=click.Path(dir_okay=False, exists=True, readable=True)
 )
@@ -45,6 +95,9 @@ def main():
 )
 def map_channels_colored(flowline_shapefile, hydro_echo_file, colored_by, base_file):
     """Show an interactive map of DSM2 channels colored by Manning's n, dispersion, or length."""
+    import panel as pn
+    from dsm2ui.dsm2ui import DSM2FlowlineMap
+    pn.extension()
     mapui = DSM2FlowlineMap(flowline_shapefile, hydro_echo_file, base_file)
     if colored_by == "ALL":
         return pn.panel(
@@ -59,7 +112,11 @@ def map_channels_colored(flowline_shapefile, hydro_echo_file, colored_by, base_f
         return pn.panel(mapui.show_map_colored_by_column(colored_by.upper())).show()
 
 
-@click.command(name="node-map")
+# ---------------------------------------------------------------------------
+# node-map
+# ---------------------------------------------------------------------------
+
+@main.command(name="node-map")
 @click.argument(
     "node_shapefile", type=click.Path(dir_okay=False, exists=True, readable=True)
 )
@@ -68,13 +125,20 @@ def map_channels_colored(flowline_shapefile, hydro_echo_file, colored_by, base_f
 )
 def node_map_flow_splits(node_shapefile, hydro_echo_file):
     """Show an interactive panel map of DSM2 network nodes and flow splits."""
-    netmap = dsm2ui.DSM2GraphNetworkMap(node_shapefile, hydro_echo_file)
+    import panel as pn
+    from dsm2ui import dsm2ui as _dsm2ui
+    pn.extension()
+    netmap = _dsm2ui.DSM2GraphNetworkMap(node_shapefile, hydro_echo_file)
     pn.serve(
         netmap.get_panel(), kwargs={"websocket-max-message-size": 100 * 1024 * 1024}
     )
 
 
-@click.command(name="postpro")
+# ---------------------------------------------------------------------------
+# postpro
+# ---------------------------------------------------------------------------
+
+@main.command(name="postpro")
 @click.argument(
     "process_name",
     type=click.Choice(
@@ -92,12 +156,18 @@ def node_map_flow_splits(node_shapefile, hydro_echo_file):
 )
 @click.argument("json_config_file")
 @click.option("--dask/--no-dask", default=False)
-def exec_postpro_dsm2(process_name, json_config_file, dask):
+@click.option("--skip-cached", is_flag=True, default=False, help="Skip locations already present in the post-processing cache (model only).")
+def exec_postpro_dsm2(process_name, json_config_file, dask, skip_cached):
     """Run a DSM2 post-processing step (observed, model, plots, heatmaps, validation_bar_charts, or copy_plot_files)."""
-    postpro_dsm2.run_process(process_name, json_config_file, dask)
+    from dsm2ui.calib import postpro_dsm2
+    postpro_dsm2.run_process(process_name, json_config_file, dask, skip_if_cached=skip_cached)
 
 
-@click.command(name="mann-disp")
+# ---------------------------------------------------------------------------
+# mann-disp
+# ---------------------------------------------------------------------------
+
+@main.command(name="mann-disp")
 @click.argument(
     "chan_to_group_filename",
     type=click.Path(dir_okay=False, exists=True, readable=True),
@@ -121,6 +191,7 @@ def exec_dsm2_chan_mann_disp(
     dsm2_channels_output_filename,
 ):
     """Apply group-based Manning's n and dispersion values to a DSM2 channels input file."""
+    from dsm2ui import dsm2_chan_mann_disp
     dsm2_chan_mann_disp.prepro(
         chan_to_group_filename,
         chan_group_mann_disp_filename,
@@ -129,7 +200,11 @@ def exec_dsm2_chan_mann_disp(
     )
 
 
-@click.command(name="checklist")
+# ---------------------------------------------------------------------------
+# checklist
+# ---------------------------------------------------------------------------
+
+@main.command(name="checklist")
 @click.argument(
     "process_name",
     type=click.Choice(["resample", "extract", "plot"], case_sensitive=False),
@@ -138,10 +213,15 @@ def exec_dsm2_chan_mann_disp(
 @click.argument("json_config_file")
 def exec_checklist_dsm2(process_name, json_config_file):
     """Run a DSM2 calibration checklist step (resample, extract, or plot)."""
+    from dsm2ui.calib import checklist_dsm2
     checklist_dsm2.run_checklist(process_name, json_config_file)
 
 
-@click.command(name="ds2dss")
+# ---------------------------------------------------------------------------
+# ds2dss
+# ---------------------------------------------------------------------------
+
+@main.command(name="ds2dss")
 @click.argument(
     "datastore_dir",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True),
@@ -181,25 +261,18 @@ def exec_checklist_dsm2(process_name, json_config_file):
 def datastore_to_dss(
     datastore_dir, dssfile, param, repo_level="screened", unit_name=None
 ):
-    """
-    Reads datastore timeseries files and writes to a DSS file
-
-    Parameters
-    datastore_dir : str
-        Directory where Datastore files are stored
-    repo_level : str
-        default is screened
-    dssfile : str
-        Filename to write to
-    param : str
-        e.g one of "flow","elev", "ec", etc.
-    """
+    """Reads datastore timeseries files and writes to a DSS file."""
+    from dsm2ui import datastore2dss
     datastore2dss.read_from_datastore_write_to_dss(
         datastore_dir, dssfile, param, repo_level, unit_name=unit_name
     )
 
 
-@click.command(name="ds2stations")
+# ---------------------------------------------------------------------------
+# ds2stations
+# ---------------------------------------------------------------------------
+
+@main.command(name="ds2stations")
 @click.argument(
     "datastore_dir",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True),
@@ -227,21 +300,16 @@ def datastore_to_dss(
     ),
 )
 def datastore_to_stationfile(datastore_dir, stationfile, param):
-    """
-    Writes station_id, latitude, longitude to a csv file
-
-    Parameters
-    datastore_dir : str
-        Directory where Datastore files are stored
-    station_file : str
-        Filename to write to
-    param : str
-        e.g one of "flow","elev", "ec", etc.
-    """
+    """Writes station_id, latitude, longitude to a csv file."""
+    from dsm2ui import datastore2dss
     datastore2dss.write_station_lat_lng(datastore_dir, stationfile, param)
 
 
-@click.command(name="stations-out")
+# ---------------------------------------------------------------------------
+# stations-out
+# ---------------------------------------------------------------------------
+
+@main.command(name="stations-out")
 @click.argument(
     "stations_file",
     type=click.Path(dir_okay=False, exists=True, readable=True),
@@ -262,21 +330,8 @@ def datastore_to_stationfile(datastore_dir, stationfile, param):
 def stations_output_file(
     stations_file, centerlines_file, output_file, distance_tolerance=100
 ):
-    """
-    Create DSM2 channels output compatible file for given stations info (station_id, lat lon)
-    and centerlines geojson file (DSM2 channels centerlines) and writing out output_file
-
-    stations_file :  The stations file should be a csv file with columns 'station_id', 'lat', 'lon'
-        You can generate this file from a shapefile using the `dsm2ui datastore tostationfile` command
-
-    centerlines_file : Path to the centerlines geojson file for dsm2 channel centerlines
-
-    output_file : Path to the output file, the format will be a pandas dataframe with columns 'NAME', 'CHAN_NO', 'DISTANCE' and space separated
-
-    distance_tolerance : default 100
-    """
+    """Create DSM2 channels output compatible file for given stations and centerlines."""
     from pydsm.viz import dsm2gis
-
     dsm2gis.create_stations_output_file(
         stations_file=stations_file,
         centerlines_file=centerlines_file,
@@ -285,33 +340,61 @@ def stations_output_file(
     )
 
 
-from pydsm.viz import dsm2gis
-from dsm2ui.dssui import dssui
-from dsm2ui.calib import geoheatmap
-from dsm2ui.deltacdui import deltacdui
-from dsm2ui.calib import calibplotui
-from dsm2ui import dsm2ui
-from dsm2ui.deltacdui import deltacduimgr
-from dsm2ui.ptm import ptm_animator
+# ---------------------------------------------------------------------------
+# build-calib-config
+# ---------------------------------------------------------------------------
 
-main.add_command(dsm2ui.show_dsm2_output_ui, "output-ui")
-main.add_command(dsm2ui.show_dsm2_tidefile_ui, "tide-ui")
-main.add_command(dssui.show_dss_ui, "dss-ui")
-main.add_command(map_channels_colored)
-main.add_command(node_map_flow_splits)
-main.add_command(exec_postpro_dsm2)
-main.add_command(exec_dsm2_chan_mann_disp)
-main.add_command(exec_checklist_dsm2)
-main.add_command(geoheatmap.show_metrics_geo_heatmap, "geo-heatmap")
-main.add_command(datastore_to_dss)
-main.add_command(datastore_to_stationfile)
-main.add_command(stations_output_file)
-main.add_command(dsm2gis.geolocate_output_locations, "geolocate")
-main.add_command(deltacdui.dcd_geomap, "dcd-map")
-main.add_command(deltacdui.show_deltacd_nodes_ui, "dcd-nodes")
-main.add_command(calibplotui.calib_plot_ui, "calib-ui")
-main.add_command(ptm_animator.ptm_animate, "ptm-animate")
-main.add_command(deltacduimgr.show_deltacd_ui, "dcd-ui")
-main.add_command(dsm2ui.show_dsm2_tidefile_xsect_ui, "xsect-ui")
+@main.command(name="build-calib-config")
+@click.option(
+    "--study",
+    "-s",
+    "study_folders",
+    multiple=True,
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Study folder path (repeat -s for multiple studies).",
+)
+@click.option(
+    "--postprocessing",
+    "-p",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Path to the postprocessing folder (contains location_info/ and observed_data/).",
+)
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Output YAML config file path.",
+)
+@click.option(
+    "--module",
+    "-m",
+    type=click.Choice(["hydro", "qual", "gtm"], case_sensitive=False),
+    default="hydro",
+    show_default=True,
+    help="DSM2 module whose DSS output to reference.",
+)
+@click.option(
+    "--output-folder",
+    default="./plots/",
+    show_default=True,
+    help="Plot output folder written into the YAML options_dict.",
+)
+def build_calib_config_cmd(study_folders, postprocessing, output, module, output_folder):
+    """Generate a calib-ui YAML config from study folders and postprocessing data."""
+    from dsm2ui.calib import calib_config_builder
+    result = calib_config_builder.build_calib_config(
+        study_folders=list(study_folders),
+        postprocessing_folder=postprocessing,
+        output_file=output,
+        module=module,
+        output_folder=output_folder,
+    )
+    click.echo(f"Config written to: {result}")
+
+
 if __name__ == "__main__":
     sys.exit(main())  # pragma: no cover
+ 
