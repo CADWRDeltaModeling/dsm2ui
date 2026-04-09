@@ -43,6 +43,10 @@ dependencies:
   - openpyxl
   - jinja2
   - diskcache
+  # for png output
+  - selenium
+  - firefox
+  - geckodriver
   # misc
   - lxml
   - tqdm
