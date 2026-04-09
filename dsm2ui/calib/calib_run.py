@@ -80,8 +80,33 @@ from scipy.stats import linregress
 
 import pyhecdss
 from vtools.functions.filter import godin
+from pydsm.functions.tsmath import (
+    mse, nmse, rmse, nrmse,
+    mean_error, nmean_error,
+    nash_sutcliffe, kling_gupta_efficiency,
+    percent_bias, rsr,
+)
 
 logger = logging.getLogger(__name__)
+
+# ── Metric registry ───────────────────────────────────────────────────────────
+# Maps YAML metric name → (callable(model_series, obs_series) → float, ideal_target)
+# "slope" is handled as a special case via linregress.
+_METRIC_REGISTRY: dict = {
+    "slope":  (None,                    1.0),   # special: uses linregress
+    "rmse":   (rmse,                    0.0),
+    "nrmse":  (nrmse,                   0.0),
+    "mse":    (mse,                     0.0),
+    "nmse":   (nmse,                    0.0),
+    "nse":    (nash_sutcliffe,          1.0),
+    "kge":    (kling_gupta_efficiency,  1.0),
+    "bias":   (mean_error,              0.0),
+    "nbias":  (nmean_error,             0.0),
+    "pbias":  (percent_bias,            0.0),
+    "rsr":    (rsr,                     0.0),
+}
+
+VALID_METRICS = list(_METRIC_REGISTRY.keys())
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -449,6 +474,60 @@ def _patch_dsm2inputdir(config_inp: Path, new_inputdir: str) -> None:
     logger.info("Set DSM2INPUTDIR=%s in %s", new_inputdir, config_inp.name)
 
 
+def _copy_timeseries_dss(config_inp: Path, var_dir: Path) -> None:
+    """Copy all DSS timeseries files into a local directory and redirect TSINPUTDIR.
+
+    Reads the current ``TSINPUTDIR`` ENVVAR from *config_inp*, resolves it
+    relative to *var_dir* (the working directory DSM2 runs from), copies every
+    ``*.dss`` file found there into ``<var_dir>/local_timeseries/``, and then
+    patches ``TSINPUTDIR`` in *config_inp* to point at the new local copy.
+
+    This eliminates the DSS exclusive-lock contention that occurs when multiple
+    parallel DSM2 runs simultaneously open the same shared timeseries DSS files.
+
+    If ``TSINPUTDIR`` is not found, contains an unresolved ``${...}``
+    substitution, or the resolved directory does not exist, a warning is logged
+    and the function returns without modifying *config_inp*.
+    """
+    text = config_inp.read_text()
+    m = re.search(r"(?m)^TSINPUTDIR\s+(\S+)", text)
+    if not m:
+        logger.warning("TSINPUTDIR not found in %s — timeseries copy skipped.", config_inp.name)
+        return
+    raw_value = m.group(1)
+    if "${" in raw_value:
+        logger.warning(
+            "TSINPUTDIR=%r contains unresolved substitution — timeseries copy skipped.",
+            raw_value,
+        )
+        return
+    # Resolve relative to var_dir (DSM2 working directory)
+    src_dir = (var_dir / raw_value).resolve()
+    if not src_dir.is_dir():
+        logger.warning(
+            "TSINPUTDIR resolved to %s which does not exist — timeseries copy skipped.",
+            src_dir,
+        )
+        return
+    local_ts_dir = var_dir / "local_timeseries"
+    local_ts_dir.mkdir(parents=True, exist_ok=True)
+    n_copied = 0
+    for dss_src in src_dir.glob("*.dss"):
+        shutil.copy2(dss_src, local_ts_dir / dss_src.name)
+        n_copied += 1
+    logger.info("Copied %d DSS file(s) from %s to %s", n_copied, src_dir, local_ts_dir.name)
+    # Patch TSINPUTDIR to the absolute local path (forward slashes for DSM2)
+    local_ts_str = str(local_ts_dir).replace("\\", "/")
+    new_text = re.sub(
+        r"(?m)^(TSINPUTDIR\s+)\S+",
+        lambda mo: mo.group(1) + local_ts_str,
+        text,
+        count=1,
+    )
+    config_inp.write_text(new_text)
+    logger.info("Set TSINPUTDIR=%s in %s", local_ts_str, config_inp.name)
+
+
 def _patch_dsm2_modifier(config_inp: Path, modifier: str) -> None:
     """Overwrite the ``DSM2MODIFIER`` ENVVAR value in *config_inp*."""
     text = config_inp.read_text()
@@ -472,6 +551,7 @@ def setup_variation(
     run_steps: Optional[List[str]] = None,
     dsm2_bin_dir: Optional[str] = None,
     envvar_overrides: Optional[dict] = None,
+    copy_timeseries: bool = False,
 ) -> dict:
     """Set up a DSM2 variation study directory from a base run.
 
@@ -501,6 +581,12 @@ def setup_variation(
         New ``DSM2MODIFIER`` value.  Output DSS will use this as its prefix.
     channel_inp_name :
         Filename for the local channel file copy.
+    copy_timeseries :
+        When ``True``, copy all DSS files referenced by ``TSINPUTDIR`` into a
+        ``local_timeseries/`` subdirectory and redirect ``TSINPUTDIR`` to it.
+        Required when running multiple parallel DSM2 studies that share the
+        same timeseries directory, because DSS-6 opens files with an exclusive
+        lock that prevents concurrent access.
 
     Returns
     -------
@@ -550,6 +636,8 @@ def setup_variation(
             _ensure_tempdir(config_inp)
             if envvar_overrides:
                 _patch_envvars(config_inp, envvar_overrides)
+            if copy_timeseries:
+                _copy_timeseries_dss(config_inp, var_dir)
         else:
             logger.warning("config.inp not found in %s; DSM2MODIFIER not updated.", var_dir)
 
@@ -713,7 +801,140 @@ def _apply_timewindow(
     return df
 
 
-# ── EC slope computation ──────────────────────────────────────────────────────
+# ── EC metric computation ─────────────────────────────────────────────────────
+
+
+def compute_ec_metric(
+    model_dss: str | Path,
+    observed_dss: str | Path,
+    locations: List[ECLocation],
+    timewindow: Optional[str] = None,
+    c_part: str = "EC",
+    min_points: int = 10,
+    metric: str = "slope",
+) -> pd.DataFrame:
+    """Compute a calibration metric between Godin-filtered model and observed EC.
+
+    Supported *metric* values and their ideal target:
+
+    ======  =======  =============================================
+    Name    Target   Description
+    ======  =======  =============================================
+    slope   1.0      Linear-regression slope (obs→model)
+    rmse    0.0      Root mean squared error
+    nrmse   0.0      RMSE normalised by obs mean
+    mse     0.0      Mean squared error
+    nmse    0.0      MSE normalised by obs mean
+    nse     1.0      Nash-Sutcliffe efficiency
+    kge     1.0      Kling-Gupta efficiency
+    bias    0.0      Mean error (model − obs)
+    nbias   0.0      Mean error normalised by obs mean
+    pbias   0.0      Percent bias
+    rsr     0.0      RMSE / std(obs)
+    ======  =======  =============================================
+
+    Parameters
+    ----------
+    model_dss :
+        Model output DSS file.
+    observed_dss :
+        Observed EC DSS file.
+    locations :
+        List of :class:`ECLocation` objects.
+    timewindow :
+        Optional time filter, e.g. ``"01OCT2014 - 31DEC2024"``.
+    c_part :
+        DSS C-part for the EC variable.  Default ``"EC"``.
+    min_points :
+        Minimum aligned, non-NaN data points required.
+        Stations with fewer are skipped (``metric_value = NaN``).
+    metric :
+        Name of the metric to compute.  Must be one of :data:`VALID_METRICS`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per location with columns:
+        ``station_name, model_bpart, obs_bpart, metric_value, metric_target, n_points``.
+        For ``metric="slope"`` the additional linregress columns
+        ``(intercept, r_value, r_squared, p_value)`` are also included.
+    """
+    if metric not in _METRIC_REGISTRY:
+        raise ValueError(
+            f"Unknown metric {metric!r}.  Valid choices: {VALID_METRICS}"
+        )
+    metric_fn, metric_target = _METRIC_REGISTRY[metric]
+
+    rows = []
+    for loc in locations:
+        model_ts = load_dss_ts(model_dss, loc.model_bpart, c_part)
+        obs_ts = load_dss_ts(observed_dss, loc.obs_bpart, c_part)
+
+        if model_ts is None or obs_ts is None:
+            logger.warning("Skipping %s — missing data in one or both DSS files.", loc.station_name)
+            rows.append(_empty_metric_row(loc, metric_target))
+            continue
+
+        model_ts = _apply_timewindow(model_ts, timewindow)
+        obs_ts = _apply_timewindow(obs_ts, timewindow)
+
+        model_g = godin(model_ts)
+        obs_g = godin(obs_ts)
+
+        combined = pd.concat([model_g, obs_g], axis=1, join="inner").dropna()
+        if len(combined) < min_points:
+            logger.warning(
+                "Too few aligned points for %s (%d < %d) — skipping.",
+                loc.station_name, len(combined), min_points,
+            )
+            rows.append(_empty_metric_row(loc, metric_target))
+            continue
+
+        model_arr = combined.iloc[:, 0].to_numpy(dtype=float)
+        obs_arr   = combined.iloc[:, 1].to_numpy(dtype=float)
+
+        row: dict = {
+            "station_name": loc.station_name,
+            "model_bpart": loc.model_bpart,
+            "obs_bpart": loc.obs_bpart,
+            "metric_target": metric_target,
+            "n_points": len(combined),
+        }
+
+        if metric == "slope":
+            reg = linregress(obs_arr, model_arr)
+            row["metric_value"] = float(reg.slope)
+            row["intercept"]  = float(reg.intercept)
+            row["r_value"]    = float(reg.rvalue)
+            row["r_squared"]  = float(reg.rvalue ** 2)
+            row["p_value"]    = float(reg.pvalue)
+            logger.info(
+                "%-20s  slope=%.4f  R²=%.4f  n=%d",
+                loc.station_name, reg.slope, reg.rvalue ** 2, len(combined),
+            )
+        else:
+            model_s = pd.Series(model_arr)
+            obs_s   = pd.Series(obs_arr)
+            row["metric_value"] = float(metric_fn(model_s, obs_s))
+            logger.info(
+                "%-20s  %s=%.4f  n=%d",
+                loc.station_name, metric, row["metric_value"], len(combined),
+            )
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def _empty_metric_row(loc: ECLocation, metric_target: float = 1.0) -> dict:
+    return {
+        "station_name": loc.station_name,
+        "model_bpart": loc.model_bpart,
+        "obs_bpart": loc.obs_bpart,
+        "metric_value": np.nan,
+        "metric_target": metric_target,
+        "n_points": 0,
+    }
 
 
 def compute_ec_slopes(
@@ -1259,6 +1480,7 @@ def run_calibration_variation(
     dsm2_bin_dir: Optional[str] = None,
     envvar_overrides: Optional[dict] = None,
     config_to_copy: Optional[str | Path] = None,
+    copy_timeseries: bool = False,
 ) -> dict:
     """End-to-end calibration variation: set up, optionally run, compute slopes.
 
@@ -1331,6 +1553,7 @@ def run_calibration_variation(
         run_steps=run_steps,
         dsm2_bin_dir=dsm2_bin_dir,
         envvar_overrides=envvar_overrides,
+        copy_timeseries=copy_timeseries,
     )
 
     # Copy config snapshot immediately after the directory is created,
@@ -1381,7 +1604,7 @@ def load_yaml_config(yaml_path: str | Path) -> dict:
     execution.
     """
     yaml_path = Path(yaml_path)
-    with yaml_path.open("r") as fh:
+    with yaml_path.open("r", encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
 
     required_top = {"base_run", "variation", "observed_ec_dss", "ec_stations_csv"}
@@ -1491,6 +1714,7 @@ def run_from_yaml(
             run_steps=var.get("run_steps"),
             dsm2_bin_dir=cfg.get("dsm2_bin_dir"),
             envvar_overrides=var.get("envvar_overrides"),
+            copy_timeseries=var.get("copy_timeseries", False),
         )
         logger.info("Setup complete. Batch file: %s", info["batch_file"])
         return {"variation_info": info}
@@ -1518,6 +1742,7 @@ def run_from_yaml(
         dsm2_bin_dir=cfg.get("dsm2_bin_dir"),
         envvar_overrides=var.get("envvar_overrides"),
         config_to_copy=yaml_path,
+        copy_timeseries=var.get("copy_timeseries", False),
     )
 
     return result

@@ -37,6 +37,9 @@ class _LazyGroup(click.Group):
         for name in self.list_commands(ctx):
             if name in self._lazy_subcommands:
                 entry = self._lazy_subcommands[name]
+                hidden = entry[3] if len(entry) > 3 else False
+                if hidden:
+                    continue
                 help_text = entry[2] if len(entry) > 2 else ""
                 commands.append((name, help_text))
             else:
@@ -52,17 +55,17 @@ class _LazyGroup(click.Group):
     cls=_LazyGroup,
     context_settings=CONTEXT_SETTINGS,
     lazy_subcommands={
-        "output-ui":   ("dsm2ui.dsm2ui",                 "show_dsm2_output_ui",            "Show DSM2 model output UI"),
-        "tide-ui":     ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_ui",           "Show DSM2 tidefile UI"),
-        "xsect-ui":    ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_xsect_ui",     "Show DSM2 tidefile cross-section UI"),
+        "output-ui":   ("dsm2ui.dsm2ui",                 "show_dsm2_output_ui",            "Show DSM2 model output UI",              True),
+        "tide-ui":     ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_ui",           "Show DSM2 tidefile UI",                  True),
+        "xsect-ui":    ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_xsect_ui",     "Show DSM2 tidefile cross-section UI",    True),
         "dss-ui":      ("dsm2ui.dssui.dssui",            "show_dss_ui",                     "Show DSS file browser UI"),
-        "geo-heatmap": ("dsm2ui.calib.geoheatmap",       "show_metrics_geo_heatmap",        "Show calibration metrics geo heatmap"),
+        "geo-heatmap": ("dsm2ui.calib.geoheatmap",       "show_metrics_geo_heatmap",        "Show calibration metrics geo heatmap",        True),
         "geolocate":   ("pydsm.viz.dsm2gis",             "geolocate_output_locations",      "Geolocate DSM2 output locations"),
-        "dcd-map":     ("dsm2ui.deltacdui.deltacdui",    "dcd_geomap",                      "Show Delta CD geographic map"),
-        "dcd-nodes":   ("dsm2ui.deltacdui.deltacdui",    "show_deltacd_nodes_ui",           "Show Delta CD nodes UI"),
-        "calib-ui":    ("dsm2ui.calib.calibplotui",      "calib_plot_ui",                   "Launch interactive calibration plot viewer"),
+        "dcd-map":     ("dsm2ui.deltacdui.deltacdui",    "dcd_geomap",                      "Show Delta CD geographic map",           True),
+        "dcd-nodes":   ("dsm2ui.deltacdui.deltacdui",    "show_deltacd_nodes_ui",           "Show Delta CD nodes UI",                 True),
+        "calib-ui":    ("dsm2ui.calib.calibplotui",      "calib_plot_ui",                   "Launch interactive calibration plot viewer",  True),
         "ptm-animate": ("dsm2ui.ptm.ptm_animator",       "ptm_animate",                     "Animate PTM particle tracks"),
-        "dcd-ui":      ("dsm2ui.deltacdui.deltacduimgr", "show_deltacd_ui",                 "Show Delta CD UI"),
+        "dcd-ui":      ("dsm2ui.deltacdui.deltacduimgr", "show_deltacd_ui",                 "Show Delta CD UI",                       True),
     },
 )
 @click.version_option(
@@ -82,10 +85,176 @@ main.add_command(calib)
 
 
 # ---------------------------------------------------------------------------
+# ui group (output / tide / xsect)
+# ---------------------------------------------------------------------------
+
+@click.group(
+    name="ui",
+    cls=_LazyGroup,
+    context_settings=CONTEXT_SETTINGS,
+    lazy_subcommands={
+        "output": ("dsm2ui.dsm2ui", "show_dsm2_output_ui",         "Interactive map + time-series viewer for DSM2 output files"),
+        "tide":   ("dsm2ui.dsm2ui", "show_dsm2_tidefile_ui",        "Interactive map + time-series viewer for DSM2 HDF5 tidefiles"),
+        "xsect":  ("dsm2ui.dsm2ui", "show_dsm2_tidefile_xsect_ui",  "Cross-section viewer for a DSM2 tidefile"),
+    },
+)
+def ui_group():
+    """Launch DSM2 interactive viewers (output, tidefile, cross-sections)."""
+    pass
+
+
+main.add_command(ui_group)
+
+
+@ui_group.command(name="map")
+@click.argument(
+    "hydro_echo_file", type=click.Path(dir_okay=False, exists=True, readable=True)
+)
+@click.option(
+    "--channel", "flowline_shapefile",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Flowline shapefile — show channel map colored by Manning/dispersion/length.",
+)
+@click.option(
+    "--node", "node_shapefile",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Node shapefile — show node flow-split network map.",
+)
+@click.option(
+    "-c", "--colored-by",
+    type=click.Choice(["MANNING", "DISPERSION", "LENGTH", "ALL"], case_sensitive=False),
+    default="MANNING",
+    show_default=True,
+    help="Color channels by this attribute (channel map only).",
+)
+@click.option(
+    "--base-file", "-b",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Base hydro echo file for comparison overlay (channel map only).",
+)
+def ui_map(hydro_echo_file, flowline_shapefile, node_shapefile, colored_by, base_file):
+    """Show an interactive DSM2 network map.
+
+    Use --channel FLOWLINE_SHP for a channel map colored by Manning/dispersion/length.
+    Use --node NODE_SHP for a node flow-split map.
+    Both flags may be combined to show both maps together.
+    """
+    if not flowline_shapefile and not node_shapefile:
+        raise click.UsageError("Provide at least one of --channel or --node.")
+    import panel as pn
+    pn.extension()
+    panels = []
+    if flowline_shapefile:
+        from dsm2ui.dsm2ui import DSM2FlowlineMap
+        mapui = DSM2FlowlineMap(flowline_shapefile, hydro_echo_file, base_file)
+        if colored_by == "ALL":
+            panels.append(pn.Column(
+                *[mapui.show_map_colored_by_column(c.upper()) for c in ["MANNING", "DISPERSION", "LENGTH"]]
+            ))
+        else:
+            panels.append(mapui.show_map_colored_by_column(colored_by.upper()))
+    if node_shapefile:
+        from dsm2ui import dsm2ui as _dsm2ui
+        netmap = _dsm2ui.DSM2GraphNetworkMap(node_shapefile, hydro_echo_file)
+        panels.append(netmap.get_panel())
+    layout = panels[0] if len(panels) == 1 else pn.Column(*panels)
+    pn.serve(layout, websocket_max_message_size=100 * 1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# dcd group (map / nodes / ui)
+# ---------------------------------------------------------------------------
+
+@click.group(
+    name="dcd",
+    cls=_LazyGroup,
+    context_settings=CONTEXT_SETTINGS,
+    lazy_subcommands={
+        "map":   ("dsm2ui.deltacdui.deltacdui",    "dcd_geomap",         "Show Delta CD geographic map"),
+        "nodes": ("dsm2ui.deltacdui.deltacdui",    "show_deltacd_nodes_ui", "Show Delta CD nodes UI"),
+        "ui":    ("dsm2ui.deltacdui.deltacduimgr", "show_deltacd_ui",    "Full Delta CD netCDF data viewer"),
+    },
+)
+def dcd_group():
+    """Delta CD (crop model) viewers and utilities."""
+    pass
+
+
+main.add_command(dcd_group)
+
+
+# ---------------------------------------------------------------------------
+# datastore group (extract)
+# ---------------------------------------------------------------------------
+
+_PARAM_CHOICES = click.Choice(
+    ["elev", "predictions", "flow", "temp", "do", "ec", "ssc", "turbidity", "ph", "velocity", "cla"],
+    case_sensitive=False,
+)
+
+
+@click.group(name="datastore", context_settings=CONTEXT_SETTINGS)
+def datastore_group():
+    """DMS Datastore export utilities."""
+    pass
+
+
+@datastore_group.command(name="extract")
+@click.argument(
+    "datastore_dir",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True),
+)
+@click.argument(
+    "dssfile",
+    type=click.Path(dir_okay=False, exists=False, readable=False),
+)
+@click.argument("param", type=_PARAM_CHOICES)
+@click.option(
+    "--repo-level",
+    type=click.Choice(["screened"], case_sensitive=False),
+    default="screened",
+    show_default=True,
+    help="Data repository level to use.",
+)
+@click.option(
+    "--unit-name",
+    type=str,
+    default=None,
+    help="Override the unit name written to the DSS file.",
+)
+@click.option(
+    "--stations",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Also write a station CSV (station_id, lat, lon) to this file path.",
+)
+def datastore_extract(datastore_dir, dssfile, param, repo_level, unit_name, stations):
+    """Extract a parameter from a DMS Datastore into a DSS file.
+
+    Optionally write a station lat/lon CSV with --stations FILE.
+
+    Valid PARAM values: elev, predictions, flow, temp, do, ec, ssc, turbidity, ph, velocity, cla
+    """
+    from dsm2ui import datastore2dss
+    datastore2dss.read_from_datastore_write_to_dss(
+        datastore_dir, dssfile, param, repo_level, unit_name=unit_name
+    )
+    if stations:
+        datastore2dss.write_station_lat_lng(datastore_dir, stations, param, repo_level)
+        click.echo(f"Station CSV written to: {stations}")
+
+
+main.add_command(datastore_group)
+
+
+# ---------------------------------------------------------------------------
 # channel-map
 # ---------------------------------------------------------------------------
 
-@main.command(name="channel-map")
+@main.command(name="channel-map", hidden=True)
 @click.argument(
     "flowline_shapefile", type=click.Path(dir_okay=False, exists=True, readable=True)
 )
@@ -124,7 +293,7 @@ def map_channels_colored(flowline_shapefile, hydro_echo_file, colored_by, base_f
 # node-map
 # ---------------------------------------------------------------------------
 
-@main.command(name="node-map")
+@main.command(name="node-map", hidden=True)
 @click.argument(
     "node_shapefile", type=click.Path(dir_okay=False, exists=True, readable=True)
 )
@@ -146,7 +315,7 @@ def node_map_flow_splits(node_shapefile, hydro_echo_file):
 # postpro
 # ---------------------------------------------------------------------------
 
-@main.command(name="postpro")
+@main.command(name="postpro", hidden=True)
 @click.argument(
     "process_name",
     type=click.Choice(
@@ -212,7 +381,7 @@ def exec_dsm2_chan_mann_disp(
 # checklist
 # ---------------------------------------------------------------------------
 
-@main.command(name="checklist")
+@main.command(name="checklist", hidden=True)
 @click.argument(
     "process_name",
     type=click.Choice(["resample", "extract", "plot"], case_sensitive=False),
@@ -229,7 +398,7 @@ def exec_checklist_dsm2(process_name, json_config_file):
 # ds2dss
 # ---------------------------------------------------------------------------
 
-@main.command(name="ds2dss")
+@main.command(name="ds2dss", hidden=True)
 @click.argument(
     "datastore_dir",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True),
@@ -280,7 +449,7 @@ def datastore_to_dss(
 # ds2stations
 # ---------------------------------------------------------------------------
 
-@main.command(name="ds2stations")
+@main.command(name="ds2stations", hidden=True)
 @click.argument(
     "datastore_dir",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True),
@@ -352,7 +521,7 @@ def stations_output_file(
 # build-calib-config
 # ---------------------------------------------------------------------------
 
-@main.command(name="build-calib-config")
+@main.command(name="build-calib-config", hidden=True)
 @click.option(
     "--study",
     "-s",

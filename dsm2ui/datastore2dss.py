@@ -67,7 +67,7 @@ def read_from_datastore_write_to_dss(
     print("Done")
 
 
-def write_station_lat_lng(datastore_dir, station_file, param):
+def write_station_lat_lng(datastore_dir, station_file, param, repo_level="screened"):
     """
     Writes station_id, latitude, longitude to a csv file
 
@@ -79,9 +79,11 @@ def write_station_lat_lng(datastore_dir, station_file, param):
         Filename to write to
     param : str
         e.g one of "flow","elev", "ec", etc.
+    repo_level : str
+        default is screened
     """
     inventory_file, mtime = find_lastest_fname(
-        f"inventory_datasets_screened*.csv", datastore_dir
+        f"inventory_datasets_{repo_level}*.csv", datastore_dir
     )
     print("Using inventory file:", inventory_file)
     inventory = pd.read_csv(inventory_file)

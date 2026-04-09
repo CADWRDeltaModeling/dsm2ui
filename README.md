@@ -68,43 +68,47 @@ After installation the `dsm2ui` command is available. Run `dsm2ui --help` to see
 
 | Command | Arguments | Description |
 |---|---|---|
-| `output-ui` | `ECHO_FILES...` `[--channel-shapefile FILE]` | Interactive map + time-series viewer for DSM2 output files |
-| `tide-ui` | `TIDEFILES...` `[--channel-file FILE]` | Interactive map + time-series viewer for DSM2 HDF5 tidefiles |
-| `xsect-ui` | `TIDEFILE` | Cross-section viewer for a DSM2 tidefile |
+| `ui output` | `ECHO_FILES...` `[--channel-shapefile FILE]` | Interactive map + time-series viewer for DSM2 output files |
+| `ui tide` | `TIDEFILES...` `[--channel-file FILE]` | Interactive map + time-series viewer for DSM2 HDF5 tidefiles |
+| `ui xsect` | `TIDEFILE` | Cross-section viewer for a DSM2 tidefile |
+| `ui map` | `HYDRO_ECHO` `[--channel FLOWLINE_SHP]` `[--node NODE_SHP]` `[-c MANNING\|DISPERSION\|LENGTH\|ALL]` `[-b BASE_FILE]` | Interactive channel/node network map (at least one of `--channel` or `--node` required) |
 | `dss-ui` | *(args per dvue)* | Generic HEC-DSS file browser and plotter |
-| `calib-ui` | `CONFIG_FILE` `[--base_dir DIR]` | Calibration plot viewer driven by a JSON config |
+| `calib ui plot` | `CONFIG_FILE` `[--base_dir DIR]` | Calibration plot viewer driven by a YAML config |
+| `calib ui heatmap` | `SUMMARY_FILE STATION_LOC_FILE` `[--metric NMSE]` | Geographic heatmap of calibration metrics |
 
 ```bash
-dsm2ui output-ui hydro_echo.inp --channel-shapefile channels.geojson
-dsm2ui tide-ui hydro.tidefile qual.tidefile --channel-file channels.geojson
-dsm2ui xsect-ui hydro.tidefile
-dsm2ui calib-ui calib_config.json
-```
-
-### Channel mapping
-
-| Command | Arguments | Description |
-|---|---|---|
-| `channel-map` | `FLOWLINE_SHP HYDRO_ECHO` `[-c MANNING\|DISPERSION\|LENGTH\|ALL]` `[-b BASE_FILE]` | Map channels colored by Manning, dispersion, or length |
-| `node-map` | `NODE_SHP HYDRO_ECHO` | Node map showing flow splits |
-
-```bash
-dsm2ui channel-map flowlines.shp hydro_echo.inp -c MANNING
-dsm2ui node-map nodes.shp hydro_echo.inp
+dsm2ui ui output hydro_echo.inp --channel-shapefile channels.geojson
+dsm2ui ui tide hydro.tidefile qual.tidefile --channel-file channels.geojson
+dsm2ui ui xsect hydro.tidefile
+dsm2ui ui map hydro_echo.inp --channel flowlines.shp -c MANNING
+dsm2ui ui map hydro_echo.inp --node nodes.shp
+dsm2ui ui map hydro_echo.inp --channel flowlines.shp --node nodes.shp
+dsm2ui calib ui plot calib_ui.yml
+dsm2ui calib ui heatmap metrics_summary.csv station_locs.csv --metric NMSE
 ```
 
 ### Calibration & post-processing
 
 | Command | Arguments | Description |
 |---|---|---|
-| `postpro` | `PROCESS_NAME CONFIG_JSON` `[--dask]` | Run a DSM2 calibration post-processing step (`observed`, `model`, `plots`, `heatmaps`, `validation_bar_charts`, `copy_plot_files`) |
-| `checklist` | `PROCESS_NAME CONFIG_JSON` | Run a DSM2 checklist step (`resample`, `extract`, `plot`) |
-| `geo-heatmap` | `SUMMARY_FILE STATION_LOC_FILE` `[--metric NMSE]` | Geographic heatmap of calibration metrics (e.g. NMSE) |
+| `calib run` | `[--config PATH]` | Run a DSM2 calibration variation (setup, model run, EC slope metrics) |
+| `calib optimize` | `[--config PATH]` `[--dry-run]` | Gradient-based optimizer for DISPERSION/MANNING values |
+| `calib setup` | `[--output PATH]` `[--force]` | Write a template `calib_config.yml` |
+| `calib checklist` | `PROCESS_NAME CONFIG_JSON` | Run a DSM2 checklist step (`resample`, `extract`, `plot`) |
+| `calib postpro run` | `PROCESS_NAME CONFIG_JSON` `[--dask]` `[--skip-cached]` | Run a post-processing step (`observed`, `model`, `plots`, `heatmaps`, `validation_bar_charts`, `copy_plot_files`) |
+| `calib postpro setup` | `--study DIR` `--postprocessing DIR` `--output FILE` | Generate a calib-ui YAML config from study folders and postprocessing data |
+| `calib ui plot` | `CONFIG_FILE` `[--base_dir DIR]` | Interactive calibration plot viewer |
+| `calib ui heatmap` | `SUMMARY_FILE STATION_LOC_FILE` `[--metric NMSE]` | Geographic heatmap of calibration metrics |
 
 ```bash
-dsm2ui postpro plots calib_config.json
-dsm2ui checklist plot checklist_config.json
-dsm2ui geo-heatmap metrics_summary.csv station_locs.csv --metric NMSE
+dsm2ui calib setup
+dsm2ui calib run --config calib_config.yml
+dsm2ui calib optimize --config calib_config.yml
+dsm2ui calib checklist plot checklist_config.json
+dsm2ui calib postpro run plots calib_config.json
+dsm2ui calib postpro setup -s study1/ -s study2/ -p postprocessing/ -o calib_ui.yml
+dsm2ui calib ui plot calib_ui.yml
+dsm2ui calib ui heatmap metrics_summary.csv station_locs.csv --metric NMSE
 ```
 
 ### Channel geometry
@@ -125,27 +129,27 @@ dsm2ui stations-out stations.csv channels.geojson output_locs.txt
 
 | Command | Arguments | Description |
 |---|---|---|
-| `ds2dss` | `DATASTORE_DIR DSSFILE PARAM` `[--repo-level screened]` `[--unit-name NAME]` | Export a parameter from a DMS Datastore to a DSS file |
-| `ds2stations` | `DATASTORE_DIR STATIONFILE PARAM` | Write station IDs and lat/lon to a CSV from a Datastore |
+| `datastore extract` | `DATASTORE_DIR DSSFILE PARAM` `[--repo-level screened]` `[--unit-name NAME]` `[--stations FILE]` | Extract a parameter from a DMS Datastore into a DSS file; optionally write a station lat/lon CSV |
 
 Valid `PARAM` values: `elev`, `predictions`, `flow`, `temp`, `do`, `ec`, `ssc`, `turbidity`, `ph`, `velocity`, `cla`
 
 ```bash
-dsm2ui ds2dss /data/datastore output.dss ec
-dsm2ui ds2stations /data/datastore stations.csv ec
+dsm2ui datastore extract /data/datastore output.dss ec
+dsm2ui datastore extract /data/datastore output.dss ec --stations stations.csv
 ```
 
 ### DeltaCD (crop model)
 
 | Command | Arguments | Description |
 |---|---|---|
-| `dcd-ui` | `NC_FILES...` `[--geojson-file FILE]` | Full DeltaCD netCDF data viewer |
-| `dcd-nodes` | `NC_FILES...` `[--nodes-file FILE]` | DeltaCD nodes viewer |
-| `dcd-map` | *(see `--help`)* | Geographic map of DeltaCD data |
+| `dcd ui` | `NC_FILES...` `[--geojson-file FILE]` | Full DeltaCD netCDF data viewer |
+| `dcd nodes` | `NC_FILES...` `[--nodes-file FILE]` | DeltaCD nodes viewer |
+| `dcd map` | *(see `--help`)* | Geographic map of DeltaCD data |
 
 ```bash
-dsm2ui dcd-ui deltacd.nc --geojson-file delta.geojson
-dsm2ui dcd-nodes deltacd.nc
+dsm2ui dcd ui deltacd.nc --geojson-file delta.geojson
+dsm2ui dcd nodes deltacd.nc
+dsm2ui dcd map
 ```
 
 ### PTM

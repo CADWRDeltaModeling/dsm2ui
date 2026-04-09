@@ -20,15 +20,18 @@ Typical usage::
 
 Or via the CLI::
 
-    python run_optimize.py --config dsm2ui/calib/calib_config.yml
-    python run_optimize.py --config dsm2ui/calib/calib_config.yml --dry-run
+    dsm2ui calib optimize --config dsm2ui/calib/calib_config.yml
+    dsm2ui calib optimize --config dsm2ui/calib/calib_config.yml --dry-run
 """
 from __future__ import annotations
 
 import copy
 import csv
+import gc
 import logging
+import os
 import shutil
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -38,12 +41,14 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import yaml
-from scipy.optimize import minimize, Bounds
+from scipy.optimize import minimize, differential_evolution, Bounds
 
 from dsm2ui.calib.calib_run import (
     ChannelParamModification,
     ECLocation,
+    VALID_METRICS,
     _cfg_to_modifications,
+    compute_ec_metric,
     compute_ec_slopes,
     load_yaml_config,
     plot_from_yaml,
@@ -67,10 +72,11 @@ class EvalResult:
     eval_id: str
     params: Dict[str, float]          # group_name → value
     objective: float
-    slopes: Dict[str, float]          # station_name → slope (NaN if missing)
+    slopes: Dict[str, float]          # station_name → metric value (NaN if missing)
     success: bool
     elapsed_sec: float
     eval_dir: Path = field(default=None)
+    metric: str = field(default="slope")  # metric used for this eval
 
 
 @dataclass
@@ -103,27 +109,43 @@ def _build_weights(cfg: dict, locations: List[ECLocation]) -> Dict[str, float]:
     return weights
 
 
-def _objective_from_slopes(
-    slopes_df: pd.DataFrame,
+def _objective_from_metric(
+    metric_df: pd.DataFrame,
     weights: Dict[str, float],
 ) -> float:
-    """Compute weighted sum of squared (slope - 1)².
+    """Compute weighted sum of squared (metric_value - metric_target)².
 
-    Missing / NaN slopes are skipped; if ALL slopes are missing, returns a
+    Missing / NaN values are skipped; if ALL are missing, returns a
     large penalty so the optimizer is pushed away from that region.
     """
     total = 0.0
     n_valid = 0
-    for _, row in slopes_df.iterrows():
-        s = row.get("slope", float("nan"))
-        if pd.isna(s):
+    for _, row in metric_df.iterrows():
+        v = row.get("metric_value", float("nan"))
+        if pd.isna(v):
             continue
+        target = float(row.get("metric_target", 1.0))
         w = weights.get(row["station_name"], 1.0)
-        total += w * (s - 1.0) ** 2
+        total += w * (v - target) ** 2
         n_valid += 1
     if n_valid == 0:
         return float(len(weights)) * _PENALTY_PER_STATION * 4.0
     return total
+
+
+# Keep backward-compatible alias
+def _objective_from_slopes(
+    slopes_df: pd.DataFrame,
+    weights: Dict[str, float],
+) -> float:
+    """Backward-compatible wrapper — delegates to :func:`_objective_from_metric`."""
+    # Legacy DataFrames may use a 'slope' column; normalise on the fly.
+    if "metric_value" not in slopes_df.columns and "slope" in slopes_df.columns:
+        slopes_df = slopes_df.rename(columns={"slope": "metric_value"})
+        if "metric_target" not in slopes_df.columns:
+            slopes_df = slopes_df.copy()
+            slopes_df["metric_target"] = 1.0
+    return _objective_from_metric(slopes_df, weights)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,6 +188,16 @@ class ObjectiveEvaluator:
         self.run_steps = cfg["variation"].get("run_steps")
         self.dsm2_bin_dir = cfg.get("dsm2_bin_dir")
         self.envvar_overrides = cfg["variation"].get("envvar_overrides")
+        self.copy_timeseries: bool = bool(cfg["variation"].get("copy_timeseries", False))
+
+        # Objective metric — read from metrics.objective_metric, default "slope"
+        raw_metric = cfg.get("metrics", {}).get("objective_metric", "slope")
+        if raw_metric not in VALID_METRICS:
+            raise ValueError(
+                f"metrics.objective_metric={raw_metric!r} is not supported. "
+                f"Valid choices: {VALID_METRICS}"
+            )
+        self.metric: str = raw_metric
 
         active_stations = cfg.get("active_stations")
         self.locations: List[ECLocation] = read_ec_locations_csv(
@@ -207,6 +239,12 @@ class ObjectiveEvaluator:
         modifier = modifier_override or (self.cfg["variation"]["name"] + "_" + eval_id)
 
         log_file = eval_dir / "run.log"
+
+        # Write eval_params.yml and pre-pend a parameter header to run.log so
+        # that a tailing observer (or post-mortem diagnosis) can immediately see
+        # what this eval was running.
+        _write_eval_diagnostics(eval_dir, eval_id, params, modifications)
+
         try:
             variation_info = setup_variation(
                 base_study_dir=self.base_dir,
@@ -218,6 +256,7 @@ class ObjectiveEvaluator:
                 run_steps=self.run_steps,
                 dsm2_bin_dir=self.dsm2_bin_dir,
                 envvar_overrides=self.envvar_overrides,
+                copy_timeseries=self.copy_timeseries,
             )
             run_result = run_study(
                 variation_info["batch_file"],
@@ -254,12 +293,13 @@ class ObjectiveEvaluator:
             )
 
         var_dss = eval_dir / "output" / self.model_dss_pattern.format(modifier=modifier)
-        slopes_df = compute_ec_slopes(
-            var_dss, self.observed_dss, self.locations, self.timewindow
+        metric_df = compute_ec_metric(
+            var_dss, self.observed_dss, self.locations, self.timewindow,
+            metric=self.metric,
         )
 
-        obj = _objective_from_slopes(slopes_df, self.weights)
-        slopes_dict = dict(zip(slopes_df["station_name"], slopes_df["slope"].astype(float)))
+        obj = _objective_from_metric(metric_df, self.weights)
+        slopes_dict = dict(zip(metric_df["station_name"], metric_df["metric_value"].astype(float)))
         elapsed = time.monotonic() - t0
 
         return EvalResult(
@@ -270,6 +310,7 @@ class ObjectiveEvaluator:
             success=True,
             elapsed_sec=elapsed,
             eval_dir=eval_dir,
+            metric=self.metric,
         )
 
 
@@ -361,9 +402,9 @@ def parallel_forward_gradient(
                 res: EvalResult = fut.result()
                 if res.success:
                     grad[i] = sign * (res.objective - f_x) / h
-                    logger.debug(
-                        "  grad[%d] (%s) h=%.1f f_pert=%.6f → grad=%.6f",
-                        i, evaluator.group_names[i], h, res.objective, grad[i],
+                    logger.info(
+                        "  grad[%d] (%s) x=%.1f h=%.1f f_base=%.6f f_pert=%.6f → grad=%.6f",
+                        i, evaluator.group_names[i], x[i], h, f_x, res.objective, grad[i],
                     )
                 else:
                     logger.warning(
@@ -404,10 +445,114 @@ def _prepare_scratch_dirs(
     return base_dir, pert_dirs
 
 
-def _clear_eval_dir(d: Path) -> None:
-    """Remove all artefacts from a scratch eval dir, keeping the dir itself."""
+# ─────────────────────────────────────────────────────────────────────────────
+# Eval diagnostics
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _write_eval_diagnostics(
+    eval_dir: Path,
+    eval_id: str,
+    params: Dict[str, float],
+    modifications: List,
+) -> None:
+    """Write eval_params.yml and a parameter header to run.log.
+
+    Called before setup_variation/run_study so information is available even
+    if the model hangs or crashes before producing any output.
+    """
+    import datetime as _dt
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = _dt.datetime.now().isoformat(timespec="seconds")
+
+    # ── eval_params.yml ──────────────────────────────────────────────────────
+    params_data = {
+        "eval_id": eval_id,
+        "timestamp": timestamp,
+        "params": {name: float(val) for name, val in params.items()},
+    }
+    params_path = eval_dir / "eval_params.yml"
+    with params_path.open("w") as fh:
+        yaml.dump(params_data, fh, default_flow_style=False, sort_keys=False)
+
+    # ── run.log header ───────────────────────────────────────────────────────
+    # Written in append mode so subsequent DSM2 stdout is appended below.
+    # run_study() opens the file with "w" (truncate), so we need to write the
+    # header after setup_variation but the log is opened fresh each run —
+    # instead we write a companion header file that stays alongside run.log.
+    header_path = eval_dir / "run_header.txt"
+    lines = [
+        f"eval_id   : {eval_id}",
+        f"timestamp : {timestamp}",
+        "params    :",
+    ]
+    for name, val in params.items():
+        lines.append(f"  {name:<25} = {val:.4g}")
+    lines.append("-" * 60)
+    header_path.write_text("\n".join(lines) + "\n")
+    logger.debug("Wrote eval diagnostics to %s", eval_dir)
+
+
+def _clear_eval_dir(d: Path, retries: int = 6, delay: float = 2.0) -> None:
+    """Remove all artefacts from a scratch eval dir, keeping the dir itself.
+
+    Strategy (Windows-safe):
+    1. Force Python GC so pyhecdss/h5py finalizers release file handles.
+    2. Try a direct rmtree.
+    3. If still locked, *rename* the directory to a temp name — rename always
+       succeeds on Windows even when files are open (the OS just redirects the
+       directory entry).  Recreate the empty dir immediately so the next eval
+       can start without waiting.  Delete the renamed dir in a background
+       thread so the lock release is asynchronous.
+    """
     if d.exists():
-        shutil.rmtree(d)
+        gc.collect()
+        try:
+            shutil.rmtree(d)
+        except FileNotFoundError:
+            pass  # another thread already removed the dir — nothing to do
+        except PermissionError:
+            # Rename out of the way — succeeds even with open handles on Windows
+            tombstone = d.parent / (d.name + "_del_" + str(int(time.monotonic() * 1000)))
+            try:
+                os.rename(d, tombstone)
+                logger.debug(
+                    "_clear_eval_dir: renamed locked dir to %s; deleting in background.",
+                    tombstone.name,
+                )
+            except OSError as rename_exc:
+                logger.warning(
+                    "_clear_eval_dir: rename failed (%s) — falling back to retry loop.", rename_exc
+                )
+                tombstone = None
+                if not d.exists():
+                    # Already deleted by another thread — nothing left to do.
+                    pass
+                else:
+                    for attempt in range(retries):
+                        time.sleep(delay)
+                        try:
+                            shutil.rmtree(d)
+                            break
+                        except FileNotFoundError:
+                            break  # another thread already removed it — done
+                        except PermissionError:
+                            if attempt == retries - 1:
+                                logger.warning(
+                                    "_clear_eval_dir: could not remove %s after %d retries — proceeding.",
+                                    d, retries,
+                                )
+
+            if tombstone is not None:
+                def _bg_delete(p: Path) -> None:
+                    for _ in range(8):
+                        try:
+                            shutil.rmtree(p)
+                            return
+                        except PermissionError:
+                            time.sleep(3.0)
+                    logger.debug("_clear_eval_dir: background delete gave up on %s", p)
+                threading.Thread(target=_bg_delete, args=(tombstone,), daemon=True).start()
+
     d.mkdir(parents=True, exist_ok=True)
 
 
@@ -457,23 +602,41 @@ def _write_optimized_yaml(
 def optimize(
     yaml_path: str | Path,
     dry_run: bool = False,
+    skip_init: bool = False,
+    cfg_override: Optional[dict] = None,
+    active_groups: Optional[List[str]] = None,
 ) -> OptimizationResult:
-    """Run the L-BFGS-B optimizer against the YAML calibration config.
+    """Run the optimizer against the YAML calibration config.
 
     Parameters
     ----------
     yaml_path :
-        Path to ``calib_config.yml``.
+        Path to ``calib_config.yml``.  Still used for resolving relative paths
+        and as the basis for the written optimized YAML even when
+        *cfg_override* is supplied.
     dry_run :
         If ``True``, evaluate only the starting point and return without
         running the optimization loop.
+    skip_init :
+        Reuse existing ``eval_base`` DSS output instead of re-running DSM2
+        for the starting point.  Saves one model run when restarting.
+    cfg_override :
+        If provided, use this config dict instead of loading from *yaml_path*.
+        Intended for cascade use: the caller builds a stage-specific config
+        (with frozen group values and target stations already set) and passes
+        it in directly.
+    active_groups :
+        Optional list of channel-modification group names to include in the
+        optimizer's parameter vector.  All other groups are frozen at their
+        values in *cfg_override* (or the loaded config).  When ``None`` all
+        groups are optimized (existing behaviour).
 
     Returns
     -------
     :class:`OptimizationResult`
     """
     yaml_path = Path(yaml_path).resolve()
-    cfg = load_yaml_config(yaml_path)
+    cfg = cfg_override if cfg_override is not None else load_yaml_config(yaml_path)
 
     base = cfg["base_run"]
     var = cfg["variation"]
@@ -486,6 +649,7 @@ def optimize(
     improve_tol: float = float(opt_cfg.get("no_improve_tol", 0.005))
     h_rel: float = float(opt_cfg.get("finite_diff_rel_step", 0.05))
     max_workers: int = int(opt_cfg.get("max_workers", 4))
+    method: str = opt_cfg.get("method", "lbfgsb").lower().replace("-", "").replace("_", "")
 
     raw_bounds = opt_cfg.get("bounds", [50, 5000])
     if isinstance(raw_bounds, (list, tuple)) and len(raw_bounds) == 2:
@@ -521,7 +685,32 @@ def optimize(
             lo_hi = bounds_overrides[name]
             bounds_lo[i] = float(lo_hi[0])
             bounds_hi[i] = float(lo_hi[1])
+
+    # ── Active-groups subsetting (cascade support) ────────────────────────────
+    # Restricts the optimiser x-vector to a subset of groups.  Frozen groups
+    # stay at their m.value (set from cfg by ObjectiveEvaluator) and are still
+    # applied to every DSM2 run unchanged via _make_modifications fallback.
+    if active_groups is not None:
+        active_set = set(active_groups)
+        active_idx = [i for i, n in enumerate(group_names) if n in active_set]
+        if not active_idx:
+            raise ValueError(
+                f"active_groups {active_groups!r} matched none of the "
+                f"configured groups {group_names!r}"
+            )
+        group_names = [group_names[i] for i in active_idx]
+        x0        = x0[active_idx]
+        bounds_lo = bounds_lo[active_idx]
+        bounds_hi = bounds_hi[active_idx]
+        n_params  = len(group_names)
+
     scipy_bounds = Bounds(lb=bounds_lo, ub=bounds_hi)
+
+    # Coordinate scaling for L-BFGS-B: normalise x to [0, 1] so that the
+    # gradient magnitude is O(1e-2) rather than O(1e-6) per ft²/s.  Without
+    # this, L-BFGS-B (identity initial Hessian) takes steps of ~2e-6 ft²/s
+    # which round to zero in the inp file and stall the optimiser.
+    _scale = bounds_hi - bounds_lo   # shape (n_params,)
 
     # ── Scratch dirs ──────────────────────────────────────────────────────────
     # Place eval dirs at the same level as the base study (var_dir.parent, e.g.
@@ -554,16 +743,56 @@ def optimize(
         row = {"iter": iter_num, "objective": obj, "n_evals": n_evals[0],
                "elapsed_sec": time.monotonic() - total_t0}
         row.update({f"param_{name}": v for name, v in zip(group_names, x)})
-        row.update({f"slope_{sname}": sv for sname, sv in slopes.items()})
+        metric_prefix = evaluator.metric
+        row.update({f"{metric_prefix}_{sname}": sv for sname, sv in slopes.items()})
         history_rows.append(row)
 
     # ── Initial evaluation ────────────────────────────────────────────────────
-    logger.info("Evaluating starting point …")
-    _clear_eval_dir(base_scratch)
-    init_result = evaluator.evaluate(
-        dict(zip(group_names, x0)), base_scratch, eval_id="opt_init"
-    )
-    n_evals[0] += 1
+    # When --skip-init is used, try to reuse an existing eval_base output
+    # (e.g. from a previous --dry-run or an interrupted optimizer run).
+    _reused_init = False
+    if skip_init and base_scratch.exists():
+        pattern = evaluator.model_dss_pattern
+        dss_suffix = pattern.replace("{modifier}", "")
+        output_dir = base_scratch / "output"
+        existing_dss: Optional[Path] = None
+        if output_dir.exists():
+            for f in output_dir.glob(f"*{dss_suffix}"):
+                existing_dss = f
+                break
+        if existing_dss is not None and existing_dss.exists():
+            logger.info("--skip-init: reusing existing eval_base output: %s", existing_dss)
+            t0_skip = time.monotonic()
+            try:
+                metric_df = compute_ec_metric(
+                    existing_dss, evaluator.observed_dss,
+                    evaluator.locations, evaluator.timewindow,
+                    metric=evaluator.metric,
+                )
+                init_obj = _objective_from_metric(metric_df, evaluator.weights)
+                init_slopes = dict(zip(metric_df["station_name"], metric_df["metric_value"].astype(float)))
+                init_elapsed = time.monotonic() - t0_skip
+                init_result = EvalResult(
+                    eval_id="opt_init_reused",
+                    params=dict(zip(group_names, x0)),
+                    objective=init_obj,
+                    slopes=init_slopes,
+                    success=True,
+                    elapsed_sec=init_elapsed,
+                    eval_dir=base_scratch,
+                    metric=evaluator.metric,
+                )
+                _reused_init = True
+            except Exception as exc:
+                logger.warning("--skip-init: reuse failed (%s) — falling back to full eval.", exc)
+
+    if not _reused_init:
+        logger.info("Evaluating starting point …")
+        _clear_eval_dir(base_scratch)
+        init_result = evaluator.evaluate(
+            dict(zip(group_names, x0)), base_scratch, eval_id="opt_init"
+        )
+        n_evals[0] += 1
     initial_objective = init_result.objective
     best_obj[0] = initial_objective
     best_params_box[0] = dict(zip(group_names, x0))
@@ -593,8 +822,21 @@ def optimize(
     # ── scipy.optimize closure ────────────────────────────────────────────────
     converged_reason = ["max_iter"]
 
-    def _f_and_grad(x: np.ndarray) -> Tuple[float, np.ndarray]:
-        """Evaluate objective + gradient.  Called by L-BFGS-B on every iteration."""
+    def _f_and_grad(x_s: np.ndarray) -> Tuple[float, np.ndarray]:
+        """Evaluate objective + gradient.  Called by L-BFGS-B on every iteration.
+
+        *x_s* is the normalised parameter vector (∈ [0, 1] per component).
+        All model evaluations use the denormalised physical values (ft²/s).
+
+        NOTE: patience/improvement tracking is intentionally NOT done here.
+        L-BFGS-B calls this function at the gradient-evaluation point x_k which
+        is the SAME as the previous iterate, so comparing f(x_k) vs best_obj
+        always shows "no improvement" before any step is taken.  Patience is
+        tracked in _lbfgsb_callback, which is only called after a successful step.
+        """
+        # Denormalise: [0, 1] → physical ft²/s
+        x = bounds_lo + x_s * _scale
+
         iter_num = n_iters[0] + 1
         t_iter = time.monotonic()
 
@@ -614,7 +856,7 @@ def optimize(
         for d in pert_scratch_dirs:
             _clear_eval_dir(d)
 
-        grad = parallel_forward_gradient(
+        grad_phys = parallel_forward_gradient(
             x=x,
             f_x=f_x,
             x0_params=dict(zip(group_names, x)),
@@ -629,19 +871,115 @@ def optimize(
         )
         n_evals[0] += n_params  # conservative count (some may have failed)
 
+        # Chain-rule: transform gradient from physical (per ft²/s) to
+        # normalised space (per unit of [0, 1]) so L-BFGS-B step sizes are
+        # physically meaningful (hundreds of ft²/s rather than microunits).
+        grad_s = grad_phys * _scale
+
         elapsed = time.monotonic() - t_iter
         _log_iter(iter_num, x, f_x, elapsed)
         _record_history(iter_num, x, f_x, base_res.slopes)
         n_iters[0] = iter_num
 
-        # --- Improvement check ---
+        # Track best — but do NOT touch patience counter here
         if f_x < best_obj[0] - improve_tol:
             best_obj[0] = f_x
             best_params_box[0] = dict(zip(group_names, x))
-            patience_counter[0] = 0
             if base_res.success:
                 _copy_eval_to_best(base_scratch, best_dir, cfg, yaml_path, best_params_box[0])
             logger.info("  ★ new best: obj=%.6f", f_x)
+
+        if n_evals[0] >= max_model_runs:
+            converged_reason[0] = "max_model_runs"
+            raise StopIteration
+
+        return float(f_x), grad_s
+
+    def _lbfgsb_callback(xk: np.ndarray) -> None:
+        """Called by L-BFGS-B once per successful step (after the line search).
+
+        This is the right place for patience tracking — xk is the NEW parameter
+        vector after L-BFGS-B accepted a step, not the gradient-evaluation point.
+        xk is in normalised [0, 1] space; convert to physical for logging.
+        """
+        x_phys = bounds_lo + xk * _scale  # normalised → ft²/s for display
+        elapsed = time.monotonic() - total_t0
+        prev_best = _lbfgsb_callback._prev_best  # type: ignore[attr-defined]
+        if best_obj[0] < prev_best - improve_tol:
+            _lbfgsb_callback._prev_best = best_obj[0]  # type: ignore[attr-defined]
+            patience_counter[0] = 0
+            logger.info("  ★ improvement: obj=%.6f  params: %s",
+                        best_obj[0],
+                        "  ".join(f"{n}={v:.1f}" for n, v in zip(group_names, x_phys)))
+        else:
+            patience_counter[0] += 1
+            logger.info("  no improvement (%d/%d)  obj=%.6f  params: %s",
+                        patience_counter[0], patience, best_obj[0],
+                        "  ".join(f"{n}={v:.1f}" for n, v in zip(group_names, x_phys)))
+            if patience_counter[0] >= patience:
+                converged_reason[0] = "no_improve"
+                raise StopIteration
+
+    _lbfgsb_callback._prev_best = initial_objective  # type: ignore[attr-defined]
+
+    # ── Nelder-Mead objective (no gradient) ──────────────────────────────────
+    # NOTE: scipy calls _f_only for EVERY vertex evaluation, including the
+    # N extra probes needed to build the initial simplex.  Patience must NOT
+    # be checked here or it fires after the very first simplex initialisation
+    # (N non-improving evals = patience exhausted before real iteration begins).
+    # Patience tracking is done in _nm_callback, called once per NM iteration.
+    _nm_eval_slopes: Dict[str, Dict[str, float]] = {}   # keyed by tuple(x) for callback lookup
+
+    def _f_only(x: np.ndarray) -> float:
+        """Gradient-free objective for Nelder-Mead.  One model run per call."""
+        t_iter = time.monotonic()
+
+        _clear_eval_dir(base_scratch)
+        base_res = evaluator.evaluate(
+            dict(zip(group_names, x)), base_scratch, eval_id=f"opt_eval{n_evals[0] + 1}"
+        )
+        n_evals[0] += 1
+        f_x = base_res.objective
+
+        elapsed = time.monotonic() - t_iter
+        logger.debug("  eval %d: obj=%.6f (%.0fs)", n_evals[0], f_x, elapsed)
+        _record_history(n_evals[0], x, f_x, base_res.slopes)
+
+        # Track best seen (used by callback for best_dir copy)
+        if f_x < best_obj[0] - improve_tol:
+            best_obj[0] = f_x
+            best_params_box[0] = dict(zip(group_names, x))
+            if base_res.success:
+                _copy_eval_to_best(base_scratch, best_dir, cfg, yaml_path, best_params_box[0])
+            logger.info("  ★ new best (eval %d): obj=%.6f", n_evals[0], f_x)
+
+        # Store slopes keyed by param vector for callback to retrieve
+        _nm_eval_slopes[tuple(x.tolist())] = base_res.slopes
+
+        if n_evals[0] >= max_model_runs:
+            converged_reason[0] = "max_model_runs"
+            raise StopIteration
+
+        return float(f_x)
+
+    def _nm_callback(xk: np.ndarray) -> None:
+        """Called by scipy once per NM iteration (after a full simplex update).
+
+        This is the right place for patience tracking: each call represents a
+        completed iteration, not an individual vertex probe.
+        """
+        iter_num = n_iters[0] + 1
+        n_iters[0] = iter_num
+        elapsed = time.monotonic() - total_t0
+        _log_iter(iter_num, xk, best_obj[0], elapsed)
+
+        # Patience check: has the best objective improved since last iteration?
+        # best_obj[0] is updated inside _f_only whenever a new best is found.
+        # We compare against the value at the previous callback invocation.
+        prev_best = _nm_callback._prev_best  # type: ignore[attr-defined]
+        if best_obj[0] < prev_best - improve_tol:
+            _nm_callback._prev_best = best_obj[0]  # type: ignore[attr-defined]
+            patience_counter[0] = 0
         else:
             patience_counter[0] += 1
             logger.info("  no improvement (%d/%d)", patience_counter[0], patience)
@@ -649,31 +987,188 @@ def optimize(
                 converged_reason[0] = "no_improve"
                 raise StopIteration
 
-        if n_evals[0] >= max_model_runs:
-            converged_reason[0] = "max_model_runs"
-            raise StopIteration
+    _nm_callback._prev_best = initial_objective  # type: ignore[attr-defined]
 
-        return float(f_x), grad
+    # ── Differential Evolution parallel objective ─────────────────────────────
+    # diffevol evaluates popsize × N_params individuals per generation, all
+    # independent of each other — ideal for parallel DSM2 runs.
+    # Each worker gets its own numbered eval dir so runs never clobber each other.
+    _de_pool_lock = threading.Lock()
+    _de_free_dirs: List[Path] = []    # pool of available eval dirs
 
-    # ── Run L-BFGS-B ─────────────────────────────────────────────────────────
-    logger.info(
-        "Starting L-BFGS-B optimization: %d params, bounds [%.0f, %.0f], "
-        "max_iter=%d, max_model_runs=%d, max_workers=%d",
-        n_params, global_lo, global_hi, max_iter, max_model_runs, max_workers,
-    )
-    try:
-        scipy_result = minimize(
-            _f_and_grad,
-            x0,
-            method="L-BFGS-B",
-            jac=True,
-            bounds=scipy_bounds,
-            options={"maxiter": max_iter, "ftol": 1e-12, "gtol": 1e-8},
+    _de_worker_count = [0]   # guarded by _de_pool_lock
+
+    def _de_acquire_dir() -> Path:
+        """Get a free eval dir from the pool, creating one if needed."""
+        with _de_pool_lock:
+            if _de_free_dirs:
+                return _de_free_dirs.pop()
+            # Allocate a new numbered dir while holding the lock to avoid
+            # two concurrent threads computing the same index.
+            _de_worker_count[0] += 1
+            idx = _de_worker_count[0]
+        d = var_dir.parent / f"{eval_prefix}de_worker_{idx}"
+        _clear_eval_dir(d)
+        return d
+
+    def _de_release_dir(d: Path) -> None:
+        """Return an eval dir to the free pool (cleared for next use)."""
+        _clear_eval_dir(d)
+        with _de_pool_lock:
+            _de_free_dirs.append(d)
+
+    def _f_parallel(x: np.ndarray) -> float:
+        """Objective for differential_evolution. Each call runs in its own dir."""
+        eval_dir = _de_acquire_dir()
+        try:
+            t_iter = time.monotonic()
+            res = evaluator.evaluate(
+                dict(zip(group_names, x)), eval_dir, eval_id=f"opt_de{n_evals[0] + 1}"
+            )
+            n_evals[0] += 1
+            f_x = res.objective
+            elapsed = time.monotonic() - t_iter
+            logger.debug("  de eval %d: obj=%.6f (%.0fs)", n_evals[0], f_x, elapsed)
+            _record_history(n_evals[0], x, f_x, res.slopes)
+
+            if f_x < best_obj[0] - improve_tol:
+                best_obj[0] = f_x
+                best_params_box[0] = dict(zip(group_names, x))
+                if res.success:
+                    _copy_eval_to_best(eval_dir, best_dir, cfg, yaml_path, best_params_box[0])
+                logger.info("  ★ new best (de eval %d): obj=%.6f", n_evals[0], f_x)
+
+            if n_evals[0] >= max_model_runs:
+                converged_reason[0] = "max_model_runs"
+                raise StopIteration
+
+            return float(f_x)
+        finally:
+            _de_release_dir(eval_dir)
+
+    def _de_callback(xk: np.ndarray, convergence: float) -> bool:
+        """Called by differential_evolution after each generation."""
+        iter_num = n_iters[0] + 1
+        n_iters[0] = iter_num
+        elapsed = time.monotonic() - total_t0
+        _log_iter(iter_num, xk, best_obj[0], elapsed,
+                  f"convergence={convergence:.4f}")
+
+        prev_best = _de_callback._prev_best  # type: ignore[attr-defined]
+        if best_obj[0] < prev_best - improve_tol:
+            _de_callback._prev_best = best_obj[0]  # type: ignore[attr-defined]
+            patience_counter[0] = 0
+        else:
+            patience_counter[0] += 1
+            logger.info("  no improvement (%d/%d)", patience_counter[0], patience)
+            if patience_counter[0] >= patience:
+                converged_reason[0] = "no_improve"
+                return True  # returning True stops differential_evolution
+        return False
+
+    _de_callback._prev_best = initial_objective  # type: ignore[attr-defined]
+
+    # ── Run optimizer ─────────────────────────────────────────────────────────
+    if method == "neldermead":
+        logger.info(
+            "Starting Nelder-Mead optimization: %d params, bounds [%.0f, %.0f], "
+            "max_iter=%d, max_model_runs=%d (gradient-free, SEQUENTIAL — one run per eval)",
+            n_params, global_lo, global_hi, max_iter, max_model_runs,
         )
-        if converged_reason[0] == "max_iter":
-            converged_reason[0] = scipy_result.message
-    except StopIteration:
-        pass  # our early-stop signal
+        nm_bounds = list(zip(bounds_lo.tolist(), bounds_hi.tolist()))
+        try:
+            scipy_result = minimize(
+                _f_only,
+                x0,
+                method="Nelder-Mead",
+                bounds=nm_bounds,
+                callback=_nm_callback,
+                options={
+                    "maxiter": max_iter * n_params * 2,
+                    "xatol": 1.0,          # 1 ft²/s convergence tolerance
+                    "fatol": improve_tol * 0.1,
+                    "adaptive": True,      # better for high-dim simplices
+                },
+            )
+            if converged_reason[0] == "max_iter":
+                converged_reason[0] = scipy_result.message
+        except StopIteration:
+            pass
+    elif method == "diffevol":
+        # Differential evolution: each generation evaluates popsize×N individuals
+        # in parallel using a ThreadPoolExecutor.  Each member runs in its own
+        # eval dir so runs never clobber each other.
+        popsize = int(opt_cfg.get("de_popsize", 5))   # population multiplier
+        mutation = float(opt_cfg.get("de_mutation", 0.7))
+        recombination = float(opt_cfg.get("de_recombination", 0.9))
+        de_bounds = list(zip(bounds_lo.tolist(), bounds_hi.tolist()))
+        logger.info(
+            "Starting Differential Evolution: %d params, bounds [%.0f, %.0f], "
+            "popsize=%d (pop=%d), max_iter=%d, max_model_runs=%d, max_workers=%d (PARALLEL)",
+            n_params, global_lo, global_hi, popsize, popsize * n_params,
+            max_iter, max_model_runs, max_workers,
+        )
+        try:
+            # Use a ThreadPoolExecutor as the workers callable so that
+            # differential_evolution evaluates the population in parallel via
+            # threads rather than multiprocessing.  The multiprocessing backend
+            # (the default when workers is an integer > 1) requires the
+            # objective function to be picklable, but _f_parallel is a closure
+            # and cannot be pickled.  ThreadPoolExecutor.map is pickling-free
+            # and works correctly with closures.
+            with ThreadPoolExecutor(max_workers=max_workers) as de_executor:
+                scipy_result = differential_evolution(
+                    _f_parallel,
+                    de_bounds,
+                    maxiter=max_iter,
+                    popsize=popsize,
+                    mutation=mutation,
+                    recombination=recombination,
+                    init="latinhypercube",
+                    seed=42,
+                    callback=_de_callback,
+                    workers=de_executor.map,   # threads — closures can't be pickled for multiprocessing
+                    updating="deferred",       # required when workers is a map-callable
+                    tol=improve_tol * 0.1,
+                    x0=x0,                     # seed first member with starting point
+                )
+            if converged_reason[0] == "max_iter":
+                converged_reason[0] = scipy_result.message
+        except StopIteration:
+            pass
+        except RuntimeError as exc:
+            # PEP 479: StopIteration raised inside a generator (executor.map) is
+            # converted to RuntimeError.  This is our own early-stop signal from
+            # _f_parallel — treat it the same as a bare StopIteration.
+            if exc.__cause__ is not None and isinstance(exc.__cause__, StopIteration):
+                pass
+            else:
+                raise
+    else:
+        # L-BFGS-B (default)
+        logger.info(
+            "Starting L-BFGS-B optimization: %d params, bounds [%.0f, %.0f], "
+            "max_iter=%d, max_model_runs=%d, max_workers=%d",
+            n_params, global_lo, global_hi, max_iter, max_model_runs, max_workers,
+        )
+        x0_scaled = (x0 - bounds_lo) / _scale          # [0, 1] starting point
+        scipy_bounds_scaled = Bounds(
+            lb=np.zeros(n_params), ub=np.ones(n_params)
+        )
+        try:
+            scipy_result = minimize(
+                _f_and_grad,
+                x0_scaled,
+                method="L-BFGS-B",
+                jac=True,
+                bounds=scipy_bounds_scaled,
+                callback=_lbfgsb_callback,
+                options={"maxiter": max_iter, "ftol": 1e-12, "gtol": 1e-8},
+            )
+            if converged_reason[0] == "max_iter":
+                converged_reason[0] = scipy_result.message
+        except StopIteration:
+            pass  # our early-stop signal
 
     # ── Finalize ──────────────────────────────────────────────────────────────
     history_df = pd.DataFrame(history_rows)
@@ -740,8 +1235,19 @@ def _generate_best_plots(
     import tempfile as _tempfile
 
     cfg_tmp = copy.deepcopy(cfg)
-    # Point variation at eval_dir so plot_from_yaml finds the DSS files there
-    modifier = cfg_tmp["variation"]["name"] + "_" + "best"
+    # Detect the actual modifier from the DSS file written to eval_dir/output/.
+    # The evaluate() method names the DSS  <variation_name>_<eval_id>_qual.dss,
+    # e.g. confluence_dispersion_opt_init_qual.dss.  Using a hardcoded suffix
+    # would look for the wrong filename.
+    pattern = cfg_tmp.get("base_run", {}).get("model_dss_pattern", "{modifier}_qual.dss")
+    dss_suffix = pattern.replace("{modifier}", "")  # e.g. "_qual.dss"
+    output_dir = eval_dir / "output"
+    detected_modifier: Optional[str] = None
+    if output_dir.exists():
+        for f in output_dir.glob(f"*{dss_suffix}"):
+            detected_modifier = f.name[: -len(dss_suffix)]
+            break
+    modifier = detected_modifier or (cfg_tmp["variation"]["name"] + "_best")
     cfg_tmp["variation"]["study_dir"] = str(eval_dir).replace("\\", "/")
     cfg_tmp["variation"]["name"] = modifier
 

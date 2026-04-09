@@ -6,6 +6,7 @@ Commands
 --------
 dsm2ui calib run        Run a calibration variation (setup, execute, metrics, plots).
 dsm2ui calib optimize   Run the gradient-based DISPERSION/MANNING optimizer.
+dsm2ui calib cascade    Run a downstream-to-upstream cascading optimizer sequence.
 dsm2ui calib setup      Write a template calib_config.yml to get started.
 """
 from __future__ import annotations
@@ -167,6 +168,11 @@ def _setup_logging(log_level: str) -> logging.Logger:
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
+    # pyhecdss uses a broken logging.debug(..., (RuntimeWarning,)) call that
+    # crashes Python's log formatter when DEBUG is enabled.  Silence it.
+    logging.getLogger("pyhecdss").setLevel(logging.WARNING)
+    # matplotlib font_manager is extremely verbose at DEBUG level.
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
     return logging.getLogger("dsm2ui.calib")
 
 
@@ -204,7 +210,19 @@ def calib_run(config, setup_only, run_base, metrics_only, plot, log_file, log_le
         sys.exit(1)
 
     cfg = load_yaml_config(config_path)
+    var_name = cfg["variation"]["name"]
     var_dir = Path(cfg["variation"]["study_dir"])
+
+    log.info("Loading config  : %s", config_path)
+    log.info("Variation name  : %s", var_name)
+    log.info("Variation dir   : %s", var_dir)
+    log.info("Base modifier   : %s", cfg["base_run"]["modifier"])
+    log.info("Metrics window  : %s", cfg.get("metrics", {}).get("timewindow", "(full run)"))
+    n_mods = len(cfg["variation"]["channel_modifications"])
+    log.info("Channel groups  : %d", n_mods)
+    for entry in cfg["variation"]["channel_modifications"]:
+        log.info("  %-25s  %s = %.4g", entry.get("name", ""), entry["param"], entry["value"])
+    log.info("Run steps       : %s", cfg["variation"].get("run_steps", "all"))
 
     # -- Plot-only mode
     if plot and not metrics_only and not setup_only:
@@ -234,9 +252,7 @@ def calib_run(config, setup_only, run_base, metrics_only, plot, log_file, log_le
     if not metrics_only:
         _copy_config(config_path, var_dir, log)
 
-    if result.get("slopes_df") is not None:
-        df = result["slopes_df"]
-        log.info("\n%s", df.to_string(index=False))
+    _save_and_print_results(result, cfg, var_dir, log)
 
 
 def _copy_config(config_path: Path, var_dir: Path, log: logging.Logger) -> None:
@@ -248,6 +264,43 @@ def _copy_config(config_path: Path, var_dir: Path, log: logging.Logger) -> None:
     log.info("Config saved to study dir: %s", dest)
 
 
+def _save_and_print_results(result: dict, cfg: dict, var_dir: Path, log: logging.Logger) -> None:
+    """Print slope comparison table to console and write results.txt + CSV to var_dir."""
+    run_res = result.get("run_result")
+    if run_res is not None:
+        if run_res.returncode == 0:
+            log.info("DSM2 run finished successfully.")
+        else:
+            log.error("DSM2 run exited with code %d — check run.log for details.", run_res.returncode)
+
+    cmp = result.get("comparison")
+    if cmp is None:
+        return
+
+    var_name = cfg["variation"]["name"]
+    table_str = cmp.to_string(index=False, float_format="{:.4f}".format)
+    log.info("EC slope comparison  (base vs %s):", var_name)
+    print()
+    print(table_str)
+    print()
+
+    improved = (cmp["delta_slope"].abs() > 0.01).sum()
+    summary_line = f"Stations with |delta_slope| > 0.01: {improved} / {len(cmp)}"
+    log.info(summary_line)
+
+    out_csv = var_dir / f"slopes_{var_name}.csv"
+    cmp.to_csv(out_csv, index=False, float_format="%.6f")
+    log.info("CSV saved to: %s", out_csv)
+
+    out_txt = var_dir / "results.txt"
+    with out_txt.open("w") as fh:
+        fh.write(f"EC slope comparison  (base vs {var_name})\n")
+        fh.write("=" * 60 + "\n")
+        fh.write(table_str + "\n\n")
+        fh.write(summary_line + "\n")
+    log.info("Results saved to: %s", out_txt)
+
+
 # ---------------------------------------------------------------------------
 # calib optimize
 # ---------------------------------------------------------------------------
@@ -255,8 +308,9 @@ def _copy_config(config_path: Path, var_dir: Path, log: logging.Logger) -> None:
 @calib.command(name="optimize")
 @_config_option
 @click.option("--dry-run", is_flag=True, help="Evaluate starting point only; skip the optimization loop.")
+@click.option("--skip-init", is_flag=True, help="Reuse existing eval_base output instead of re-running the starting point (e.g. after --dry-run or a crash).")
 @_log_level_option
-def calib_optimize(config, dry_run, log_level):
+def calib_optimize(config, dry_run, skip_init, log_level):
     """Optimize DSM2 DISPERSION/MANNING values to minimise EC slope deviation from 1.0."""
     log = _setup_logging(log_level)
 
@@ -284,10 +338,10 @@ def calib_optimize(config, dry_run, log_level):
     log.info("Max iter    : %d", opt_cfg.get("max_iter", 20))
     log.info("Max workers : %d", opt_cfg.get("max_workers", 4))
     log.info("Bounds      : %s", opt_cfg.get("bounds", [50, 5000]))
-    log.info("Mode        : %s", "--dry-run" if dry_run else "full optimization")
+    log.info("Mode        : %s", "--dry-run" if dry_run else ("--skip-init + optimize" if skip_init else "full optimization"))
     log.info("=" * 60)
 
-    result: OptimizationResult = optimize(config_path, dry_run=dry_run)
+    result: OptimizationResult = optimize(config_path, dry_run=dry_run, skip_init=skip_init)
 
     _print_optimize_summary(result, group_names, station_names)
 
@@ -338,6 +392,94 @@ def _print_optimize_summary(result, group_names: list, station_names: list) -> N
 
 
 # ---------------------------------------------------------------------------
+# calib cascade
+# ---------------------------------------------------------------------------
+
+@calib.command(name="cascade")
+@click.option(
+    "--config", "-c",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to the cascade meta-config YAML (calib_meta_*.yml).",
+)
+@click.option("--resume", is_flag=True,
+              help="Skip completed stages found in cascade_checkpoint.yml.")
+@click.option("--dry-run", is_flag=True,
+              help="Evaluate starting point only in each stage; no optimisation loop.")
+@click.option("--skip-init", is_flag=True,
+              help="Reuse existing eval_base DSS output for each stage's starting point.")
+@_log_level_option
+def calib_cascade(config, resume, dry_run, skip_init, log_level):
+    """Run a downstream-to-upstream cascading optimisation sequence.
+
+    Each stage frees only the channel groups closest to the target station(s)
+    for that stage, freezing all other groups at the best values from the
+    previous stage.  Results are checkpointed after every stage; use --resume
+    to continue an interrupted run.
+    """
+    log = _setup_logging(log_level)
+
+    from dsm2ui.calib.calib_cascade import load_cascade_config, run_cascade
+
+    meta_path = Path(config)
+    cascade_cfg, base_cfg, base_config_path = load_cascade_config(meta_path)
+
+    stages = cascade_cfg.get("stages", [])
+    output_dir = cascade_cfg.get(
+        "output_dir",
+        str(meta_path.parent / (meta_path.stem + "_output")),
+    )
+
+    log.info("=" * 60)
+    log.info("DSM2 Cascade Optimizer")
+    log.info("Meta config  : %s", meta_path)
+    log.info("Base config  : %s", base_config_path)
+    log.info("Output dir   : %s", output_dir)
+    log.info("Stages       : %d", len(stages))
+    for s in stages:
+        log.info(
+            "  [%d] %-30s  params=%s  targets=%s",
+            s["id"], s["label"], s["active_params"], s["target_stations"],
+        )
+    log.info(
+        "Mode         : %s%s%s",
+        "--dry-run " if dry_run else "",
+        "--resume " if resume else "",
+        "--skip-init" if skip_init else "full",
+    )
+    log.info("=" * 60)
+
+    result = run_cascade(
+        meta_path,
+        resume=resume,
+        dry_run=dry_run,
+        skip_init=skip_init,
+    )
+
+    print()
+    print("=" * 72)
+    print("CASCADE SUMMARY")
+    print("=" * 72)
+    print(f"  {'Stage':<5}  {'Label':<30}  {'Obj-init':>10}  {'Obj-best':>10}  "
+          f"{'Evals':>6}  {'Elapsed':>8}")
+    print("  " + "-" * 68)
+    for row in result.stages:
+        print(
+            f"  {row['id']:<5}  {row['label']:<30}  "
+            f"{row['initial_objective']:>10.6f}  {row['best_objective']:>10.6f}  "
+            f"{row['n_evals']:>6}  {row['elapsed_sec']:>7.0f}s"
+        )
+    print()
+    print("  Final parameter values:")
+    for name, val in result.final_params.items():
+        print(f"    {name:<25} = {val:.1f}")
+    print()
+    print(f"  Summary CSV : {result.output_dir / 'cascade_summary.csv'}")
+    print(f"  Checkpoint  : {result.output_dir / 'cascade_checkpoint.yml'}")
+    print("=" * 72)
+
+
+# ---------------------------------------------------------------------------
 # calib init
 # ---------------------------------------------------------------------------
 
@@ -363,4 +505,147 @@ def calib_setup(output, force):
     click.echo("Edit the paths and channel groups, then run:")
     click.echo(f"  dsm2ui calib run      --config {dest}")
     click.echo(f"  dsm2ui calib optimize --config {dest}")
+
+
+# ---------------------------------------------------------------------------
+# calib checklist
+# ---------------------------------------------------------------------------
+
+@calib.command(name="checklist")
+@click.argument(
+    "process_name",
+    type=click.Choice(["resample", "extract", "plot"], case_sensitive=False),
+    default="",
+)
+@click.argument("json_config_file")
+def calib_checklist(process_name, json_config_file):
+    """Run a DSM2 calibration checklist step (resample, extract, or plot)."""
+    from dsm2ui.calib import checklist_dsm2
+    checklist_dsm2.run_checklist(process_name, json_config_file)
+
+
+# ---------------------------------------------------------------------------
+# calib postpro group
+# ---------------------------------------------------------------------------
+
+@click.group(name="postpro")
+def calib_postpro():
+    """Post-process DSM2 calibration output (observed, model, plots, heatmaps, etc.)."""
+    pass
+
+
+@calib_postpro.command(name="run")
+@click.argument(
+    "process_name",
+    type=click.Choice(
+        [
+            "observed",
+            "model",
+            "plots",
+            "heatmaps",
+            "validation_bar_charts",
+            "copy_plot_files",
+        ],
+        case_sensitive=False,
+    ),
+    default="",
+)
+@click.argument("json_config_file")
+@click.option("--dask/--no-dask", default=False)
+@click.option(
+    "--skip-cached",
+    is_flag=True,
+    default=False,
+    help="Skip locations already present in the post-processing cache (model only).",
+)
+def calib_postpro_run(process_name, json_config_file, dask, skip_cached):
+    """Run a DSM2 post-processing step (observed, model, plots, heatmaps, validation_bar_charts, or copy_plot_files)."""
+    from dsm2ui.calib import postpro_dsm2
+    postpro_dsm2.run_process(process_name, json_config_file, dask, skip_if_cached=skip_cached)
+
+
+@calib_postpro.command(name="setup")
+@click.option(
+    "--study",
+    "-s",
+    "study_folders",
+    multiple=True,
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Study folder path (repeat -s for multiple studies).",
+)
+@click.option(
+    "--postprocessing",
+    "-p",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Path to the postprocessing folder (contains location_info/ and observed_data/).",
+)
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Output YAML config file path.",
+)
+@click.option(
+    "--module",
+    "-m",
+    type=click.Choice(["hydro", "qual", "gtm"], case_sensitive=False),
+    default="hydro",
+    show_default=True,
+    help="DSM2 module whose DSS output to reference.",
+)
+@click.option(
+    "--output-folder",
+    default="./plots/",
+    show_default=True,
+    help="Plot output folder written into the YAML options_dict.",
+)
+def calib_postpro_setup(study_folders, postprocessing, output, module, output_folder):
+    """Generate a calib-ui YAML config from study folders and postprocessing data."""
+    from dsm2ui.calib import calib_config_builder
+    result = calib_config_builder.build_calib_config(
+        study_folders=list(study_folders),
+        postprocessing_folder=postprocessing,
+        output_file=output,
+        module=module,
+        output_folder=output_folder,
+    )
+    click.echo(f"Config written to: {result}")
+
+
+calib.add_command(calib_postpro)
+
+
+# ---------------------------------------------------------------------------
+# calib ui group
+# ---------------------------------------------------------------------------
+
+@click.group(name="ui")
+def calib_ui():
+    """Launch interactive calibration UI viewers."""
+    pass
+
+
+@calib_ui.command(name="plot")
+@click.argument("config_file", type=click.Path(exists=True, readable=True))
+@click.option("--base_dir", required=False, help="Base directory for config file")
+def calib_ui_plot(config_file, base_dir=None):
+    """Launch the interactive calibration plot viewer."""
+    from dsm2ui.calib.calibplotui import calib_plot_ui
+    calib_plot_ui.callback(config_file=config_file, base_dir=base_dir)
+
+
+@calib_ui.command(name="heatmap")
+@click.argument("summary_file", type=click.Path(exists=True, readable=True))
+@click.argument("station_location_file", type=click.Path(exists=True, readable=True))
+@click.option("--metric", default="NMSE", help="Name of metric column.", show_default=True)
+def calib_ui_heatmap(summary_file, station_location_file, metric):
+    """Show a geographic heatmap of calibration metrics."""
+    from dsm2ui.calib.geoheatmap import show_metrics_geo_heatmap
+    show_metrics_geo_heatmap.callback(summary_file=summary_file, station_location_file=station_location_file, metric=metric)
+
+
+calib.add_command(calib_ui)
 
