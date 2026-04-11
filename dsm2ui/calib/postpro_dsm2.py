@@ -767,7 +767,7 @@ def run_process(process_name, config_filename, use_dask, skip_if_cached=False):
             config_data = json.load(f)
     elif ".yml" in config_filename or ".yaml" in config_filename:
         # using yaml instead
-        with open(config_filename, "r") as stream:
+        with open(config_filename, "r", encoding="utf-8") as stream:
             try:
                 config_data = yaml.safe_load(stream)
             except yaml.YAMLError as exc:

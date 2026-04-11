@@ -103,7 +103,7 @@ class CalibPlotUIManager(DataUIManager):
         self.polygon_bounds = polygon_bounds
         super().__init__(**kwargs)
         self.config_file = config_file
-        with open(self.config_file, "r") as file:
+        with open(self.config_file, "r", encoding="utf-8") as file:
             config = yaml.safe_load(file)
         # substitue the base_dir in location_files_dict, observed_files_dict, study_files_dict
         if base_dir is None:
