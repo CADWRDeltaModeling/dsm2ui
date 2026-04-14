@@ -48,6 +48,7 @@ from dsm2ui.calib.calib_run import (
     ECLocation,
     VALID_METRICS,
     _cfg_to_modifications,
+    _resolve_channel_inp_source,
     compute_ec_metric,
     compute_ec_slopes,
     load_yaml_config,
@@ -60,6 +61,16 @@ from dsm2ui.calib.calib_run import (
 logger = logging.getLogger(__name__)
 
 _PENALTY_PER_STATION = 1.0   # added to objective when a station slope is missing
+
+
+def _write_progress_csv(path: Path, rows: list) -> None:
+    """Overwrite *path* with current history rows (atomic-ish write)."""
+    if not rows:
+        return
+    tmp = path.with_suffix(".tmp")
+    df = pd.DataFrame(rows)
+    df.to_csv(tmp, index=False, float_format="%.6f")
+    tmp.replace(path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,11 +191,10 @@ class ObjectiveEvaluator:
         )
         self.observed_dss = Path(cfg["observed_ec_dss"])
         self.timewindow = cfg.get("metrics", {}).get("timewindow")
-        self.channel_inp_source = base.get(
-            "channel_inp_source",
-            str(base_dir.parent.parent / "common_input" / "channel_std_delta_grid.inp"),
-        )
         self.channel_inp_name = base.get("channel_inp_name", "channel_std_delta_grid.inp")
+        self.channel_inp_source = _resolve_channel_inp_source(
+            base_dir, self.channel_inp_name, explicit=base.get("channel_inp_source")
+        )
         self.run_steps = cfg["variation"].get("run_steps")
         self.dsm2_bin_dir = cfg.get("dsm2_bin_dir")
         self.envvar_overrides = cfg["variation"].get("envvar_overrides")
@@ -237,6 +247,16 @@ class ObjectiveEvaluator:
         t0 = time.monotonic()
         modifications = self._make_modifications(params)
         modifier = modifier_override or (self.cfg["variation"]["name"] + "_" + eval_id)
+        # DSM2 Fortran SCALAR buffers overflow when DSM2MODIFIER expands the
+        # title line beyond ~32 chars.  Truncate with a warning so runs never
+        # fail silently due to a long study/eval name.
+        _MAX_MODIFIER = 32
+        if len(modifier) > _MAX_MODIFIER:
+            modifier = modifier[:_MAX_MODIFIER]
+            logger.warning(
+                "modifier truncated to %d chars: %r (eval_dir=%s)",
+                _MAX_MODIFIER, modifier, eval_dir.name,
+            )
 
         log_file = eval_dir / "run.log"
 
@@ -605,6 +625,7 @@ def optimize(
     skip_init: bool = False,
     cfg_override: Optional[dict] = None,
     active_groups: Optional[List[str]] = None,
+    progress_csv: Optional[Path] = None,
 ) -> OptimizationResult:
     """Run the optimizer against the YAML calibration config.
 
@@ -746,6 +767,11 @@ def optimize(
         metric_prefix = evaluator.metric
         row.update({f"{metric_prefix}_{sname}": sv for sname, sv in slopes.items()})
         history_rows.append(row)
+        if progress_csv is not None:
+            try:
+                _write_progress_csv(progress_csv, history_rows)
+            except Exception:
+                pass  # never crash the optimizer due to I/O
 
     # ── Initial evaluation ────────────────────────────────────────────────────
     # When --skip-init is used, try to reuse an existing eval_base output
@@ -1144,6 +1170,162 @@ def optimize(
                 pass
             else:
                 raise
+    elif method == "sweep":
+        # ── Coordinate sweep ──────────────────────────────────────────────────
+        # For each round, sweep each parameter independently with K parallel
+        # DSM2 runs (holding all others at their current best value), pick the
+        # best sample, then optionally zoom the search range for the next round.
+        # Pure parallel, no gradients, diagnostic — ideal for 1–8 parameters
+        # and expensive model evaluations.
+        sweep_k: int = int(opt_cfg.get("sweep_points_per_param", max_workers))
+        zoom: float = float(opt_cfg.get("sweep_zoom_factor", 0.5))
+
+        sweep_lo = bounds_lo.copy().astype(float)
+        sweep_hi = bounds_hi.copy().astype(float)
+        current_x = x0.copy().astype(float)
+        current_obj = initial_objective
+
+        logger.info(
+            "Starting coordinate sweep: %d params, %d points/param/round, "
+            "zoom=%.2f, max_iter=%d, max_model_runs=%d, max_workers=%d",
+            n_params, sweep_k, zoom, max_iter, max_model_runs, max_workers,
+        )
+
+        # Allocate K eval dirs per parameter (reused each round)
+        sweep_eval_dirs: List[List[Path]] = [
+            [var_dir.parent / f"{eval_prefix}sweep_p{i}_s{k}" for k in range(sweep_k)]
+            for i in range(n_params)
+        ]
+        for dirs in sweep_eval_dirs:
+            for d in dirs:
+                d.mkdir(parents=True, exist_ok=True)
+
+        try:
+            for round_num in range(1, max_iter + 1):
+                round_improved = False
+
+                for i, param_name in enumerate(group_names):
+                    if n_evals[0] >= max_model_runs:
+                        converged_reason[0] = "max_model_runs"
+                        raise StopIteration
+
+                    # Sample K points uniformly across current search range,
+                    # forcing one sample to exactly equal the current best.
+                    sample_vals = np.linspace(sweep_lo[i], sweep_hi[i], sweep_k)
+                    nearest_idx = int(np.argmin(np.abs(sample_vals - current_x[i])))
+                    sample_vals[nearest_idx] = current_x[i]
+
+                    logger.info(
+                        "  sweep round %d param [%d] %s: %d pts in [%.1f, %.1f]",
+                        round_num, i, param_name, sweep_k, sweep_lo[i], sweep_hi[i],
+                    )
+
+                    for d in sweep_eval_dirs[i]:
+                        _clear_eval_dir(d)
+
+                    param_dicts = []
+                    for k, sv in enumerate(sample_vals):
+                        px = current_x.copy()
+                        px[i] = sv
+                        param_dicts.append(dict(zip(group_names, px)))
+
+                    sweep_results: Dict[int, EvalResult] = {}
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures_map = {
+                            executor.submit(
+                                evaluator.evaluate,
+                                param_dicts[k],
+                                sweep_eval_dirs[i][k],
+                                f"opt_r{round_num}_p{i}_s{k}",
+                            ): k
+                            for k in range(sweep_k)
+                        }
+                        for fut in as_completed(futures_map):
+                            k = futures_map[fut]
+                            try:
+                                sweep_results[k] = fut.result()
+                            except Exception as exc:
+                                logger.warning("  sweep p%d s%d raised: %s", i, k, exc)
+                    n_evals[0] += sweep_k
+
+                    # Log all sample results
+                    for k, sv in enumerate(sample_vals):
+                        res = sweep_results.get(k)
+                        if res and res.success:
+                            logger.info(
+                                "    s%d  %s=%.1f  obj=%.6f",
+                                k, param_name, sv, res.objective,
+                            )
+                        else:
+                            logger.info("    s%d  %s=%.1f  FAILED", k, param_name, sv)
+
+                    # Best successful sample
+                    best_k = min(
+                        (k for k in sweep_results if sweep_results[k].success),
+                        key=lambda k: sweep_results[k].objective,
+                        default=None,
+                    )
+                    if best_k is None:
+                        logger.warning("  all samples failed for %s — keeping current value", param_name)
+                        continue
+
+                    best_res = sweep_results[best_k]
+                    best_val = sample_vals[best_k]
+
+                    if best_res.objective < current_obj - improve_tol:
+                        logger.info(
+                            "  ★ param %s: %.1f → %.1f  obj %.6f → %.6f",
+                            param_name, current_x[i], best_val,
+                            current_obj, best_res.objective,
+                        )
+                        current_x[i] = best_val
+                        current_obj = best_res.objective
+                        round_improved = True
+
+                        if best_res.objective < best_obj[0] - improve_tol:
+                            best_obj[0] = best_res.objective
+                            best_params_box[0] = dict(zip(group_names, current_x))
+                            _copy_eval_to_best(
+                                sweep_eval_dirs[i][best_k], best_dir,
+                                cfg, yaml_path, best_params_box[0],
+                            )
+                    else:
+                        logger.info(
+                            "  param %s: no improvement (best obj=%.6f, current=%.6f)",
+                            param_name, best_res.objective, current_obj,
+                        )
+
+                    _record_history(round_num, current_x, current_obj, best_res.slopes)
+
+                    # Zoom: contract the search range around best value
+                    if zoom < 1.0:
+                        half = (sweep_hi[i] - sweep_lo[i]) * zoom / 2.0
+                        sweep_lo[i] = max(bounds_lo[i], best_val - half)
+                        sweep_hi[i] = min(bounds_hi[i], best_val + half)
+
+                elapsed = time.monotonic() - total_t0
+                _log_iter(round_num, current_x, current_obj, elapsed)
+                n_iters[0] = round_num
+
+                if not round_improved:
+                    patience_counter[0] += 1
+                    logger.info(
+                        "  no improvement this round (%d/%d)",
+                        patience_counter[0], patience,
+                    )
+                    if patience_counter[0] >= patience:
+                        converged_reason[0] = "no_improve"
+                        raise StopIteration
+                else:
+                    patience_counter[0] = 0
+
+                if n_evals[0] >= max_model_runs:
+                    converged_reason[0] = "max_model_runs"
+                    raise StopIteration
+
+        except StopIteration:
+            pass
+
     else:
         # L-BFGS-B (default)
         logger.info(

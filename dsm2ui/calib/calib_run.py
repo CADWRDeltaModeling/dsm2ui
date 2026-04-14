@@ -474,20 +474,30 @@ def _patch_dsm2inputdir(config_inp: Path, new_inputdir: str) -> None:
     logger.info("Set DSM2INPUTDIR=%s in %s", new_inputdir, config_inp.name)
 
 
-def _copy_timeseries_dss(config_inp: Path, var_dir: Path) -> None:
+def _copy_timeseries_dss(
+    config_inp: Path,
+    var_dir: Path,
+    base_dir: Optional[Path] = None,
+) -> None:
     """Copy all DSS timeseries files into a local directory and redirect TSINPUTDIR.
 
-    Reads the current ``TSINPUTDIR`` ENVVAR from *config_inp*, resolves it
-    relative to *var_dir* (the working directory DSM2 runs from), copies every
-    ``*.dss`` file found there into ``<var_dir>/local_timeseries/``, and then
-    patches ``TSINPUTDIR`` in *config_inp* to point at the new local copy.
+    Reads the current ``TSINPUTDIR`` ENVVAR from *config_inp*, resolves the
+    source directory, copies every ``*.dss`` file found there into
+    ``<var_dir>/local_timeseries/``, and patches ``TSINPUTDIR`` in *config_inp*
+    to point at the new absolute local path.
 
     This eliminates the DSS exclusive-lock contention that occurs when multiple
     parallel DSM2 runs simultaneously open the same shared timeseries DSS files.
 
+    Resolution order for a relative ``TSINPUTDIR`` value:
+    1. Relative to *base_dir* (the original base study dir — where the path
+       was authored).  This is robust when eval dirs are nested at a
+       different depth than the base study.
+    2. Relative to *var_dir* (legacy fallback when *base_dir* is not given).
+
     If ``TSINPUTDIR`` is not found, contains an unresolved ``${...}``
-    substitution, or the resolved directory does not exist, a warning is logged
-    and the function returns without modifying *config_inp*.
+    substitution, or the resolved directory does not exist in either location,
+    a warning is logged and the function returns without modifying *config_inp*.
     """
     text = config_inp.read_text()
     m = re.search(r"(?m)^TSINPUTDIR\s+(\S+)", text)
@@ -501,12 +511,27 @@ def _copy_timeseries_dss(config_inp: Path, var_dir: Path) -> None:
             raw_value,
         )
         return
-    # Resolve relative to var_dir (DSM2 working directory)
-    src_dir = (var_dir / raw_value).resolve()
-    if not src_dir.is_dir():
+
+    # Resolve the source directory.  For relative paths, try base_dir first
+    # (the canonical origin of the path), then fall back to var_dir.
+    src_dir: Optional[Path] = None
+    raw_path = Path(raw_value)
+    if raw_path.is_absolute():
+        candidate = raw_path.resolve()
+        if candidate.is_dir():
+            src_dir = candidate
+    else:
+        for anchor in ([base_dir] if base_dir else []) + [var_dir]:
+            candidate = (anchor / raw_value).resolve()
+            if candidate.is_dir():
+                src_dir = candidate
+                break
+
+    if src_dir is None:
         logger.warning(
-            "TSINPUTDIR resolved to %s which does not exist — timeseries copy skipped.",
-            src_dir,
+            "TSINPUTDIR=%r could not be resolved to an existing directory "
+            "(tried base_dir=%s, var_dir=%s) — timeseries copy skipped.",
+            raw_value, base_dir, var_dir,
         )
         return
     local_ts_dir = var_dir / "local_timeseries"
@@ -516,8 +541,14 @@ def _copy_timeseries_dss(config_inp: Path, var_dir: Path) -> None:
         shutil.copy2(dss_src, local_ts_dir / dss_src.name)
         n_copied += 1
     logger.info("Copied %d DSS file(s) from %s to %s", n_copied, src_dir, local_ts_dir.name)
-    # Patch TSINPUTDIR to the absolute local path (forward slashes for DSM2)
-    local_ts_str = str(local_ts_dir).replace("\\", "/")
+    # Patch TSINPUTDIR to a relative path ("local_timeseries") rather than
+    # an absolute path.  DSM2 validates absolute DSS paths at parse time and
+    # raises a fatal error for any missing file, even ENVVARs that are never
+    # referenced by hydro.inp / qual_ec.inp (e.g. DICUFILE-ECS).  Relative
+    # paths are NOT validated at parse time, so optional / non-existent files
+    # listed as ENVVARs are silently skipped — matching the historical study
+    # behaviour where TSINPUTDIR is also a relative path.
+    local_ts_str = local_ts_dir.name   # = "local_timeseries" (relative to var_dir CWD)
     new_text = re.sub(
         r"(?m)^(TSINPUTDIR\s+)\S+",
         lambda mo: mo.group(1) + local_ts_str,
@@ -637,7 +668,7 @@ def setup_variation(
             if envvar_overrides:
                 _patch_envvars(config_inp, envvar_overrides)
             if copy_timeseries:
-                _copy_timeseries_dss(config_inp, var_dir)
+                _copy_timeseries_dss(config_inp, var_dir, base_dir=base_dir)
         else:
             logger.warning("config.inp not found in %s; DSM2MODIFIER not updated.", var_dir)
 
@@ -1649,6 +1680,31 @@ def _cfg_to_modifications(cfg: dict) -> List[ChannelParamModification]:
     return mods
 
 
+def _resolve_channel_inp_source(
+    base_dir: Path,
+    channel_inp_name: str,
+    explicit: Optional[str] = None,
+) -> str:
+    """Return the channel .inp source path to use for a variation setup.
+
+    Priority:
+    1. *explicit* — when set in the YAML ``base_run.channel_inp_source``.
+    2. ``<base_dir>/local_input/<channel_inp_name>`` — when the base run itself
+       was a variation and already has a patched local copy.
+    3. ``<base_dir>/../../common_input/<channel_inp_name>`` — the default
+       historical fallback.
+    """
+    if explicit is not None:
+        return explicit
+    local_candidate = base_dir / "local_input" / channel_inp_name
+    if local_candidate.exists():
+        logger.debug(
+            "Using local_input channel file from base run: %s", local_candidate
+        )
+        return str(local_candidate)
+    return str(base_dir.parent.parent / "common_input" / channel_inp_name)
+
+
 def run_from_yaml(
     yaml_path: str | Path,
     run_base: bool = False,
@@ -1681,9 +1737,9 @@ def run_from_yaml(
     metrics_cfg = cfg.get("metrics", {})
 
     base_dir = Path(base["study_dir"])
-    channel_inp_source = base.get(
-        "channel_inp_source",
-        str(base_dir.parent.parent / "common_input" / "channel_std_delta_grid.inp"),
+    channel_inp_name = base.get("channel_inp_name", "channel_std_delta_grid.inp")
+    channel_inp_source = _resolve_channel_inp_source(
+        base_dir, channel_inp_name, explicit=base.get("channel_inp_source")
     )
     model_dss_pattern = base.get("model_dss_pattern", "{modifier}_qual.dss")
     timewindow = metrics_cfg.get("timewindow")
@@ -1698,19 +1754,13 @@ def run_from_yaml(
 
     if setup_only:
         # Just create the variation directory; stop before running the model.
-        from pathlib import Path as _Path
-        base_dir2 = _Path(base["study_dir"])
-        channel_inp_source2 = base.get(
-            "channel_inp_source",
-            str(base_dir2.parent.parent / "common_input" / "channel_std_delta_grid.inp"),
-        )
         info = setup_variation(
             base_dir,
             var["study_dir"],
-            channel_inp_source2,
+            channel_inp_source,
             modifications,
             modifier=var["name"],
-            channel_inp_name=base.get("channel_inp_name", "channel_std_delta_grid.inp"),
+            channel_inp_name=channel_inp_name,
             run_steps=var.get("run_steps"),
             dsm2_bin_dir=cfg.get("dsm2_bin_dir"),
             envvar_overrides=var.get("envvar_overrides"),
@@ -1735,7 +1785,7 @@ def run_from_yaml(
         model_dss_pattern=model_dss_pattern,
         timewindow=timewindow,
         base_modifier=base["modifier"],
-        channel_inp_name=base.get("channel_inp_name", "channel_std_delta_grid.inp"),
+        channel_inp_name=channel_inp_name,
         run_model=run_variation,
         run_steps=var.get("run_steps"),
         log_file=log_file,

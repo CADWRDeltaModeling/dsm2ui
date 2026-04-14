@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -102,18 +103,60 @@ def load_cascade_config(
 # Checkpoint I/O
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _to_native(obj):
+    """Recursively convert numpy scalars/arrays to plain Python types so that
+    yaml.safe_load can round-trip the checkpoint without Python-specific tags."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: _to_native(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_native(v) for v in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 def _read_checkpoint(output_dir: Path) -> dict:
     cp_file = output_dir / _CHECKPOINT_FILE
-    if cp_file.exists():
-        with open(cp_file, encoding="utf-8") as fh:
+    if not cp_file.exists():
+        return {}
+    with open(cp_file, encoding="utf-8") as fh:
+        try:
             return yaml.safe_load(fh) or {}
-    return {}
+        except yaml.constructor.ConstructorError:
+            # Checkpoint was written with numpy-tagged values (legacy).
+            # Fall back to unsafe load, then immediately rewrite in clean format.
+            fh.seek(0)
+            data = yaml.load(fh, Loader=yaml.UnsafeLoader) or {}  # noqa: S506
+    data = _to_native(data)
+    _write_checkpoint(output_dir, data)
+    return data
 
 
 def _write_checkpoint(output_dir: Path, checkpoint: dict) -> None:
     cp_file = output_dir / _CHECKPOINT_FILE
     with open(cp_file, "w", encoding="utf-8") as fh:
-        yaml.dump(checkpoint, fh, default_flow_style=False, sort_keys=False)
+        yaml.dump(_to_native(checkpoint), fh, default_flow_style=False, sort_keys=False)
+
+
+def _cleanup_sweep_dirs(output_dir: Path, stage_id: int, stage_label: str) -> None:
+    """Delete all sweep eval dirs for a completed stage, keeping only
+    optim_best/ and optim_eval_base/ to free disk space."""
+    prefix = output_dir / f"stage_{stage_id:02d}_{stage_label}_optim_sweep"
+    deleted = 0
+    for d in output_dir.iterdir():
+        if d.is_dir() and d.name.startswith(f"stage_{stage_id:02d}_{stage_label}_optim_sweep"):
+            try:
+                shutil.rmtree(d)
+                deleted += 1
+            except Exception as exc:
+                logger.warning("Could not delete sweep dir %s: %s", d, exc)
+    if deleted:
+        logger.info("Cleanup: removed %d sweep dirs for stage %d [%s]", deleted, stage_id, stage_label)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,9 +260,11 @@ def run_cascade(
 
         stage_cfg["active_stations"] = stage.target_stations
 
-        stage_var_name = (
-            f"{base_cfg['variation']['name']}_casc_s{stage.id:02d}_{stage.label}"
-        )
+        # Keep the variation name short: DSM2 has a Fortran SCALAR buffer
+        # limit (~32 chars) that is hit when expanding the title SCALAR in
+        # hydro.inp as "Hydro simulation: ${DSM2MODIFIER}".  The full stage
+        # label is preserved in the stage *directory* name for traceability.
+        stage_var_name = f"{base_cfg['variation']['name']}_s{stage.id:02d}"
         stage_var_dir = output_dir / f"stage_{stage.id:02d}_{stage.label}"
 
         stage_cfg["variation"]["name"] = stage_var_name
@@ -237,6 +282,9 @@ def run_cascade(
         for k, v in stage.optimizer_overrides.items():
             stage_cfg["optimizer"][k] = v
 
+        # Progress CSV written incrementally after every sweep round
+        progress_csv = output_dir / f"stage_{stage.id:02d}_{stage.label}_progress.csv"
+
         # ── Run this stage ────────────────────────────────────────────────────
         stage_t0 = time.monotonic()
         result: OptimizationResult = optimize(
@@ -245,6 +293,7 @@ def run_cascade(
             active_groups=stage.active_params,
             dry_run=dry_run,
             skip_init=skip_init,
+            progress_csv=progress_csv,
         )
         stage_elapsed = time.monotonic() - stage_t0
 
@@ -275,6 +324,18 @@ def run_cascade(
         checkpoint["completed_stages"].append(stage_row)
         checkpoint["current_best_params"] = dict(current_best)
         _write_checkpoint(output_dir, checkpoint)
+
+        # Write the exact config used for this stage to the cascade root
+        stage_config_path = output_dir / f"stage_{stage.id:02d}_{stage.label}_config.yml"
+        with open(stage_config_path, "w", encoding="utf-8") as fh:
+            yaml.dump(stage_cfg, fh, default_flow_style=False, sort_keys=False)
+
+        # Write incremental cascade summary CSV
+        _summary_df = pd.DataFrame(summary_rows).sort_values("id").reset_index(drop=True)
+        _summary_df.to_csv(output_dir / "cascade_summary.csv", index=False, float_format="%.4f")
+
+        # Clean up sweep dirs to free disk space
+        _cleanup_sweep_dirs(output_dir, stage.id, stage.label)
 
         logger.info(
             "Stage %d done — obj %.6f  |  %d evals  |  %.0fs",
