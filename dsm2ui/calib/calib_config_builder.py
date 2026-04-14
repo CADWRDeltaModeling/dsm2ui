@@ -114,11 +114,12 @@ def _build_inst_plot_timewindow(end_date, module):
 
 def build_calib_config(
     study_folders,
-    postprocessing_folder,
-    output_file,
+    postprocessing_folder=None,
+    output_file="postpro_config.yml",
     module="hydro",
     output_folder="./plots/",
     observed_files=None,
+    location_files=None,
     timewindow_dict=None,
     dask_options=None,
 ):
@@ -129,11 +130,15 @@ def build_calib_config(
     study_folders : list of str or Path
         Paths to DSM2 study folders. Each must contain an ``output/`` directory
         with a ``{module}*echo*.inp`` file produced by a completed DSM2 run.
-    postprocessing_folder : str or Path
+    postprocessing_folder : str or Path, optional
         Path to the postprocessing workspace (contains ``location_info/`` and
-        ``observed_data/`` subdirectories).
-    output_file : str or Path
-        Destination path for the generated YAML file.
+        ``observed_data/`` subdirectories).  When omitted, ``location_files_dict``
+        entries are written as ``null`` so the calib-ui manager falls back to the
+        bundled default CSVs; ``observed_files_dict`` entries are also ``null``
+        unless overridden via *observed_files*.
+    output_file : str or Path, optional
+        Destination path for the generated YAML file.  Defaults to
+        ``"postpro_config.yml"`` in the current directory.
     module : str, optional
         DSM2 module whose DSS output to reference: ``"hydro"``, ``"qual"``, or
         ``"gtm"``. Default is ``"hydro"``.
@@ -143,7 +148,12 @@ def build_calib_config(
     observed_files : dict, optional
         Override observed DSS paths. Keys must be a subset of
         ``{"EC", "FLOW", "STAGE"}``; missing keys fall back to defaults
-        (``ec_cal.dss``, ``flow_cal.dss``, ``stage_cal.dss``).
+        (``ec_cal.dss``, ``flow_cal.dss``, ``stage_cal.dss``) when
+        *postprocessing_folder* is provided, or ``null`` otherwise.
+    location_files : dict, optional
+        Override location CSV paths per vartype, e.g.
+        ``{"EC": "/path/to/ec.csv"}``.  Values override both the
+        *postprocessing_folder* convention paths and the bundled defaults.
     timewindow_dict : dict, optional
         Override or extend the named time windows. Values not provided are
         auto-derived from the first study's echo file START_DATE / END_DATE.
@@ -162,26 +172,36 @@ def build_calib_config(
             f"Unknown module '{module}'. Must be one of: {list(_MODULE_GLOB)}"
         )
 
-    postprocessing_folder = pathlib.Path(postprocessing_folder).resolve()
     output_file = pathlib.Path(output_file)
 
     # --- location and observed files ---
-    location_files = {
-        "EC": str(
-            postprocessing_folder / "location_info" / "calibration_ec_stations.csv"
-        ),
-        "FLOW": str(
-            postprocessing_folder / "location_info" / "calibration_flow_stations.csv"
-        ),
-        "STAGE": str(
-            postprocessing_folder / "location_info" / "calibration_stage_stations.csv"
-        ),
-    }
-    observed = {
-        "EC": str(postprocessing_folder / "observed_data" / "ec_cal.dss"),
-        "FLOW": str(postprocessing_folder / "observed_data" / "flow_cal.dss"),
-        "STAGE": str(postprocessing_folder / "observed_data" / "stage_cal.dss"),
-    }
+    if postprocessing_folder is not None:
+        postprocessing_folder = pathlib.Path(postprocessing_folder).resolve()
+        _location_files = {
+            "EC": str(
+                postprocessing_folder / "location_info" / "calibration_ec_stations.csv"
+            ),
+            "FLOW": str(
+                postprocessing_folder / "location_info" / "calibration_flow_stations.csv"
+            ),
+            "STAGE": str(
+                postprocessing_folder / "location_info" / "calibration_stage_stations.csv"
+            ),
+        }
+        observed = {
+            "EC": str(postprocessing_folder / "observed_data" / "ec_cal.dss"),
+            "FLOW": str(postprocessing_folder / "observed_data" / "flow_cal.dss"),
+            "STAGE": str(postprocessing_folder / "observed_data" / "stage_cal.dss"),
+        }
+    else:
+        # Null entries: calib-ui manager will fall back to bundled defaults for
+        # location files; observed DSS paths must be provided via observed_files.
+        _location_files = {"EC": None, "FLOW": None, "STAGE": None}
+        observed = {"EC": None, "FLOW": None, "STAGE": None}
+
+    # Apply per-vartype overrides.
+    if location_files:
+        _location_files.update(location_files)
     if observed_files:
         observed.update(observed_files)
 
@@ -254,7 +274,7 @@ def build_calib_config(
             "mask_plot_metric_data": True,
             "tech_memo_validation_metrics": False,
         },
-        "location_files_dict": location_files,
+        "location_files_dict": _location_files,
         "observed_files_dict": observed,
         "study_files_dict": study_files,
         "postpro_model_dict": dict(study_files),

@@ -63,6 +63,7 @@ packages = {find = {include = ["dsm2ui", "dsm2ui.*"]}}
 
 [tool.setuptools.package-data]
 "dsm2ui" = ["dsm2gis/*.geojson"]
+"dsm2ui.calib" = ["data/*.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

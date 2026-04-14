@@ -20,7 +20,8 @@ from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
 # substitue the base_dir in location_files_dict, observed_files_dict, study_files_dict
 def substitute_base_dir(base_dir, dict):
     for key in dict:
-        dict[key] = str((pathlib.Path(base_dir) / dict[key]).resolve())
+        if dict[key] is not None:
+            dict[key] = str((pathlib.Path(base_dir) / dict[key]).resolve())
     return dict
 
 
@@ -30,6 +31,21 @@ def load_location_file(location_file):
         df, geometry=gpd.points_from_xy(df.Longitude, df.Latitude), crs="EPSG:4326"
     )
     return gdf
+
+
+# ---------------------------------------------------------------------------
+# Built-in option defaults — applied before YAML values.
+# ---------------------------------------------------------------------------
+_DEFAULT_OPTIONS = {
+    "output_folder": "./plots/",
+    "include_kde_plots": True,
+    "zoom_inst_plot": True,
+    "write_graphics": True,
+    "write_html": True,
+    "mask_plot_metric_data": True,
+    "tech_memo_validation_metrics": False,
+    "manuscript_layout": False,
+}
 
 
 def _get_cached_bparts(dssfile, vartype):
@@ -73,6 +89,109 @@ def _get_cached_bparts(dssfile, vartype):
 import param
 
 
+def _clear_all_caches(config):
+    """Clear all diskcache post-processing caches for every DSS file referenced in *config*.
+
+    Iterates ``observed_files_dict`` and ``study_files_dict`` values and calls
+    ``postpro.PostProCache.clear()`` on each.  Returns a human-readable summary string.
+    """
+    dss_files = list(config.get("observed_files_dict", {}).values()) + list(
+        config.get("study_files_dict", {}).values()
+    )
+    cleared = 0
+    skipped = 0
+    for f in dss_files:
+        cache_dir = postpro.get_cache_dir(f)
+        if pathlib.Path(cache_dir).exists():
+            postpro.PostProCache(f).clear()
+            cleared += 1
+        else:
+            skipped += 1
+    parts = []
+    if cleared:
+        parts.append(f"{cleared} cache(s) cleared")
+    if skipped:
+        parts.append(f"{skipped} cache(s) had no data to clear")
+    return ", ".join(parts) if parts else "No caches found"
+
+
+def get_default_location_files():
+    """Return paths to the bundled default station CSVs packaged with dsm2ui.
+
+    These are snapshots of the canonical
+    ``postprocessing/location_info/calibration_*_stations.csv`` files and can
+    be overridden by the YAML config or CLI flags.
+    """
+    import importlib.resources
+    data_dir = importlib.resources.files("dsm2ui.calib") / "data"
+    return {
+        "EC": str(data_dir / "calibration_ec_stations.csv"),
+        "FLOW": str(data_dir / "calibration_flow_stations.csv"),
+        "STAGE": str(data_dir / "calibration_stage_stations.csv"),
+    }
+
+
+def _resolve_config(raw_config, base_dir, cli_overrides=None):
+    """Apply layered config resolution: built-in defaults → YAML → CLI overrides.
+
+    *   ``options_dict``: ``_DEFAULT_OPTIONS`` is the base; YAML values override.
+    *   ``location_files_dict``: bundled CSVs are the base; YAML non-null values
+        override per-key; paths are resolved relative to *base_dir*.
+    *   ``observed_files_dict`` / ``study_files_dict``: paths resolved relative
+        to *base_dir* (null entries left as-is).
+    *   *cli_overrides* (highest priority): ``{"vartypes": [...], "options": {...}}``
+    """
+    import copy
+    config = copy.deepcopy(raw_config)
+
+    # --- options_dict: defaults ← YAML ---
+    merged_opts = dict(_DEFAULT_OPTIONS)
+    merged_opts.update(config.get("options_dict") or {})
+    config["options_dict"] = merged_opts
+
+    # --- location_files_dict: bundled defaults ← YAML non-null values ---
+    bundled = get_default_location_files()
+    loc_files = dict(bundled)  # start from bundled
+    yaml_loc = config.get("location_files_dict") or {}
+    for vt, yaml_val in yaml_loc.items():
+        if yaml_val:  # non-null YAML value overrides bundled
+            loc_files[vt] = str((pathlib.Path(base_dir) / yaml_val).resolve())
+        # null YAML value keeps bundled default
+    # preserve any extra YAML keys not in bundled (e.g. TEMP)
+    for vt, yaml_val in yaml_loc.items():
+        if vt not in loc_files and yaml_val:
+            loc_files[vt] = str((pathlib.Path(base_dir) / yaml_val).resolve())
+    config["location_files_dict"] = loc_files
+
+    # --- observed_files_dict: resolve relative paths ---
+    for vt, val in (config.get("observed_files_dict") or {}).items():
+        if val:
+            config["observed_files_dict"][vt] = str(
+                (pathlib.Path(base_dir) / val).resolve()
+            )
+
+    # --- study_files_dict: resolve relative paths ---
+    for key, val in (config.get("study_files_dict") or {}).items():
+        if val:
+            config["study_files_dict"][key] = str(
+                (pathlib.Path(base_dir) / val).resolve()
+            )
+
+    # --- CLI overrides (highest priority) ---
+    if cli_overrides:
+        if "vartypes" in cli_overrides:
+            active = {v.upper() for v in cli_overrides["vartypes"]}
+            vtw = config.get("vartype_timewindow_dict", {})
+            for vt in list(vtw):
+                if vt.upper() not in active:
+                    vtw[vt] = None
+            config["vartype_timewindow_dict"] = vtw
+        if "options" in cli_overrides:
+            config["options_dict"].update(cli_overrides["options"])
+
+    return config
+
+
 class CalibNullReader(DataReferenceReader):
     """Placeholder reader for CalibPlotUIManager entries.
 
@@ -91,50 +210,55 @@ class CalibNullReader(DataReferenceReader):
 
 class CalibPlotUIManager(DataUIManager):
 
-    def __init__(self, config_file, base_dir=None, polygon_bounds=None, **kwargs):
+    cache_status = param.String(default="", doc="Status message from last cache-clear operation")
+
+    def __init__(self, config_file, base_dir=None, polygon_bounds=None, cli_overrides=None, **kwargs):
         """
         config_file: str
             yaml file containing configuration
 
         base_dir: str
             base directory for config file, if None is assumed to be same as config file directory
+
+        cli_overrides: dict, optional
+            Overrides applied on top of the YAML config (highest priority). Supported keys:
+            - ``"vartypes"``: list of active vartype names (others will be nulled)
+            - ``"options"``: dict of options_dict key→value overrides
         """
         base_dir = kwargs.pop("base_dir", None)
         self.polygon_bounds = polygon_bounds
         super().__init__(**kwargs)
         self.config_file = config_file
         with open(self.config_file, "r", encoding="utf-8") as file:
-            config = yaml.safe_load(file)
-        # substitue the base_dir in location_files_dict, observed_files_dict, study_files_dict
+            raw_config = yaml.safe_load(file)
         if base_dir is None:
             base_dir = pathlib.Path(self.config_file).parent
-        config["location_files_dict"] = substitute_base_dir(
-            base_dir, config["location_files_dict"]
-        )
-        config["observed_files_dict"] = substitute_base_dir(
-            base_dir, config["observed_files_dict"]
-        )
-        config["study_files_dict"] = substitute_base_dir(
-            base_dir, config["study_files_dict"]
-        )
-        self.config = config
+        # Store original vartype_timewindow (from YAML, before CLI overrides) for UI restore.
+        self._vartype_timewindow_original = {
+            k: v
+            for k, v in raw_config.get("vartype_timewindow_dict", {}).items()
+            if v is not None
+        }
+        self._base_dir = base_dir
+        self.config = _resolve_config(raw_config, base_dir, cli_overrides=cli_overrides)
         # Build catalog once — avoids re-reading location files on every get_data_catalog() call.
         self._dvue_catalog = self._build_dvue_catalog()
 
     def _build_raw_catalog(self) -> gpd.GeoDataFrame:
-        """Build the merged GeoDataFrame from all configured location files.
+        """Build the merged GeoDataFrame from all active location files.
 
-        Rows are filtered to only those whose B-part has valid cached data in
-        **both** the observed DSS cache and at least one model DSS cache.
-        This removes duplicate CSV rows and stations that were never in the
-        model output or have no observed data.
+        Shows every station from the configured location CSVs without any
+        cache-based filtering.  On-demand post-processing is triggered in
+        :meth:`create_panel` for stations that have not been pre-processed yet.
         """
         gdfs = []
         for tkey, tvalue in self.config["vartype_timewindow_dict"].items():
             if tvalue is None:
                 continue
-            value = self.config["location_files_dict"][tkey]
-            gdf = postpro.load_location_file(value)
+            location_file = self.config["location_files_dict"].get(tkey)
+            if not location_file or not pathlib.Path(location_file).exists():
+                continue
+            gdf = postpro.load_location_file(location_file)
             gdf.Latitude = pd.to_numeric(gdf.Latitude, errors="coerce")
             gdf.Longitude = pd.to_numeric(gdf.Longitude, errors="coerce")
             gdf = gpd.GeoDataFrame(
@@ -143,23 +267,9 @@ class CalibPlotUIManager(DataUIManager):
                 crs="EPSG:4326",
             )
             gdf["vartype"] = str(tkey)
-
-            # --- filter to stations with valid cached data ---
-            obs_bparts = _get_cached_bparts(
-                self.config["observed_files_dict"][tkey], tkey
-            )
-            model_bparts = set()
-            for dssfile in self.config["study_files_dict"].values():
-                model_bparts |= _get_cached_bparts(dssfile, tkey)
-
-            if obs_bparts or model_bparts:
-                # Keep rows whose Name (dsm2_id) is in both observed AND at least one model cache.
-                # Fall back to no filtering if caches are empty (e.g. pre-postpro run).
-                valid_bparts = obs_bparts & model_bparts
-                if valid_bparts:
-                    gdf = gdf[gdf["Name"].str.upper().isin(valid_bparts)]
-
             gdfs.append(gdf)
+        if not gdfs:
+            return gpd.GeoDataFrame()
         gdf = pd.concat(gdfs, axis=0).reset_index(drop=True)
         gdf = gdf.astype(
             {
@@ -222,8 +332,203 @@ class CalibPlotUIManager(DataUIManager):
         locations = [self.build_location(r) for i, r in df.iterrows()]
         return locations
 
+    def _run_postpro_on_demand(self, location, vartype):
+        """Process a single station on demand and store results in the diskcache.
+
+        Runs observed and model post-processors only for cache entries that are
+        not already present.  Called automatically from :meth:`create_panel`
+        when the user opens a plot for a station whose data has not yet been
+        pre-processed.
+        """
+        import pyhecdss as _hecdss
+
+        vartype_name = vartype.name
+
+        # --- observed ---
+        obs_dssfile = self.config["observed_files_dict"].get(vartype_name)
+        if obs_dssfile:
+            obs_cached = _get_cached_bparts(obs_dssfile, vartype_name)
+            if location.name.upper() not in obs_cached:
+                print(
+                    f"[on-demand] Observed  {location.name}/{vartype_name} ..."
+                )
+                try:
+                    _hecdss.DSSFile(obs_dssfile).catalog()
+                except Exception:
+                    pass
+                obs_proc = postpro.PostProcessor(
+                    postpro.Study("Observed", obs_dssfile),
+                    postpro.Location(
+                        location.name,
+                        location.bpart,
+                        location.description,
+                        location.time_window_exclusion_list,
+                        location.threshold_value,
+                    ),
+                    vartype,
+                )
+                obs_proc.do_resample_with_merge("15min")
+                obs_proc.do_fill_in()
+                postpro.run_processor(obs_proc)
+
+        # --- model studies ---
+        for study_name, dssfile in self.config["study_files_dict"].items():
+            model_cached = _get_cached_bparts(dssfile, vartype_name)
+            if location.name.upper() not in model_cached:
+                print(
+                    f"[on-demand] Model {study_name}  {location.name}/{vartype_name} ..."
+                )
+                try:
+                    _hecdss.DSSFile(dssfile).catalog()
+                except Exception:
+                    pass
+                model_proc = postpro.PostProcessor(
+                    postpro.Study(study_name, dssfile),
+                    postpro.Location(
+                        location.name,
+                        location.name,
+                        location.description,
+                        location.time_window_exclusion_list,
+                        location.threshold_value,
+                    ),
+                    vartype,
+                )
+                postpro.run_processor(model_proc)
+
+    def _refresh_catalog(self, status_pane=None):
+        """Rebuild the catalog and push updates to the dvue DataUI table."""
+        try:
+            self._dvue_catalog = self._build_dvue_catalog()
+            if hasattr(self, "_dataui"):
+                new_df = self.get_data_catalog()
+                self._dataui._dfcat = new_df
+                table_cols = [
+                    c for c in self.get_table_columns() if c in new_df.columns
+                ]
+                self._dataui.display_table.value = (
+                    new_df[table_cols].reset_index(drop=True)
+                )
+                msg = f"Updated — {len(new_df)} stations in table"
+            else:
+                msg = "Catalog updated"
+            if status_pane is not None:
+                status_pane.object = msg
+        except Exception as exc:
+            msg = f"Error refreshing: {exc}"
+            if status_pane is not None:
+                status_pane.object = msg
+
     def get_widgets(self):
-        return pn.Column(pn.pane.Markdown("UI Controls Placeholder"))
+        # ------------------------------------------------------------------ #
+        # Vartypes                                                             #
+        # ------------------------------------------------------------------ #
+        all_vt_options = list(self._vartype_timewindow_original.keys())
+        active_vt = [
+            k
+            for k, v in self.config["vartype_timewindow_dict"].items()
+            if v is not None
+        ]
+        vartype_cbs = pn.widgets.CheckBoxGroup(
+            name="Active vartypes",
+            options=all_vt_options,
+            value=active_vt,
+        )
+        vartype_status = pn.pane.Str("", styles={"color": "#555", "font-size": "0.9em"})
+
+        def _on_vartype_change(event):
+            for vt, orig_val in self._vartype_timewindow_original.items():
+                self.config["vartype_timewindow_dict"][vt] = (
+                    orig_val if vt in event.new else None
+                )
+            self._refresh_catalog(vartype_status)
+
+        vartype_cbs.param.watch(_on_vartype_change, "value")
+
+        # ------------------------------------------------------------------ #
+        # Plot options                                                         #
+        # ------------------------------------------------------------------ #
+        opts_dict = self.config["options_dict"]
+
+        output_folder_w = pn.widgets.TextInput(
+            name="Output folder",
+            value=str(opts_dict.get("output_folder", "./plots/")),
+            width=280,
+        )
+
+        def _on_output_folder(event):
+            self.config["options_dict"]["output_folder"] = event.new
+
+        output_folder_w.param.watch(_on_output_folder, "value")
+
+        bool_opt_labels = [
+            ("include_kde_plots",           "Include KDE plots"),
+            ("zoom_inst_plot",              "Zoom instantaneous plot"),
+            ("write_graphics",              "Write PNG files"),
+            ("write_html",                  "Write HTML files"),
+            ("mask_plot_metric_data",        "Mask plot metric data"),
+            ("tech_memo_validation_metrics", "Tech memo validation metrics"),
+            ("manuscript_layout",            "Manuscript layout"),
+        ]
+
+        def _make_opt_watcher(k):
+            def _w(event):
+                self.config["options_dict"][k] = event.new
+            return _w
+
+        bool_widgets = []
+        for key, label in bool_opt_labels:
+            w = pn.widgets.Checkbox(
+                name=label,
+                value=bool(opts_dict.get(key, _DEFAULT_OPTIONS.get(key, False))),
+            )
+            w.param.watch(_make_opt_watcher(key), "value")
+            bool_widgets.append(w)
+
+        # ------------------------------------------------------------------ #
+        # Cache                                                                #
+        # ------------------------------------------------------------------ #
+        clear_btn = pn.widgets.Button(
+            name="Clear Cache",
+            button_type="warning",
+            width=140,
+            description="Clear all post-processing caches for every DSS file in this config.",
+        )
+        cache_status = pn.pane.Str("", styles={"color": "#555", "font-size": "0.9em"})
+
+        def _on_clear(event):
+            cache_status.object = "Clearing\u2026"
+            try:
+                msg = _clear_all_caches(self.config)
+                cache_status.object = msg
+                self.cache_status = msg
+            except Exception as exc:
+                cache_status.object = f"Error: {exc}"
+                self.cache_status = f"Error: {exc}"
+
+        clear_btn.on_click(_on_clear)
+
+        return pn.Column(
+            pn.pane.Markdown("### Vartypes"),
+            vartype_cbs,
+            vartype_status,
+            pn.layout.Divider(),
+            pn.pane.Markdown("### Plot Options"),
+            pn.pane.Markdown(
+                "*Changes apply on the next plot opened.*",
+                styles={"font-size": "0.85em", "color": "#666"},
+            ),
+            output_folder_w,
+            *bool_widgets,
+            pn.layout.Divider(),
+            pn.pane.Markdown("### Cache"),
+            pn.pane.Markdown(
+                "Clears cached post-processed time series for all DSS files "
+                "in this config. Re-run *postpro* to rebuild.",
+                styles={"font-size": "0.85em"},
+            ),
+            clear_btn,
+            cache_status,
+        )
 
     def get_table_column_width_map(self):
         """only columns to be displayed in the table should be included in the map"""
@@ -261,6 +566,9 @@ class CalibPlotUIManager(DataUIManager):
             studies = self.get_studies(varname)
             location = self.build_location(row)
             try:
+                # On-demand post-processing: populate cache for uncached stations.
+                if not self.config.get("skip_ondemand"):
+                    self._run_postpro_on_demand(location, vartype)
                 calib_plot_template_dict, metrics_df, failed_studies = postpro_dsm2.build_plot(
                     self.config, studies, location, vartype
                 )
@@ -375,7 +683,25 @@ import click
 @click.command()
 @click.argument("config_file", type=click.Path(exists=True, readable=True))
 @click.option("--base_dir", required=False, help="Base directory for config file")
-def calib_plot_ui(config_file, base_dir=None, **kwargs):
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    default=False,
+    help="Clear all post-processing caches before launching the UI.",
+)
+@click.option(
+    "--vartype",
+    "vartypes",
+    multiple=True,
+    help="Restrict active vartypes (repeat for multiple, e.g. --vartype EC --vartype FLOW).",
+)
+@click.option(
+    "--option",
+    "options",
+    multiple=True,
+    help="Override an options_dict entry as KEY=VALUE (e.g. --option write_html=false).",
+)
+def calib_plot_ui(config_file, base_dir=None, clear_cache=False, vartypes=(), options=(), **kwargs):
     """Launch the interactive calibration plot UI from a YAML config file.
 
     config_file: str
@@ -384,6 +710,38 @@ def calib_plot_ui(config_file, base_dir=None, **kwargs):
     base_dir: str
         base directory for config file, if None is assumed to be same as config file directory
     """
+    if clear_cache:
+        with open(config_file, "r", encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f)
+        _base = pathlib.Path(base_dir) if base_dir else pathlib.Path(config_file).parent
+        _cfg["observed_files_dict"] = substitute_base_dir(
+            _base, _cfg.get("observed_files_dict", {})
+        )
+        _cfg["study_files_dict"] = substitute_base_dir(
+            _base, _cfg.get("study_files_dict", {})
+        )
+        msg = _clear_all_caches(_cfg)
+        click.echo(msg)
+
+    # Build CLI overrides dict from --vartype and --option flags.
+    cli_overrides = {}
+    if vartypes:
+        cli_overrides["vartypes"] = list(vartypes)
+    if options:
+        parsed_opts = {}
+        for item in options:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                try:
+                    import yaml as _yaml
+                    parsed_opts[k.strip()] = _yaml.safe_load(v.strip())
+                except Exception:
+                    parsed_opts[k.strip()] = v.strip()
+            else:
+                click.echo(f"Warning: --option '{item}' ignored (expected KEY=VALUE)")
+        if parsed_opts:
+            cli_overrides["options"] = parsed_opts
+
     from shapely.geometry import Point, Polygon
 
     california = Polygon(
@@ -395,7 +753,11 @@ def calib_plot_ui(config_file, base_dir=None, **kwargs):
         ]
     )
     manager = CalibPlotUIManager(
-        config_file, base_dir=base_dir, polygon_bounds=california, **kwargs
+        config_file,
+        base_dir=base_dir,
+        polygon_bounds=california,
+        cli_overrides=cli_overrides or None,
+        **kwargs,
     )
 
     DataUI(manager).create_view(title="DSM2 Calib Plot UI").show()

@@ -577,9 +577,12 @@ def calib_postpro_run(process_name, json_config_file, dask, skip_cached):
 @click.option(
     "--postprocessing",
     "-p",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True, file_okay=False, dir_okay=True),
-    help="Path to the postprocessing folder (contains location_info/ and observed_data/).",
+    help="Postprocessing folder (contains location_info/ and observed_data/). "
+         "If omitted, bundled default location CSVs are used and observed DSS paths "
+         "must be provided via --observed-file.",
 )
 @click.option(
     "--output",
@@ -602,15 +605,73 @@ def calib_postpro_run(process_name, json_config_file, dask, skip_cached):
     show_default=True,
     help="Plot output folder written into the YAML options_dict.",
 )
-def calib_postpro_setup(study_folders, postprocessing, output, module, output_folder):
-    """Generate a calib-ui YAML config from study folders and postprocessing data."""
+@click.option(
+    "--timewindow",
+    default=None,
+    help="Override the simulation time window (e.g. \"01OCT2020 - 30SEP2022\"). "
+         "Replaces all named time windows in the generated YAML.",
+)
+@click.option(
+    "--location-file",
+    "location_files",
+    multiple=True,
+    help="Override a vartype location CSV as VARTYPE=/path (e.g. EC=/path/ec.csv). "
+         "Repeat for multiple vartypes.",
+)
+@click.option(
+    "--observed-file",
+    "observed_files",
+    multiple=True,
+    help="Override a vartype observed DSS path as VARTYPE=/path (e.g. EC=/path/ec.dss). "
+         "Repeat for multiple vartypes.",
+)
+def calib_postpro_setup(
+    study_folders, postprocessing, output, module, output_folder,
+    timewindow, location_files, observed_files,
+):
+    """Generate a calib-ui YAML config from study folders and postprocessing data.
+
+    When --postprocessing is omitted, bundled default station CSVs are used for
+    location_files_dict.  Observed DSS paths must then be provided via
+    --observed-file if post-processing is needed.
+    """
     from dsm2ui.calib import calib_config_builder
+
+    # Parse KEY=VALUE overrides for --location-file and --observed-file.
+    def _parse_kv(items):
+        result = {}
+        for item in items:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                result[k.strip().upper()] = v.strip()
+            else:
+                raise click.BadParameter(
+                    f"Expected VARTYPE=/path, got: {item!r}"
+                )
+        return result
+
+    loc_overrides = _parse_kv(location_files) if location_files else None
+    obs_overrides = _parse_kv(observed_files) if observed_files else None
+
+    tw_override = None
+    if timewindow:
+        tw_override = {
+            "simulation_period": timewindow,
+            "hydro_calibration": timewindow,
+            "qual_calibration": timewindow,
+            "hydro_validation": timewindow,
+            "qual_validation": timewindow,
+        }
+
     result = calib_config_builder.build_calib_config(
         study_folders=list(study_folders),
         postprocessing_folder=postprocessing,
         output_file=output,
         module=module,
         output_folder=output_folder,
+        observed_files=obs_overrides,
+        location_files=loc_overrides,
+        timewindow_dict=tw_override,
     )
     click.echo(f"Config written to: {result}")
 
@@ -631,10 +692,34 @@ def calib_ui():
 @calib_ui.command(name="plot")
 @click.argument("config_file", type=click.Path(exists=True, readable=True))
 @click.option("--base_dir", required=False, help="Base directory for config file")
-def calib_ui_plot(config_file, base_dir=None):
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    default=False,
+    help="Clear all post-processing caches before launching the UI.",
+)
+@click.option(
+    "--vartype",
+    "vartypes",
+    multiple=True,
+    help="Restrict active vartypes (repeat for multiple, e.g. --vartype EC --vartype FLOW).",
+)
+@click.option(
+    "--option",
+    "options",
+    multiple=True,
+    help="Override an options_dict entry as KEY=VALUE (e.g. --option write_html=false).",
+)
+def calib_ui_plot(config_file, base_dir=None, clear_cache=False, vartypes=(), options=()):
     """Launch the interactive calibration plot viewer."""
     from dsm2ui.calib.calibplotui import calib_plot_ui
-    calib_plot_ui.callback(config_file=config_file, base_dir=base_dir)
+    calib_plot_ui.callback(
+        config_file=config_file,
+        base_dir=base_dir,
+        clear_cache=clear_cache,
+        vartypes=vartypes,
+        options=options,
+    )
 
 
 @calib_ui.command(name="heatmap")
