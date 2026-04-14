@@ -26,6 +26,28 @@ import copy
 import re
 
 cpalette = "Category10"
+def _normalize_timewindow(timewindow):
+    """Normalise a timewindow string to 'YYYY-MM-DD:YYYY-MM-DD' format.
+
+    Accepts two styles:
+    - Already normalised: ``'2015-03-01:2024-09-30'``
+    - DSM2 style:         ``'01MAR2015 - 30SEP2024'``  (DDMMMYYYY separated by ' - ')
+    """
+    if timewindow is None:
+        return timewindow
+    if ":" in timewindow:
+        return timewindow  # already YYYY-MM-DD:YYYY-MM-DD
+    if " - " in timewindow:
+        parts = [p.strip() for p in timewindow.split(" - ", 1)]
+        try:
+            start = pd.Timestamp(parts[0]).strftime("%Y-%m-%d")
+            end   = pd.Timestamp(parts[1]).strftime("%Y-%m-%d")
+            return f"{start}:{end}"
+        except Exception:
+            pass
+    return timewindow
+
+
 def parse_time_window(timewindow):
     """
     Args:
@@ -36,6 +58,7 @@ def parse_time_window(timewindow):
     """
     return_list = []
     try:
+        timewindow = _normalize_timewindow(timewindow)
         parts = timewindow.split(":")
         for p in parts:
             date_parts = [int(i) for i in p.split("-")]
@@ -70,7 +93,8 @@ def tsplot(dflist, names, timewindow=None, zoom_inst_plot=False):
         end_dt = dflist[0].index.max()
     if zoom_inst_plot and (timewindow is not None):
         try:
-            parts = timewindow.split(":")
+            tw = _normalize_timewindow(timewindow)
+            parts = tw.split(":")
             start_dt = parts[0]
             end_dt = parts[1]
         except:
@@ -82,7 +106,7 @@ def tsplot(dflist, names, timewindow=None, zoom_inst_plot=False):
 
     plt = [
         (
-            df[start_dt:end_dt].hvplot(
+            df.loc[start_dt:end_dt].hvplot(
                 label=name,
                 xformatter=DatetimeTickFormatter(
                     years="%b-%Y", months="%b-%y", days="%d-%b-%y"
@@ -792,10 +816,14 @@ def create_layout(
 
 
 def load_data_for_plotting(studies, location, vartype, timewindow):
-    """Loads data used for creating plots and metrics"""
-    # pp = [postpro.PostProcessor(study, location, vartype) for study in studies]
+    """Loads data used for creating plots and metrics.
+
+    Partial-success: if some studies don't have data for this location (e.g. a
+    model study that doesn't cover this station), those studies are skipped and
+    the plot is built with the available data.  The full plot is only suppressed
+    when *no* data at all could be loaded.
+    """
     pp = []
-    all_data_found = True
     failed_studies = []
     for study in studies:
         # For model studies the DSS B-part to use for raw lookup is dsm2_id (= location.name).
@@ -806,52 +834,46 @@ def load_data_for_plotting(studies, location, vartype, timewindow):
         else:
             loc = location
         p = postpro.PostProcessor(study, loc, vartype)
-        pp.append(p)
-        # this was commented out before
-        # for p in pp:ed
 
         invert_series = False
         if study.name == "Observed" and "-" in location.bpart:
             invert_series = True
 
         success = p.load_processed(timewindow=timewindow, invert_series=invert_series)
-        if not success:  # try processing it now
-            p.process()
-            success = p.store_processed()
-            print('about to load data for '+str(p))
-            success = p.load_processed(
-                timewindow=timewindow, invert_series=invert_series
-            )
-            print('success='+str(success))
-        if not success:
-            errmsg = "unable to load data for study|location %s|%s" % (
-                str(study),
-                str(location),
-            )
+        if not success:  # try on-demand processing (only if not already a cached failure)
+            if not p.has_cached_failure():
+                p.process()
+                p.store_processed()
+                print('about to load data for ' + str(p))
+                success = p.load_processed(
+                    timewindow=timewindow, invert_series=invert_series
+                )
+                print('success=' + str(success))
+        if success:
+            pp.append(p)
+        else:
+            errmsg = "no data for study|location %s|%s" % (str(study), str(location))
             print(errmsg)
             logging.info(errmsg)
-            all_data_found = False
             failed_studies.append(study.name)
-    if not all_data_found:
+
+    if not pp:
         errmsg = (
             "Not creating plots because data not found for location, vartype, timewindow = "
-            + str(location)
-            + ","
-            + str(vartype)
-            + ","
-            + str(timewindow)
-            + "\n"
+            + str(location) + "," + str(vartype) + "," + str(timewindow) + "\n"
         )
-        print(
-            "==============================================================================="
-        )
+        print("=" * 79)
         print(errmsg)
-        print(
-            "==============================================================================="
-        )
+        print("=" * 79)
         logging.info(errmsg)
         return None, None, failed_studies
-    return all_data_found, pp, []
+
+    if failed_studies:
+        print(
+            f"[calibplot] Partial data: plotting {len(pp)} of {len(studies)} studies "
+            f"(missing: {', '.join(failed_studies)})"
+        )
+    return True, pp, failed_studies
 
 
 def get_units(flow_in_thousands=False, units=None):

@@ -676,6 +676,141 @@ def calib_postpro_setup(
     click.echo(f"Config written to: {result}")
 
 
+@calib_postpro.command(name="setup-from-datastore")
+@click.option(
+    "--study",
+    "-s",
+    "study_folders",
+    multiple=True,
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Study folder path (repeat -s for multiple studies).",
+)
+@click.option(
+    "--datastore",
+    "-d",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Path to the DMS Datastore directory (must contain inventory_datasets_*.csv).",
+)
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Output YAML config file path.",
+)
+@click.option(
+    "--dss-dir",
+    default=None,
+    type=click.Path(dir_okay=True),
+    help="Directory for extracted observed DSS files. Defaults to same directory as --output.",
+)
+@click.option(
+    "--module",
+    "-m",
+    type=click.Choice(["hydro", "qual", "gtm"], case_sensitive=False),
+    default="qual",
+    show_default=True,
+    help="DSM2 module whose DSS output to reference.",
+)
+@click.option(
+    "--vartype",
+    "vartypes",
+    multiple=True,
+    default=("EC",),
+    show_default=True,
+    help="Vartype to extract from the datastore (repeat for multiple, e.g. --vartype EC --vartype FLOW).",
+)
+@click.option(
+    "--repo-level",
+    default="screened",
+    show_default=True,
+    type=click.Choice(["screened", "raw"], case_sensitive=False),
+    help="Datastore repository level.",
+)
+@click.option(
+    "--output-folder",
+    default="./plots/",
+    show_default=True,
+    help="Plot output folder written into the YAML options_dict.",
+)
+@click.option(
+    "--timewindow",
+    default=None,
+    help="Override the simulation time window (e.g. \"01OCT2020 - 30SEP2022\").",
+)
+def calib_postpro_setup_from_datastore(
+    study_folders, datastore, output, dss_dir, module, vartypes,
+    repo_level, output_folder, timewindow,
+):
+    """Generate a calib-ui YAML config by extracting observed data from a DMS Datastore.
+
+    Extracts one DSS file per requested vartype from the DMS Datastore, then
+    builds a postpro_config.yml that references those files as observed_files_dict.
+    Location station CSVs use the bundled defaults (no --postprocessing folder needed).
+
+    Example:
+
+    \b
+        dsm2ui calib postpro setup-from-datastore \\
+            -s D:/delta/dsm2_studies/studies/historical \\
+            -d D:/delta/dms_datastore \\
+            -o postpro_config.yml \\
+            --vartype EC
+
+    The extracted DSS files are written next to the output YAML unless --dss-dir
+    is specified.
+    """
+    from dsm2ui.calib import calib_config_builder
+
+    output_path = Path(output)
+    if dss_dir is None:
+        dss_dir = str(output_path.parent)
+
+    click.echo(f"Extracting observed data from datastore: {datastore}")
+    click.echo(f"  Vartypes  : {', '.join(vartypes)}")
+    click.echo(f"  Repo level: {repo_level}")
+    click.echo(f"  DSS output: {dss_dir}")
+
+    observed_paths = calib_config_builder.extract_observed_from_datastore(
+        datastore_dir=datastore,
+        output_dir=dss_dir,
+        vartypes=list(vartypes),
+        repo_level=repo_level,
+    )
+
+    tw_override = None
+    if timewindow:
+        tw_override = {
+            "simulation_period": timewindow,
+            "hydro_calibration": timewindow,
+            "qual_calibration": timewindow,
+            "hydro_validation": timewindow,
+            "qual_validation": timewindow,
+        }
+
+    result = calib_config_builder.build_calib_config(
+        study_folders=list(study_folders),
+        postprocessing_folder=None,   # use bundled default location CSVs
+        output_file=output,
+        module=module,
+        output_folder=output_folder,
+        observed_files=observed_paths,
+        timewindow_dict=tw_override,
+    )
+
+    click.echo("")
+    click.echo("Extracted observed DSS files:")
+    for vt, path in observed_paths.items():
+        click.echo(f"  {vt}: {path}")
+    click.echo(f"\nConfig written to: {result}")
+    click.echo("\nNext steps:")
+    click.echo(f"  dsm2ui calib postpro run model   --config {result}")
+    click.echo(f"  dsm2ui calib postpro run observed --config {result}")
+    click.echo(f"  dsm2ui calib-ui {result}")
+
+
 calib.add_command(calib_postpro)
 
 

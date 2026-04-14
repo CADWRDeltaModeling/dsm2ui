@@ -86,6 +86,65 @@ def _get_cached_bparts(dssfile, vartype):
     return bparts
 
 
+def _get_failed_bparts(dssfile, vartype):
+    """Return B-parts that have already been attempted but failed (error stored in cache).
+
+    Used to avoid re-processing stations that genuinely don't exist in a DSS file.
+    """
+    import diskcache
+    cache_dir = postpro.get_cache_dir(dssfile)
+    if not pathlib.Path(cache_dir).exists():
+        return set()
+    cache = diskcache.Cache(cache_dir)
+    bparts = set()
+    cpart_upper = vartype.upper()
+    try:
+        for key in cache:
+            parts = str(key).strip("/").split("/")
+            if len(parts) != 3:
+                continue
+            key_bpart, key_cpart, key_epart = parts
+            if key_cpart != cpart_upper:
+                continue
+            try:
+                value, _, ptype = cache[key]
+            except KeyError:
+                continue
+            if ptype == "ERROR" and isinstance(value, str) and len(value) > 0:
+                bparts.add(key_bpart.upper())
+    finally:
+        cache.close()
+    return bparts
+
+
+def _clear_stale_failures(dssfile, vartype, bparts):
+    """Remove error cache entries for *bparts* so they will be re-processed.
+
+    Called when a DSS file has appeared on disk after cache failures were
+    recorded (e.g. when a model run completes and produces new output).
+    """
+    import diskcache
+    cache_dir = postpro.get_cache_dir(dssfile)
+    if not pathlib.Path(cache_dir).exists():
+        return
+    cache = diskcache.Cache(cache_dir)
+    cpart_upper = vartype.upper()
+    suffixes = ["", "-GODIN", "-HIGH", "-LOW", "-AMP", "-ERROR"]
+    enames = [postpro.PostProcessor.TIME_INTERVAL, postpro.PostProCache.IRR_E_PART]
+    try:
+        for bpart in bparts:
+            for suffix in suffixes:
+                for epart in enames:
+                    key = postpro.PostProCache(dssfile).get_cache_key(
+                        bpart, cpart_upper + suffix, epart.upper()
+                    )
+                    if key in cache:
+                        del cache[key]
+        print(f"[on-demand] Cleared stale failures for {bparts} in {pathlib.Path(dssfile).name}")
+    finally:
+        cache.close()
+
+
 import param
 
 
@@ -122,8 +181,7 @@ def get_default_location_files():
     ``postprocessing/location_info/calibration_*_stations.csv`` files and can
     be overridden by the YAML config or CLI flags.
     """
-    import importlib.resources
-    data_dir = importlib.resources.files("dsm2ui.calib") / "data"
+    data_dir = pathlib.Path(__file__).parent / "data"
     return {
         "EC": str(data_dir / "calibration_ec_stations.csv"),
         "FLOW": str(data_dir / "calibration_flow_stations.csv"),
@@ -257,6 +315,10 @@ class CalibPlotUIManager(DataUIManager):
                 continue
             location_file = self.config["location_files_dict"].get(tkey)
             if not location_file or not pathlib.Path(location_file).exists():
+                print(
+                    f"[calibplotui] WARNING: location file for {tkey} not found "
+                    f"({location_file!r}) — skipping vartype."
+                )
                 continue
             gdf = postpro.load_location_file(location_file)
             gdf.Latitude = pd.to_numeric(gdf.Latitude, errors="coerce")
@@ -269,7 +331,11 @@ class CalibPlotUIManager(DataUIManager):
             gdf["vartype"] = str(tkey)
             gdfs.append(gdf)
         if not gdfs:
-            return gpd.GeoDataFrame()
+            loc = self.config.get("location_files_dict", {})
+            raise RuntimeError(
+                "No location files could be loaded — the station table will be empty.\n"
+                "Checked paths: " + ", ".join(f"{k}={v!r}" for k, v in loc.items())
+            )
         gdf = pd.concat(gdfs, axis=0).reset_index(drop=True)
         gdf = gdf.astype(
             {
@@ -336,9 +402,9 @@ class CalibPlotUIManager(DataUIManager):
         """Process a single station on demand and store results in the diskcache.
 
         Runs observed and model post-processors only for cache entries that are
-        not already present.  Called automatically from :meth:`create_panel`
-        when the user opens a plot for a station whose data has not yet been
-        pre-processed.
+        not already present AND have not already been attempted (and failed).
+        Called automatically from :meth:`create_panel` when the user opens a
+        plot for a station whose data has not yet been pre-processed.
         """
         import pyhecdss as _hecdss
 
@@ -348,10 +414,11 @@ class CalibPlotUIManager(DataUIManager):
         obs_dssfile = self.config["observed_files_dict"].get(vartype_name)
         if obs_dssfile:
             obs_cached = _get_cached_bparts(obs_dssfile, vartype_name)
-            if location.name.upper() not in obs_cached:
-                print(
-                    f"[on-demand] Observed  {location.name}/{vartype_name} ..."
-                )
+            obs_failed = _get_failed_bparts(obs_dssfile, vartype_name)
+            obs_bpart = location.bpart.upper()
+            # Only process if never attempted (neither success nor failure in cache)
+            if obs_bpart not in obs_cached and obs_bpart not in obs_failed:
+                print(f"[on-demand] Observed  {location.bpart}/{vartype_name} ...")
                 try:
                     _hecdss.DSSFile(obs_dssfile).catalog()
                 except Exception:
@@ -369,15 +436,30 @@ class CalibPlotUIManager(DataUIManager):
                 )
                 obs_proc.do_resample_with_merge("15min")
                 obs_proc.do_fill_in()
-                postpro.run_processor(obs_proc)
+                try:
+                    postpro.run_processor(obs_proc)
+                except Exception as _exc:
+                    print(
+                        f"[on-demand] WARNING: observed processing failed for "
+                        f"{location.bpart}/{vartype_name}: {_exc}"
+                    )
 
         # --- model studies ---
         for study_name, dssfile in self.config["study_files_dict"].items():
+            if not pathlib.Path(dssfile).exists():
+                print(f"[on-demand] Skipping {study_name}: DSS file not found ({dssfile})")
+                continue
             model_cached = _get_cached_bparts(dssfile, vartype_name)
-            if location.name.upper() not in model_cached:
-                print(
-                    f"[on-demand] Model {study_name}  {location.name}/{vartype_name} ..."
-                )
+            model_failed = _get_failed_bparts(dssfile, vartype_name)
+            model_bpart = location.name.upper()
+            # If previously failed but the DSS file now exists, clear stale failures
+            # so on-demand processing can try again (file may have been regenerated).
+            if model_bpart in model_failed:
+                _clear_stale_failures(dssfile, vartype_name, {model_bpart})
+                model_failed = model_failed - {model_bpart}
+            # Only process if never successfully cached and not a known failure
+            if model_bpart not in model_cached and model_bpart not in model_failed:
+                print(f"[on-demand] Model {study_name}  {location.name}/{vartype_name} ...")
                 try:
                     _hecdss.DSSFile(dssfile).catalog()
                 except Exception:
@@ -393,7 +475,13 @@ class CalibPlotUIManager(DataUIManager):
                     ),
                     vartype,
                 )
-                postpro.run_processor(model_proc)
+                try:
+                    postpro.run_processor(model_proc)
+                except Exception as _exc:
+                    print(
+                        f"[on-demand] WARNING: model processing failed for "
+                        f"{study_name}/{location.name}/{vartype_name}: {_exc}"
+                    )
 
     def _refresh_catalog(self, status_pane=None):
         """Rebuild the catalog and push updates to the dvue DataUI table."""
@@ -567,8 +655,16 @@ class CalibPlotUIManager(DataUIManager):
             location = self.build_location(row)
             try:
                 # On-demand post-processing: populate cache for uncached stations.
+                # Wrapped in its own try/except so a failure here does not prevent
+                # build_plot() from running with whatever data is already cached.
                 if not self.config.get("skip_ondemand"):
-                    self._run_postpro_on_demand(location, vartype)
+                    try:
+                        self._run_postpro_on_demand(location, vartype)
+                    except Exception as _ode:
+                        print(
+                            f"[on-demand] WARNING: postpro failed for "
+                            f"{location.name}/{vartype.name}: {_ode}"
+                        )
                 calib_plot_template_dict, metrics_df, failed_studies = postpro_dsm2.build_plot(
                     self.config, studies, location, vartype
                 )

@@ -18,6 +18,23 @@ _MODULE_ACTIVE_VARTYPE = {
     "gtm": ("EC",),
 }
 
+# Maps calib-ui vartype names to DMS Datastore param names used in the inventory.
+# EC and FLOW map directly.  STAGE maps to "elev" but the datastore C-part is
+# written as "elev" while postpro expects "STAGE"; the extraction helper renames
+# the C-part automatically when writing the DSS file.
+_VARTYPE_TO_DATASTORE_PARAM = {
+    "EC": "ec",
+    "FLOW": "flow",
+    "STAGE": "elev",
+}
+
+# Default observed DSS filename stem per vartype.
+_VARTYPE_DSS_STEM = {
+    "EC": "ec_cal",
+    "FLOW": "flow_cal",
+    "STAGE": "stage_cal",
+}
+
 
 def _parse_dsm2_date(date_str):
     """Parse a DSM2-format date string (e.g. '01DEC2020') into a datetime.date."""
@@ -290,3 +307,128 @@ def build_calib_config(
         yaml.dump(config, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     return str(output_file.resolve())
+
+
+def extract_observed_from_datastore(
+    datastore_dir,
+    output_dir,
+    vartypes=("EC",),
+    repo_level="screened",
+    unit_names=None,
+):
+    """Extract observed time-series from a DMS Datastore into per-vartype DSS files.
+
+    For each requested vartype, reads all matching records from the DMS Datastore
+    inventory and writes them to a ``{vartype_stem}_cal.dss`` file in *output_dir*.
+
+    The DSS B-parts are the raw datastore ``station_id`` values, which correspond
+    to the ``obs_station_id`` column in the bundled calibration station CSVs.  This
+    means the extracted DSS files can be used directly as ``observed_files_dict``
+    entries without any additional mapping.
+
+    For the STAGE vartype, the datastore ``param`` name is ``"elev"`` and its DSS
+    C-part is written as ``"elev"``.  This function renames those C-parts to
+    ``"STAGE"`` so that ``postpro`` can locate the data correctly.
+
+    Parameters
+    ----------
+    datastore_dir : str or Path
+        Directory that contains the DMS Datastore (``inventory_datasets_*.csv``
+        and the ``screened/`` or ``raw/`` subdirectories).
+    output_dir : str or Path
+        Directory where the extracted ``*_cal.dss`` files will be written.
+        Created automatically if it does not exist.
+    vartypes : iterable of str, optional
+        Calib-UI vartype names to extract (``"EC"``, ``"FLOW"``, ``"STAGE"``).
+        Default: ``("EC",)``.
+    repo_level : str, optional
+        Datastore repository level — ``"screened"`` (default) or ``"raw"``.
+    unit_names : dict, optional
+        Per-vartype unit name overrides, e.g. ``{"EC": "UMHO/CM"}``.
+        Missing entries use the unit from the inventory.
+
+    Returns
+    -------
+    dict
+        Mapping of vartype → absolute DSS file path for each successfully
+        extracted vartype.
+    """
+    from dsm2ui import datastore2dss
+
+    datastore_dir = pathlib.Path(datastore_dir)
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    unit_names = unit_names or {}
+
+    result = {}
+    for vt in vartypes:
+        vt_upper = vt.upper()
+        param = _VARTYPE_TO_DATASTORE_PARAM.get(vt_upper)
+        if param is None:
+            raise ValueError(
+                f"Unknown vartype '{vt}'. Supported: {list(_VARTYPE_TO_DATASTORE_PARAM)}"
+            )
+        stem = _VARTYPE_DSS_STEM.get(vt_upper, f"{vt_upper.lower()}_cal")
+        dssfile = str(output_dir / f"{stem}.dss")
+
+        print(f"[datastore] Extracting {vt_upper} (param={param!r}) → {dssfile}")
+        datastore2dss.read_from_datastore_write_to_dss(
+            str(datastore_dir),
+            dssfile,
+            param,
+            repo_level=repo_level,
+            unit_name=unit_names.get(vt_upper),
+        )
+
+        # For STAGE: rename C-part from "elev" → "STAGE" so postpro can find it.
+        if vt_upper == "STAGE":
+            _rename_dss_cpart(dssfile, old_cpart="elev", new_cpart="STAGE")
+
+        result[vt_upper] = str(pathlib.Path(dssfile).resolve())
+        print(f"[datastore] {vt_upper} done → {result[vt_upper]}")
+
+    return result
+
+
+def _rename_dss_cpart(dssfile, old_cpart, new_cpart):
+    """Copy all records whose C-part matches *old_cpart* to paths with *new_cpart*.
+
+    Uses pyhecdss to read and rewrite each matching pathname.  This is needed
+    because the DMS Datastore writes elevation data with C-part ``"elev"`` while
+    DSM2 postpro expects ``"STAGE"``.
+    """
+    import pyhecdss
+
+    old_upper = old_cpart.upper()
+    new_upper = new_cpart.upper()
+
+    with pyhecdss.DSSFile(dssfile) as f:
+        catalog = f.get_catalog()
+
+    pathnames_to_rename = [
+        p for p in catalog["pathname"].tolist()
+        if p.split("/")[3].upper() == old_upper
+    ]
+
+    if not pathnames_to_rename:
+        return  # nothing to rename
+
+    records = []
+    with pyhecdss.DSSFile(dssfile) as f:
+        for old_path in pathnames_to_rename:
+            try:
+                df, units, ptype = f.read_rts(old_path)
+                records.append((old_path, df, units, ptype))
+            except Exception as exc:
+                print(f"  Warning: could not read {old_path}: {exc}")
+
+    with pyhecdss.DSSFile(dssfile) as f:
+        for old_path, df, units, ptype in records:
+            parts = old_path.split("/")
+            parts[3] = new_upper
+            new_path = "/".join(parts)
+            try:
+                f.write_rts(new_path, df, units, ptype)
+                print(f"  Renamed {old_path!r} → {new_path!r}")
+            except Exception as exc:
+                print(f"  Warning: could not write {new_path}: {exc}")
