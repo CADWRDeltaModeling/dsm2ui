@@ -1298,8 +1298,16 @@ def plot_station_results(
         var_g = godin(_apply_timewindow(var_raw, timewindow)) if var_raw is not None else None
 
         # ── Slope rows ────────────────────────────────────────────────────────
-        b_row = b_idx.loc[loc.station_name] if loc.station_name in b_idx.index else None
-        v_row = v_idx.loc[loc.station_name] if loc.station_name in v_idx.index else None
+        # Use .iloc[0] when the station name appears multiple times in the index
+        # (e.g. two dsm2_ids with the same station_name like ROLD024 / BAC).
+        def _first_row(idx, name):
+            if name not in idx.index:
+                return None
+            row = idx.loc[name]
+            return row.iloc[0] if isinstance(row, pd.DataFrame) else row
+
+        b_row = _first_row(b_idx, loc.station_name)
+        v_row = _first_row(v_idx, loc.station_name)
 
         # ── Figure layout ─────────────────────────────────────────────────────
         fig = plt.figure(figsize=(14, 10))
