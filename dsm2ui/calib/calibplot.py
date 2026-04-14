@@ -131,10 +131,11 @@ def time_window_and_threshold_exclusion(df1, df2, time_window_exclusion_list_str
     df2 = threshold_exclusion(df1, df2, upper_threshold, invert_selection)
 
     if not invert_selection:
-        df2.loc[((df2["keep_tw"]==False) | (df2["keep_threshold"]==False))] = np.nan
+        mask = (df2["keep_tw"] == False) | (df2["keep_threshold"] == False)
     else:
-        df2.loc[((df2["keep_tw"]==False) & (df2["keep_threshold"]==False))] = np.nan
+        mask = (df2["keep_tw"] == False) & (df2["keep_threshold"] == False)
     df2.drop(columns=["keep_tw", "keep_threshold"], inplace=True)
+    df2.loc[mask] = np.nan
     return df2
 
 def time_window_exclusion(
@@ -206,9 +207,11 @@ def threshold_exclusion(
     if upper_threshold is None:
         upper_threshold = 999999
     else:
-        if len(str(upper_threshold)) > 0:
+        try:
             upper_threshold = float(upper_threshold)
-        else:
+            if pd.isna(upper_threshold):
+                upper_threshold = 999999
+        except (ValueError, TypeError):
             upper_threshold = 999999
     # set above_threshold in df1 
     cols = df_obs.columns
@@ -485,9 +488,9 @@ def build_calib_plot_template(
             values are holoviews Column objects, which are templates ready for rendering by display or save.
         dataframe: equations and statistics for all locations
     """
-    all_data_found, pp = load_data_for_plotting(studies, location, vartype, timewindow)
+    all_data_found, pp, failed_studies = load_data_for_plotting(studies, location, vartype, timewindow)
     if not all_data_found:
-        return None, None
+        return None, None, failed_studies
 
     tsp = build_inst_plot(
         pp,
@@ -617,7 +620,7 @@ def build_calib_plot_template(
     )
     column_dict = {"with": column_with_toolbar, "without": column_without_toolbar}
 
-    return column_dict, dfdisplayed_metrics
+    return column_dict, dfdisplayed_metrics, []
 
 
 def create_layout(
@@ -793,8 +796,16 @@ def load_data_for_plotting(studies, location, vartype, timewindow):
     # pp = [postpro.PostProcessor(study, location, vartype) for study in studies]
     pp = []
     all_data_found = True
+    failed_studies = []
     for study in studies:
-        p = postpro.PostProcessor(study, location, vartype)
+        # For model studies the DSS B-part to use for raw lookup is dsm2_id (= location.name).
+        # For the observed study the B-part is the obs station identifier stored in location.bpart.
+        # This mirrors what build_processors() does when building the postpro cache.
+        if study.name != "Observed" and location.bpart != location.name:
+            loc = location._replace(bpart=location.name)
+        else:
+            loc = location
+        p = postpro.PostProcessor(study, loc, vartype)
         pp.append(p)
         # this was commented out before
         # for p in pp:ed
@@ -820,6 +831,7 @@ def load_data_for_plotting(studies, location, vartype, timewindow):
             print(errmsg)
             logging.info(errmsg)
             all_data_found = False
+            failed_studies.append(study.name)
     if not all_data_found:
         errmsg = (
             "Not creating plots because data not found for location, vartype, timewindow = "
@@ -838,8 +850,8 @@ def load_data_for_plotting(studies, location, vartype, timewindow):
             "==============================================================================="
         )
         logging.info(errmsg)
-        return None, None
-    return all_data_found, pp
+        return None, None, failed_studies
+    return all_data_found, pp, []
 
 
 def get_units(flow_in_thousands=False, units=None):

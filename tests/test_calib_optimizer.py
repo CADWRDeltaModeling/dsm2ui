@@ -814,6 +814,75 @@ class TestOptimizeEndToEnd:
         assert result.n_evals > 0
         assert result.best_objective <= result.initial_objective + 1e-9
 
+    # ── sweep ─────────────────────────────────────────────────────────────────
+
+    def test_sweep_returns_valid_result(self, tmp_path):
+        def quad(x):
+            return float(np.sum((x - np.array([300.0, 600.0])) ** 2) / 1e6)
+
+        result, _ = self._run_optimize(tmp_path, method="sweep", objective_fn=quad,
+                                        extra_cfg={"sweep_points_per_param": 4,
+                                                   "sweep_zoom_factor": 0.5})
+        assert isinstance(result, OptimizationResult)
+        assert result.n_evals > 0
+
+    def test_sweep_reduces_objective_for_quadratic(self, tmp_path):
+        def quad(x):
+            return float(np.sum((x - np.array([300.0, 600.0])) ** 2) / 1e6)
+
+        result, _ = self._run_optimize(tmp_path, method="sweep", objective_fn=quad,
+                                        extra_cfg={"sweep_points_per_param": 5,
+                                                   "sweep_zoom_factor": 0.5,
+                                                   "max_model_runs": 60,
+                                                   "max_iter": 4})
+        assert result.best_objective < result.initial_objective
+
+    def test_sweep_moves_parameters_toward_optimum(self, tmp_path):
+        """Best params should shift closer to [300, 600] than starting [500, 800]."""
+        def quad(x):
+            return float(np.sum((x - np.array([300.0, 600.0])) ** 2) / 1e6)
+
+        result, _ = self._run_optimize(tmp_path, method="sweep", objective_fn=quad,
+                                        extra_cfg={"sweep_points_per_param": 5,
+                                                   "sweep_zoom_factor": 0.5,
+                                                   "max_model_runs": 60,
+                                                   "max_iter": 4})
+        # Starting point is [500, 800] (from _minimal_cfg); best should be closer to optimum
+        dist_init = np.sqrt((500 - 300)**2 + (800 - 600)**2)
+        dist_best = np.sqrt(
+            (result.best_params.get("grp_a", 500) - 300)**2 +
+            (result.best_params.get("grp_b", 800) - 600)**2
+        )
+        assert dist_best < dist_init
+
+    def test_sweep_respects_max_model_runs(self, tmp_path):
+        max_runs = 20
+        result, _ = self._run_optimize(tmp_path, method="sweep",
+                                        extra_cfg={"sweep_points_per_param": 4,
+                                                   "max_model_runs": max_runs,
+                                                   "max_iter": 10})
+        # Should never exceed budget by more than sweep_points_per_param (one extra batch)
+        assert result.n_evals <= max_runs + 4 + 1  # +1 for init
+
+    def test_sweep_no_zoom_covers_full_range(self, tmp_path):
+        """With zoom=1.0 the search range should not shrink."""
+        sampled_values = []
+
+        def recording_quad(x):
+            sampled_values.append(x.tolist())
+            return float(np.sum((x - np.array([300.0, 600.0])) ** 2) / 1e6)
+
+        result, _ = self._run_optimize(tmp_path, method="sweep", objective_fn=recording_quad,
+                                        extra_cfg={"sweep_points_per_param": 4,
+                                                   "sweep_zoom_factor": 1.0,
+                                                   "max_iter": 2,
+                                                   "max_model_runs": 40})
+        assert isinstance(result, OptimizationResult)
+        # All samples for param 0 across rounds should span the full [50, 5000] bounds
+        p0_vals = [v[0] for v in sampled_values]
+        assert min(p0_vals) <= 500   # somewhere near lower bound
+        assert max(p0_vals) >= 4000  # somewhere near upper bound
+
     # ── optimized YAML is written ─────────────────────────────────────────────
 
     def test_optimized_yaml_written(self, tmp_path):

@@ -211,7 +211,7 @@ def build_plot(
             if vartype.name == "EC":
                 include_inst_plot = False
 
-    calib_plot_template_dict, metrics_df = calibplot.build_calib_plot_template(
+    calib_plot_template_dict, metrics_df, failed_studies = calibplot.build_calib_plot_template(
         studies,
         location,
         vartype,
@@ -248,7 +248,7 @@ def build_plot(
         cols = list(metrics_df)
         cols.insert(0, cols.pop(cols.index("Location")))
         metrics_df = metrics_df.loc[:, cols]
-    return calib_plot_template_dict, metrics_df
+    return calib_plot_template_dict, metrics_df, failed_studies
 
 
 def build_and_save_plot(
@@ -277,7 +277,7 @@ def build_and_save_plot(
         else True
     )
 
-    calib_plot_template_dict, metrics_df = build_plot(
+    calib_plot_template_dict, metrics_df, _ = build_plot(
         config_data,
         studies,
         location,
@@ -311,6 +311,7 @@ def build_and_save_plot(
             (
                 calib_plot_template_masked_time_period_dict,
                 metrics_df_masked_time_period,
+                _,
             ) = build_plot(
                 config_data,
                 studies,

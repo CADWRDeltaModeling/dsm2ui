@@ -23,7 +23,7 @@ varname = row["vartype"]
 vartype = postpro.VarType(varname, dui.config["vartype_dict"][varname])
 studies = dui.get_studies(varname)
 location = dui.build_location(row)
-layout, metrics = postpro_dsm2.build_plot(dui.config, studies, location, vartype)
+layout, metrics, _ = postpro_dsm2.build_plot(dui.config, studies, location, vartype)
 overlay = layout["with"]
 # %%
 import panel as pn

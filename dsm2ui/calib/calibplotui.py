@@ -137,7 +137,6 @@ class CalibPlotUIManager(DataUIManager):
             gdf = postpro.load_location_file(value)
             gdf.Latitude = pd.to_numeric(gdf.Latitude, errors="coerce")
             gdf.Longitude = pd.to_numeric(gdf.Longitude, errors="coerce")
-            gdf.threshold_value = pd.to_numeric(gdf.threshold_value, errors="coerce")
             gdf = gpd.GeoDataFrame(
                 gdf,
                 geometry=gpd.points_from_xy(gdf.Longitude, gdf.Latitude),
@@ -154,11 +153,11 @@ class CalibPlotUIManager(DataUIManager):
                 model_bparts |= _get_cached_bparts(dssfile, tkey)
 
             if obs_bparts or model_bparts:
-                # Keep rows whose BPart is in both observed AND at least one model cache.
+                # Keep rows whose Name (dsm2_id) is in both observed AND at least one model cache.
                 # Fall back to no filtering if caches are empty (e.g. pre-postpro run).
                 valid_bparts = obs_bparts & model_bparts
                 if valid_bparts:
-                    gdf = gdf[gdf["BPart"].str.upper().isin(valid_bparts)]
+                    gdf = gdf[gdf["Name"].str.upper().isin(valid_bparts)]
 
             gdfs.append(gdf)
         gdf = pd.concat(gdfs, axis=0).reset_index(drop=True)
@@ -262,7 +261,7 @@ class CalibPlotUIManager(DataUIManager):
             studies = self.get_studies(varname)
             location = self.build_location(row)
             try:
-                calib_plot_template_dict, metrics_df = postpro_dsm2.build_plot(
+                calib_plot_template_dict, metrics_df, failed_studies = postpro_dsm2.build_plot(
                     self.config, studies, location, vartype
                 )
                 if calib_plot_template_dict and ("with" in calib_plot_template_dict):
@@ -273,10 +272,53 @@ class CalibPlotUIManager(DataUIManager):
                         )
                     )
                 else:
-                    raise ValueError("No plot found for location: " + location.name)
+                    study_names = [s.name for s in studies]
+                    missing = failed_studies if failed_studies else study_names
+                    msg = (
+                        f"## No plot available: {location.name} ({varname})\n\n"
+                        f"**DSM2 ID (model B-part):** {location.name}  \n"
+                        f"**Variable:** {varname}  \n"
+                        f"**Observed DSS B-part (obs_station_id):** {location.bpart}  \n"
+                        f"**Studies with missing cached data:** {', '.join(missing) if missing else 'unknown'}  \n\n"
+                        f"**All studies checked:** {', '.join(study_names)}  \n\n"
+                        "**Possible causes:**\n"
+                        "- Post-processing has not been run yet for one or more studies at this location. "
+                        "Run the postpro step to populate the cache.\n"
+                        f"- The model DSS file does not contain `//{location.name}/{varname}////`.\n"
+                        f"- The observed DSS file does not contain `//{location.bpart}/{varname}////`.\n"
+                        "- The timewindow in the config does not overlap with available data.\n\n"
+                        f"*Note: '{location.bpart}' is the observed-data station ID for this location "
+                        f"(dsm2_id={location.name}). Model data is always looked up by dsm2_id.*"
+                    )
+                    print(
+                        f"No plot found for {location.name} ({varname}). "
+                        f"Studies with missing data: {', '.join(missing) if missing else 'unknown'}"
+                    )
+                    plots.append(
+                        (
+                            location.name + "@" + varname,
+                            pn.pane.Markdown(msg, styles={"color": "#8B0000"}),
+                        )
+                    )
             except Exception as e:
-                print(e)
-                print("No plot found for location: " + location.name)
+                msg = (
+                    f"## Error loading plot: {location.name} ({varname})\n\n"
+                    f"**Exception:** {e}  \n\n"
+                    f"**DSM2 ID (model B-part):** {location.name}  \n"
+                    f"**Variable:** {varname}  \n"
+                    f"**Observed DSS B-part (obs_station_id):** {location.bpart}  \n\n"
+                    f"*Note: '{location.bpart}' is the observed-data station ID for this location "
+                    f"(dsm2_id={location.name}). Model data is looked up by dsm2_id.*"
+                )
+                print(
+                    f"Exception building plot for {location.name} ({varname}): {e}"
+                )
+                plots.append(
+                    (
+                        location.name + "@" + varname,
+                        pn.pane.Markdown(msg, styles={"color": "#8B0000"}),
+                    )
+                )
         return pn.Tabs(*plots, dynamic=True, closable=True)
 
     # methods below if geolocation data is available
