@@ -1,12 +1,15 @@
 # Postpro-Model
 from cmath import e
 from distutils.command.config import config
+import logging
 import os
 import pydsm
 from pydsm.analysis import postpro
 import json
 import yaml
 import sys
+
+logger = logging.getLogger(__name__)
 
 
 # dask is a parallel processing library. Using it will save a lot of time, but error
@@ -58,8 +61,6 @@ def run_all(processors):
 
 def postpro_model(cluster, config_data, use_dask, skip_if_cached=False):
     # Setup for EC, FLOW, STAGE
-    # import logging
-    # logging.basicConfig(filename='postpro-model.log', level=logging.DEBUG)
     vartype_dict = config_data["vartype_dict"]
     # this specifies the files that are to be post-processed. Using study_files_dict resulted in all study files being post-processed.
     postpro_model_dict = config_data["postpro_model_dict"]
@@ -70,7 +71,7 @@ def postpro_model(cluster, config_data, use_dask, skip_if_cached=False):
         for var_name in vartype_dict:
             vartype = postpro.VarType(var_name, vartype_dict[var_name])
             if vartype_timewindow_dict[vartype.name] is not None:
-                print("processing model " + vartype.name + " data")
+                logger.info("Processing model %s data", vartype.name)
                 for study_name in postpro_model_dict:
                     dssfile = postpro_model_dict[study_name]
                     # catalog the DSS file. If you don't do this, processes are likely to fail the first time you run them with an
@@ -82,14 +83,14 @@ def postpro_model(cluster, config_data, use_dask, skip_if_cached=False):
                     processors = postpro.build_processors(
                         dssfile, locationfile, vartype.name, units, study_name, observed
                     )
-                    print(f"Processing {vartype.name} for study: {study_name}")
+                    logger.info("Processing %s for study: %s", vartype.name, study_name)
                     if use_dask:
                         run_all(processors)
                     else:
                         for p in processors:
                             postpro.run_processor(p, skip_if_cached=skip_if_cached)
     except Exception as e:
-        print("exception caught in postpro-model.py.run_processes. exiting. " + str(e))
+        logger.exception("Error in postpro_model: %s", e)
     finally:
         # Always shut down the cluster when done.
         if use_dask:
@@ -106,7 +107,7 @@ def postpro_observed(cluster, config_data, use_dask):
     try:
         for vartype in vartype_dict:
             if vartype_timewindow_dict[vartype] is not None:
-                print("processing observed " + vartype + " data")
+                logger.info("Processing observed %s data", vartype)
                 dssfile = observed_files_dict[vartype]
                 # catalog the DSS file. If you don't do this, processes are likely to fail the first time you run them with an
                 # uncataloged DSS File, if you are using dask.
@@ -144,7 +145,7 @@ def save_to_graphics_format(calib_plot_template, fname):
     try:
         calib_plot_template.save(fname)
     except Exception as e:
-        print(f'unable to create plot for {fname}: {type(e).__name__}: {e}')
+        logger.error("Unable to save plot to %s: %s: %s", fname, type(e).__name__, e)
 
 
 def build_plot(
@@ -194,7 +195,7 @@ def build_plot(
     # Flow and stage are tidal (also certain water quality constituents)
     tidal_data = vartype.name != "EC"
     if location == "RSAC128-RSAC123":
-        print("cross-delta flow")
+        logger.debug("cross-delta flow: disabling tidal template")
         tidal_data = False
     flow_in_thousands = vartype.name == "FLOW"
     units = vartype.units
@@ -236,9 +237,9 @@ def build_plot(
     #         tidal_template=flow_or_stage, flow_in_thousands=flow_in_thousands, units=units,inst_plot_timewindow=inst_plot_timewindow, include_kde_plots=include_kde_plots,
     #         zoom_inst_plot=zoom_inst_plot)
     if calib_plot_template_dict is None:
-        print("postpro_dsm2.build_plot: failed to create plots")
+        logger.warning("build_plot: failed to create plots for %s / %s", location.name, vartype.name)
     if metrics_df is None:
-        print("postpro_dsm2.build_plot: failed to create metrics")
+        logger.warning("build_plot: failed to create metrics for %s / %s", location.name, vartype.name)
     else:
         location_list = []
         for r in range(metrics_df.shape[0]):
@@ -264,13 +265,12 @@ def build_and_save_plot(
     output_format="png",
     metrics_table_list=None,
 ):
-    print('build_and_save_plot: location='+str(location))
-    # def build_and_save_plot(config_data, studies, location, vartype, write_html=False, write_graphics=True, output_format='png'):
+    logger.info("Building and saving plot: location=%s, vartype=%s", location, vartype.name)
+    # def build_and_save_plot(config_data, studies, location, vartype, write_html=False, write_graphics=True, output_format='png')
     study_files_dict = config_data["study_files_dict"]
     options_dict = config_data["options_dict"]
     output_plot_dir = options_dict["output_folder"]
-    print("build and save plot: output_plot_dir = " + output_plot_dir)
-    print("Building plot template for location: " + str(location))
+    logger.debug("Output folder: %s", output_plot_dir)
     mask_data = (
         options_dict["mask_plot_metric_data"]
         if "mask_plot_metric_data" in options_dict
@@ -294,9 +294,9 @@ def build_and_save_plot(
         calib_plot_template_without_toolbar = calib_plot_template_dict["without"]
         # calib_plot_template, metrics_df = build_plot(config_data, studies, location, vartype)
         if calib_plot_template_dict is None:
-            print("failed to create plots")
+            logger.warning("Failed to create plots for %s / %s", location.name, vartype.name)
         if metrics_df is None:
-            print("failed to create metrics")
+            logger.warning("Failed to create metrics for %s / %s", location.name, vartype.name)
         output_template_with_toolbar = calib_plot_template_with_toolbar
         output_template_without_toolbar = calib_plot_template_without_toolbar
 
@@ -326,9 +326,9 @@ def build_and_save_plot(
             )
             # calib_plot_template, metrics_df = build_plot(config_data, studies, location, vartype)
             if calib_plot_template_masked_time_period_dict is None:
-                print("postpro_dsm2.build_and_save_plot: failed to create plots for masked time period")
+                logger.warning("Failed to create plots for masked time period: %s / %s", location.name, vartype.name)
             if metrics_df_masked_time_period is None:
-                print("postpro_dsm2.build_and_save_plot: failed to create metrics for masked time period")
+                logger.warning("Failed to create metrics for masked time period: %s / %s", location.name, vartype.name)
             calib_plot_template_masked_time_period_with_toolbar = (
                 calib_plot_template_masked_time_period_dict["with"]
             )
@@ -355,34 +355,22 @@ def build_and_save_plot(
             and calib_plot_template_without_toolbar is not None
         ):
             if write_html:
-                print(
-                    "writing to html: "
-                    f"{output_plot_dir}{location.name}_{vartype.name}.html"
-                )
+                logger.info("Writing HTML: %s%s_%s.html", output_plot_dir, location.name, vartype.name)
                 output_template_with_toolbar.save(
                     f"{output_plot_dir}{location.name}_{vartype.name}.html",
                     title=location.name,
                 )
             if write_graphics:
-                print(
-                    "writing to png: "
-                    f"{output_plot_dir}{location.name}_{vartype.name}.png"
-                )
+                logger.info("Writing PNG: %s%s_%s.png", output_plot_dir, location.name, vartype.name)
                 save_to_graphics_format(
                     output_template_without_toolbar,
                     f"{output_plot_dir}{location.name}_{vartype.name}.png",
                 )
         #         export_svg(calib_plot_template,f'{output_plot_dir}{location.name}_{vartype.name}.svg')
     else:
-        print(
-            "***************************************************************************************************************************************"
-        )
-        print(
-            "not creating output for location (there may be no data in specified time period): "
-            + location.name
-        )
-        print(
-            "***************************************************************************************************************************************"
+        logger.warning(
+            "No data for location %s — skipping output (no data in specified time period)",
+            location.name,
         )
 
     if metrics_df is not None:
@@ -472,7 +460,7 @@ def merge_statistics_files(vartype, config_data):
 
     import glob, os
 
-    print("merging statistics files")
+    logger.info("Merging statistics files for vartype: %s", vartype.name)
     filename_prefix_list = [
         "summary_statistics_masked_time_period_",
         "summary_statistics_unmasked_",
@@ -499,7 +487,7 @@ def merge_statistics_files(vartype, config_data):
             )
             for f in files:
                 os.remove(f)
-                print('removed file '+f)
+                logger.debug("Removed temp statistics file: %s", f)
 
 
 def postpro_heatmaps(cluster, config_data, use_dask):
@@ -583,16 +571,11 @@ def postpro_copy_plot_files(cluster, config_data):
         for location in location_list:
             infile = d + location + "_" + const + ".png"
             outfile = d + plot_type + "_" + str(i) + "_" + location + ".png"
-            print("infile, outfile=" + infile + "," + outfile)
+            logger.debug("Copying: %s -> %s", infile, outfile)
             try:
                 shutil.copy2(infile, outfile)
-            except FileNotFoundError as e:
-                print(
-                    "FileNotFoundError exception caught: infile, outfile: "
-                    + infile
-                    + ","
-                    + outfile
-                )
+            except FileNotFoundError:
+                logger.warning("File not found when copying: %s -> %s", infile, outfile)
             i += 1
 
 
@@ -639,7 +622,7 @@ def postpro_plots(cluster, config_data, use_dask):
         gate_vartype = postpro.VarType("POS", "")
         for var_name in vartype_dict:
             vartype = postpro.VarType(var_name, vartype_dict[var_name])
-            print("vartype=" + str(vartype))
+            logger.info("Processing vartype: %s", vartype)
             if vartype_timewindow_dict[vartype.name] is not None:
                 # set a separate timewindow for instantaneous plots
                 inst_plot_timewindow = inst_plot_timewindow_dict[vartype.name]
@@ -647,7 +630,7 @@ def postpro_plots(cluster, config_data, use_dask):
                 # The .csv file should have atleast 'Name','BPart' and 'Description' columns
                 locationfile = location_files_dict[vartype.name]
                 dfloc = postpro.load_location_file(locationfile)
-                print("about to read location file: " + locationfile)
+                logger.info("Reading location file: %s", locationfile)
                 locations = [
                     postpro.Location(
                         r["Name"],
@@ -667,12 +650,12 @@ def postpro_plots(cluster, config_data, use_dask):
                     df_gate_loc = postpro.load_location_file(
                         gate_locationfile, gate_data=True
                     )
-                    print("df_gate_loc=" + str(df_gate_loc))
+                    logger.debug("Gate locations loaded: %s", df_gate_loc)
                     gate_locations = [
                         postpro.Location(r["Name"], r["BPart"], r["Description"])
                         for i, r in df_gate_loc.iterrows()
                     ]
-                    print("gate_locations: " + str(gate_locations))
+                    logger.debug("gate_locations: %s", gate_locations)
                     gate_studies = [
                         postpro.Study("Gate", gate_file_dict[name])
                         for name in gate_file_dict
@@ -688,7 +671,7 @@ def postpro_plots(cluster, config_data, use_dask):
 
                 # now run the processes
                 if use_dask:
-                    print("using dask")
+                    logger.info("Using Dask for plot generation")
                     tasks = [
                         dask.delayed(build_and_save_plot)(
                             config_data,
@@ -710,7 +693,7 @@ def postpro_plots(cluster, config_data, use_dask):
                     #                                 dask_key_name=f'build_and_save::{location}:{vartype}') for location in locations]
                     dask.compute(tasks)
                 else:
-                    print("not using dask")
+                    logger.info("Running plot generation sequentially (no Dask)")
                     for location in locations:
                         # this try/except is necessary to keep processes running if data
                         # are not found for a station. However, this must be temporarily disabled for debugging
@@ -728,7 +711,7 @@ def postpro_plots(cluster, config_data, use_dask):
                                 metrics_table_list=metrics_table_list,
                             )
                         except Exception as e:
-                            print('unable to create plots/metrics layout for '+str(location.name))
+                            logger.error("Unable to create plots/metrics for %s: %s", location.name, e)
 
                 merge_statistics_files(vartype, config_data)
     finally:
@@ -741,12 +724,11 @@ def check_config_data(config_data):
         "process_vartype_dict" in config_data
         or "vartype_timewindow_dict" not in config_data
     ):
-        print(
-            """**********************************************************************************************************
-        Config file error: process_vartype_dict should be replaced with vartype_timewindow_dict. YAML Example:
-        vartype_timewindow_dict:\n  EC: qual_tw\n  FLOW: hydro_tw\n  STAGE: hydro_tw
-        Exiting. Fix your config file before re-running processes, by removing process_vartype_dict, and/or adding vartype_timewindow_dict.
-        **********************************************************************************************************"""
+        logger.error(
+            "Config file error: 'process_vartype_dict' should be replaced with "
+            "'vartype_timewindow_dict'. Example:\n"
+            "  vartype_timewindow_dict:\n    EC: qual_tw\n    FLOW: hydro_tw\n    STAGE: hydro_tw\n"
+            "Remove 'process_vartype_dict' and/or add 'vartype_timewindow_dict' before re-running."
         )
         exit(0)
 
@@ -772,13 +754,12 @@ def run_process(process_name, config_filename, use_dask, skip_if_cached=False):
             try:
                 config_data = yaml.safe_load(stream)
             except yaml.YAMLError as exc:
-                print(exc)
+                logger.error("YAML parse error in %s: %s", config_filename, exc)
     else:
-        print("error: config file must be .json, .yml, or .yaml")
+        logger.error("Config file must be .json, .yml, or .yaml — got: %s", config_filename)
         exit(0)
 
-    print('config_data='+str(config_data))
-    print('config filename='+config_filename)
+    logger.debug("Config data loaded from %s", config_filename)
     # check data in json or yaml file
     check_config_data(config_data)
 
@@ -788,7 +769,7 @@ def run_process(process_name, config_filename, use_dask, skip_if_cached=False):
     if use_dask:
         cluster = DaskCluster(config_data)
         cluster.start_local_cluster()
-        print(c_link)
+        logger.debug("Dask cluster started")
     c_link
     if process_name.lower() == "model":
         postpro_model(cluster, config_data, use_dask, skip_if_cached=skip_if_cached)
@@ -803,4 +784,4 @@ def run_process(process_name, config_filename, use_dask, skip_if_cached=False):
     elif process_name.lower() == "copy_plot_files":
         postpro_copy_plot_files(cluster, config_data)
     else:
-        print("Error in dsm2ui.postpro: process_name unrecognized: " + process_name)
+        logger.error("Unrecognized process name: %s", process_name)
