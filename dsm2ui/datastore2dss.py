@@ -48,8 +48,8 @@ def read_from_datastore_write_to_dss(
         for idx, row in tqdm.tqdm(
             param_inventory.iterrows(), total=len(param_inventory)
         ):
-            filepattern = os.path.join(datastore_dir, repo_level, row["filename"])
-            ts = read_ts.read_ts(filepattern)
+            filepattern = os.path.join(datastore_dir, repo_level, row["file_pattern"])
+            ts = read_ts(filepattern)
             print("Reading ", filepattern)
             if pd.isna(row["subloc"]):
                 bpart = row["station_id"]
@@ -69,7 +69,10 @@ def read_from_datastore_write_to_dss(
 
 def write_station_lat_lng(datastore_dir, station_file, param, repo_level="screened"):
     """
-    Writes station_id, latitude, longitude to a csv file
+    Writes station metadata to a csv file.
+
+    Columns written: station_id, station_name, agency, lat, lon,
+    utm_easting, utm_northing (x/y from the inventory, UTM Zone 10N).
 
     Parameters
     ----------
@@ -89,7 +92,18 @@ def write_station_lat_lng(datastore_dir, station_file, param, repo_level="screen
     inventory = pd.read_csv(inventory_file)
     inventory = inventory[inventory["param"] == param]
     inventory = inventory.drop_duplicates(subset=["station_id"])
-    inventory = inventory[["station_id", "lat", "lon"]]
+    cols = ["station_id"]
+    rename = {}
+    if "name" in inventory.columns:
+        cols.append("name")
+        rename["name"] = "station_name"
+    if "agency" in inventory.columns:
+        cols.append("agency")
+    cols += ["lat", "lon"]
+    if "x" in inventory.columns and "y" in inventory.columns:
+        cols += ["x", "y"]
+        rename.update({"x": "utm_easting", "y": "utm_northing"})
+    inventory = inventory[cols].rename(columns=rename)
     inventory.to_csv(station_file, index=False)
     print("Wrote to ", station_file)
     print("Done")

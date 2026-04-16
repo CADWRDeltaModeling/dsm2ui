@@ -60,7 +60,7 @@ class _LazyGroup(click.Group):
         "xsect-ui":    ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_xsect_ui",     "Show DSM2 tidefile cross-section UI",    True),
         "dss-ui":      ("dsm2ui.dssui.dssui",            "show_dss_ui",                     "Show DSS file browser UI"),
         "geo-heatmap": ("dsm2ui.calib.geoheatmap",       "show_metrics_geo_heatmap",        "Show calibration metrics geo heatmap",        True),
-        "geolocate":   ("pydsm.viz.dsm2gis",             "geolocate_output_locations",      "Geolocate DSM2 output locations"),
+        "geolocate":   ("pydsm.viz.dsm2gis",             "geolocate_output_locations",      "Geolocate DSM2 output locations",     True),
         "dcd-map":     ("dsm2ui.deltacdui.deltacdui",    "dcd_geomap",                      "Show Delta CD geographic map",           True),
         "dcd-nodes":   ("dsm2ui.deltacdui.deltacdui",    "show_deltacd_nodes_ui",           "Show Delta CD nodes UI",                 True),
         "calib-ui":    ("dsm2ui.calib.calibplotui",      "calib_plot_ui",                   "Launch interactive calibration plot viewer",  True),
@@ -203,15 +203,21 @@ def datastore_group():
 
 
 @datastore_group.command(name="extract")
-@click.argument(
-    "datastore_dir",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True),
-)
-@click.argument(
-    "dssfile",
-    type=click.Path(dir_okay=False, exists=False, readable=False),
-)
 @click.argument("param", type=_PARAM_CHOICES)
+@click.option(
+    "--repo",
+    "datastore_dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True),
+    help="Path to the DMS Datastore directory.",
+)
+@click.option(
+    "--output",
+    "dssfile",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="DSS file to write extracted time series to.",
+)
 @click.option(
     "--repo-level",
     type=click.Choice(["screened"], case_sensitive=False),
@@ -229,19 +235,22 @@ def datastore_group():
     "--stations",
     type=click.Path(dir_okay=False),
     default=None,
-    help="Also write a station CSV (station_id, lat, lon) to this file path.",
+    help="Write a station CSV (station_id, lat, lon) to this file path.",
 )
 def datastore_extract(datastore_dir, dssfile, param, repo_level, unit_name, stations):
-    """Extract a parameter from a DMS Datastore into a DSS file.
+    """Extract a parameter from a DMS Datastore.
 
-    Optionally write a station lat/lon CSV with --stations FILE.
+    At least one of --output or --stations must be provided.
 
     Valid PARAM values: elev, predictions, flow, temp, do, ec, ssc, turbidity, ph, velocity, cla
     """
+    if not dssfile and not stations:
+        raise click.UsageError("Provide --output, --stations, or both.")
     from dsm2ui import datastore2dss
-    datastore2dss.read_from_datastore_write_to_dss(
-        datastore_dir, dssfile, param, repo_level, unit_name=unit_name
-    )
+    if dssfile:
+        datastore2dss.read_from_datastore_write_to_dss(
+            datastore_dir, dssfile, param, repo_level, unit_name=unit_name
+        )
     if stations:
         datastore2dss.write_station_lat_lng(datastore_dir, stations, param, repo_level)
         click.echo(f"Station CSV written to: {stations}")
@@ -486,7 +495,7 @@ def datastore_to_stationfile(datastore_dir, stationfile, param):
 # stations-out
 # ---------------------------------------------------------------------------
 
-@main.command(name="stations-out")
+@main.command(name="stations-out", hidden=True)
 @click.argument(
     "stations_file",
     type=click.Path(dir_okay=False, exists=True, readable=True),
@@ -507,7 +516,7 @@ def datastore_to_stationfile(datastore_dir, stationfile, param):
 def stations_output_file(
     stations_file, centerlines_file, output_file, distance_tolerance=100
 ):
-    """Create DSM2 channels output compatible file for given stations and centerlines."""
+    """[Deprecated] Use 'dsm2ui station-map to-dsm2' instead."""
     from pydsm.viz import dsm2gis
     dsm2gis.create_stations_output_file(
         stations_file=stations_file,
@@ -515,6 +524,118 @@ def stations_output_file(
         output_file=output_file,
         distance_tolerance=distance_tolerance,
     )
+
+
+# ---------------------------------------------------------------------------
+# station-map group
+# ---------------------------------------------------------------------------
+
+@click.group(name="station-map", context_settings=CONTEXT_SETTINGS)
+def station_map_group():
+    """Map stations between lat/lon and DSM2 channel locations."""
+    pass
+
+
+@station_map_group.command(name="to-dsm2")
+@click.argument(
+    "stations_csv",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+)
+@click.argument(
+    "centerlines_geojson",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+)
+@click.argument(
+    "output_csv",
+    type=click.Path(dir_okay=False),
+)
+@click.option(
+    "--distance-tolerance",
+    type=click.INT,
+    default=100,
+    show_default=True,
+    help="Maximum distance (ft) from a channel centerline for a station to be considered matched.",
+)
+@click.option(
+    "--unmatched",
+    "unmatched_csv",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Write unmatched stations to this CSV (default: <output>_unmatched.csv).",
+)
+def station_map_to_dsm2(stations_csv, centerlines_geojson, output_csv, distance_tolerance, unmatched_csv):
+    """Snap lat/lon stations to DSM2 channels, writing NAME (uppercased), CHAN_NO, DISTANCE.
+
+    Stations that cannot be snapped within the distance tolerance are written to
+    a separate unmatched CSV for review and correction.
+    """
+    import tempfile, os
+    import pandas as pd
+    from pydsm.viz import dsm2gis
+    from pathlib import Path
+
+    out_path = Path(output_csv)
+    if unmatched_csv is None:
+        unmatched_csv = str(out_path.parent / (out_path.stem + "_unmatched.csv"))
+
+    stations_df = pd.read_csv(stations_csv)
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        dsm2gis.create_stations_output_file(
+            stations_file=stations_csv,
+            centerlines_file=centerlines_geojson,
+            output_file=tmp_path,
+            distance_tolerance=distance_tolerance,
+        )
+        snapped = pd.read_csv(tmp_path, sep=" ")
+    finally:
+        os.unlink(tmp_path)
+
+    snapped["NAME"] = snapped["NAME"].str.upper()
+
+    snapped_ids = set(snapped["NAME"].str.lower())
+    input_ids = stations_df["station_id"].str.lower() if "station_id" in stations_df.columns else pd.Series(dtype=str)
+    unmatched_mask = ~input_ids.isin(snapped_ids)
+    unmatched = stations_df[unmatched_mask]
+
+    snapped.to_csv(output_csv, index=False, sep=" ")
+    click.echo(f"Wrote {len(snapped)} matched stations to: {output_csv}")
+
+    if not unmatched.empty:
+        unmatched.to_csv(unmatched_csv, index=False)
+        click.echo(
+            f"WARNING: {len(unmatched)} station(s) unmatched (tolerance={distance_tolerance} ft) "
+            f"— written to: {unmatched_csv}"
+        )
+
+
+@station_map_group.command(name="from-dsm2")
+@click.argument(
+    "echo_file",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+)
+@click.argument(
+    "centerlines_geojson",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+)
+@click.argument(
+    "output_geojson",
+    type=click.Path(dir_okay=False),
+)
+def station_map_from_dsm2(echo_file, centerlines_geojson, output_geojson):
+    """Geolocate DSM2 OUTPUT_CHANNEL stations from an echo file to a GeoJSON.
+
+    Reads the CHANNEL and OUTPUT_CHANNEL tables from the DSM2 echo file,
+    interpolates each station's position along its channel centerline, and
+    writes a GeoJSON with NAME, CHAN_NO, DISTANCE and point geometry.
+    """
+    from pydsm.viz import dsm2gis
+    dsm2gis.geolocate_output_locations.callback(echo_file, centerlines_geojson, output_geojson)
+
+
+main.add_command(station_map_group)
 
 
 # ---------------------------------------------------------------------------

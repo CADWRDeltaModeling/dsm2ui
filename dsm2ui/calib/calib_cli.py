@@ -480,6 +480,56 @@ def calib_cascade(config, resume, dry_run, skip_init, log_level):
 
 
 # ---------------------------------------------------------------------------
+# calib stations-csv
+# ---------------------------------------------------------------------------
+
+@calib.command(name="stations-csv")
+@click.argument(
+    "stations_csv",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+)
+@click.argument(
+    "centerlines_geojson",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+)
+@click.argument(
+    "output_csv",
+    type=click.Path(dir_okay=False),
+)
+@click.option(
+    "--distance-tolerance",
+    type=click.INT,
+    default=100,
+    show_default=True,
+    help="Maximum distance (ft) from a channel centerline for a station to be considered matched.",
+)
+@click.option(
+    "--unmatched",
+    "unmatched_csv",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Path for unmatched-stations CSV (default: <output>_unmatched.csv).",
+)
+def calib_stations_csv(stations_csv, centerlines_geojson, output_csv, distance_tolerance, unmatched_csv):
+    """Build calibration_ec_stations.csv from a datastore stations CSV.
+
+    STATIONS_CSV is the enriched CSV produced by 'dsm2ui datastore extract --stations'.
+    Stations that cannot be snapped to a DSM2 channel are written to a separate
+    unmatched CSV for review.
+
+    DSM2 output names (dsm2_id) are written in uppercase.
+    """
+    from dsm2ui.calib.calib_stations import build_calib_stations_csv
+    build_calib_stations_csv(
+        stations_csv=stations_csv,
+        centerlines_file=centerlines_geojson,
+        output_csv=output_csv,
+        unmatched_csv=unmatched_csv,
+        distance_tolerance=distance_tolerance,
+    )
+
+
+# ---------------------------------------------------------------------------
 # calib init
 # ---------------------------------------------------------------------------
 
