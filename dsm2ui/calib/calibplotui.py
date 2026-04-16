@@ -160,6 +160,8 @@ def _clear_all_caches(config):
     cleared = 0
     skipped = 0
     for f in dss_files:
+        if not f:
+            continue
         cache_dir = postpro.get_cache_dir(f)
         if pathlib.Path(cache_dir).exists():
             postpro.PostProCache(f).clear()
