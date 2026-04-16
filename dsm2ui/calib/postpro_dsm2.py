@@ -264,8 +264,12 @@ def build_and_save_plot(
     write_graphics=True,
     output_format="png",
     metrics_table_list=None,
+    _progress_label=None,
 ):
-    logger.info("Building and saving plot: location=%s, vartype=%s", location, vartype.name)
+    import time as _time
+    _t0 = _time.monotonic()
+    _label = _progress_label or f"{location.name}/{vartype.name}"
+    logger.info("[plot] START  %s", _label)
     # def build_and_save_plot(config_data, studies, location, vartype, write_html=False, write_graphics=True, output_format='png')
     study_files_dict = config_data["study_files_dict"]
     options_dict = config_data["options_dict"]
@@ -421,6 +425,7 @@ def build_and_save_plot(
                 + location.name
                 + ".csv"
             )
+    logger.info("[plot] DONE   %s  (%.1fs)", _label, _time.monotonic() - _t0)
     return
 
 
@@ -670,8 +675,12 @@ def postpro_plots(cluster, config_data, use_dask):
                 studies = [obs_study] + model_studies
 
                 # now run the processes
+                n_locations = len(locations)
                 if use_dask:
-                    logger.info("Using Dask for plot generation")
+                    logger.info(
+                        "Using Dask for plot generation (%d stations, vartype=%s)",
+                        n_locations, vartype.name,
+                    )
                     tasks = [
                         dask.delayed(build_and_save_plot)(
                             config_data,
@@ -688,13 +697,15 @@ def postpro_plots(cluster, config_data, use_dask):
                         )
                         for location in locations
                     ]
-                    # tasks = [dask.delayed(build_and_save_plot)(config_data, studies, location, vartype,
-                    #                                 write_html=True,write_graphics=False,
-                    #                                 dask_key_name=f'build_and_save::{location}:{vartype}') for location in locations]
                     dask.compute(tasks)
                 else:
-                    logger.info("Running plot generation sequentially (no Dask)")
-                    for location in locations:
+                    import time as _time
+                    logger.info(
+                        "Generating plots sequentially: %d stations, vartype=%s",
+                        n_locations, vartype.name,
+                    )
+                    _t0_all = _time.monotonic()
+                    for _i, location in enumerate(locations, start=1):
                         # this try/except is necessary to keep processes running if data
                         # are not found for a station. However, this must be temporarily disabled for debugging
                         try:
@@ -709,9 +720,18 @@ def postpro_plots(cluster, config_data, use_dask):
                                 gate_locations=gate_locations,
                                 gate_vartype=gate_vartype,
                                 metrics_table_list=metrics_table_list,
+                                _progress_label=f"[{_i}/{n_locations}] {location.name}/{vartype.name}",
                             )
                         except Exception as e:
-                            logger.error("Unable to create plots/metrics for %s: %s", location.name, e)
+                            logger.error(
+                                "[%d/%d] Unable to create plots/metrics for %s: %s",
+                                _i, n_locations, location.name, e,
+                            )
+                    _elapsed = _time.monotonic() - _t0_all
+                    logger.info(
+                        "Finished %d %s plots in %.0fs (avg %.1fs/station)",
+                        n_locations, vartype.name, _elapsed, _elapsed / max(n_locations, 1),
+                    )
 
                 merge_statistics_files(vartype, config_data)
     finally:
