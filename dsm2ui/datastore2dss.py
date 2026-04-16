@@ -71,8 +71,13 @@ def write_station_lat_lng(datastore_dir, station_file, param, repo_level="screen
     """
     Writes station metadata to a csv file.
 
-    Columns written: station_id, station_name, agency, lat, lon,
+    Columns written: dsm2_id, obs_station_id, station_name, agency, lat, lon,
     utm_easting, utm_northing (x/y from the inventory, UTM Zone 10N).
+
+    ``obs_station_id`` is the DSS B-part used when writing the DSS file, i.e.
+    ``station_id + subloc`` (uppercased) when a subloc is present, otherwise
+    just ``station_id``.  When a station has both an *upper* and a *lower*
+    sensor, the *upper* subloc is preferred.
 
     Parameters
     ----------
@@ -90,10 +95,30 @@ def write_station_lat_lng(datastore_dir, station_file, param, repo_level="screen
     )
     print("Using inventory file:", inventory_file)
     inventory = pd.read_csv(inventory_file)
-    inventory = inventory[inventory["param"] == param]
-    inventory = inventory.drop_duplicates(subset=["station_id"])
-    cols = ["station_id"]
-    rename = {}
+    inventory = inventory[inventory["param"] == param].copy()
+
+    # Build obs_station_id = station_id + subloc (uppercased) to match the DSS
+    # B-part written by read_from_datastore_write_to_dss.
+    inventory["obs_station_id"] = inventory.apply(
+        lambda r: (r["station_id"] + r["subloc"]).upper()
+        if pd.notna(r.get("subloc"))
+        else r["station_id"].upper(),
+        axis=1,
+    )
+
+    # When a station has multiple sublocs, prefer 'upper' > 'lower' > other.
+    _subloc_rank = {"upper": 0, "lower": 1}
+    inventory["_subloc_rank"] = inventory["subloc"].map(
+        lambda s: _subloc_rank.get(str(s).lower(), 2) if pd.notna(s) else 3
+    )
+    inventory = (
+        inventory.sort_values("_subloc_rank")
+        .drop_duplicates(subset=["station_id"])
+        .drop(columns=["_subloc_rank"])
+    )
+
+    cols = ["station_id", "obs_station_id"]
+    rename = {"station_id": "dsm2_id"}
     if "name" in inventory.columns:
         cols.append("name")
         rename["name"] = "station_name"
