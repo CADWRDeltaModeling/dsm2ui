@@ -369,7 +369,7 @@ def _write_filtered_batch(
     steps_lower = {s.lower() for s in run_steps}
     # Build a regex that matches the binary invocation token so we can replace it
     bin_pattern = re.compile(
-        r"(\S*[/\\])(" + "|".join(re.escape(m) for m in known_modules) + r")(?=\s|$)",
+        r"(\S*[/\\])(" + "|".join(re.escape(m) for m in known_modules) + r")(\.exe)?(?=\s|$)",
         re.IGNORECASE,
     )
     kept_lines = []
@@ -377,17 +377,19 @@ def _write_filtered_batch(
         line_lower = raw_line.strip().lower()
         module_match = None
         for mod in known_modules:
-            if re.search(r"(?:^|[/\\])" + re.escape(mod) + r"(?:\s|$)", line_lower):
+            if re.search(r"(?:^|[/\\])" + re.escape(mod) + r"(?:\.exe)?(?:\s|$)", line_lower):
                 module_match = mod
                 break
         if module_match is not None:
             if module_match not in steps_lower:
                 continue  # drop this module step
+            # If a selected module line is disabled via REM/@REM, re-enable it.
+            raw_line = re.sub(r"^\s*@?rem\s+", "", raw_line, flags=re.IGNORECASE)
             if dsm2_bin_dir:
                 # Replace the binary path prefix with the specified bin dir
                 bin_dir = dsm2_bin_dir.rstrip("/\\")
                 raw_line = bin_pattern.sub(
-                    lambda m, bd=bin_dir: bd + "\\" + m.group(2),
+                    lambda m, bd=bin_dir: bd + "\\" + m.group(2) + (m.group(3) or ""),
                     raw_line,
                 )
         kept_lines.append(raw_line)
@@ -1456,7 +1458,7 @@ def plot_from_yaml(yaml_path: str | Path) -> List[Path]:
     var_dir = Path(var["study_dir"])
     base_modifier = base["modifier"]
     var_modifier = var["name"]
-    model_dss_pattern = base.get("model_dss_pattern", "{modifier}_qual.dss")
+    model_dss_pattern = _resolve_model_dss_pattern(base, var.get("run_steps"))
     timewindow = metrics_cfg.get("timewindow")
 
     base_dss = base_dir / "output" / model_dss_pattern.format(modifier=base_modifier)
@@ -1713,6 +1715,23 @@ def _resolve_channel_inp_source(
     return str(base_dir.parent.parent / "common_input" / channel_inp_name)
 
 
+def _resolve_model_dss_pattern(base_cfg: dict, run_steps: Optional[List[str]]) -> str:
+    """Resolve model DSS filename pattern from config and selected run steps.
+
+    Explicit ``base_run.model_dss_pattern`` takes precedence. If no explicit
+    value is provided, GTM-only runs default to ``{modifier}_gtm.dss``;
+    all other cases default to ``{modifier}_qual.dss``.
+    """
+    configured = base_cfg.get("model_dss_pattern")
+    if configured:
+        return configured
+
+    steps_lower = {s.lower() for s in (run_steps or [])}
+    if "gtm" in steps_lower and "qual" not in steps_lower:
+        return "{modifier}_gtm.dss"
+    return "{modifier}_qual.dss"
+
+
 def run_from_yaml(
     yaml_path: str | Path,
     run_base: bool = False,
@@ -1746,10 +1765,11 @@ def run_from_yaml(
 
     base_dir = Path(base["study_dir"])
     channel_inp_name = base.get("channel_inp_name", "channel_std_delta_grid.inp")
+    run_steps = var.get("run_steps")
     channel_inp_source = _resolve_channel_inp_source(
         base_dir, channel_inp_name, explicit=base.get("channel_inp_source")
     )
-    model_dss_pattern = base.get("model_dss_pattern", "{modifier}_qual.dss")
+    model_dss_pattern = _resolve_model_dss_pattern(base, run_steps)
     timewindow = metrics_cfg.get("timewindow")
 
     active_stations = cfg.get("active_stations")
@@ -1769,7 +1789,7 @@ def run_from_yaml(
             modifications,
             modifier=var["name"],
             channel_inp_name=channel_inp_name,
-            run_steps=var.get("run_steps"),
+            run_steps=run_steps,
             dsm2_bin_dir=cfg.get("dsm2_bin_dir"),
             envvar_overrides=var.get("envvar_overrides"),
             copy_timeseries=var.get("copy_timeseries", False),
@@ -1795,7 +1815,7 @@ def run_from_yaml(
         base_modifier=base["modifier"],
         channel_inp_name=channel_inp_name,
         run_model=run_variation,
-        run_steps=var.get("run_steps"),
+        run_steps=run_steps,
         log_file=log_file,
         dsm2_bin_dir=cfg.get("dsm2_bin_dir"),
         envvar_overrides=var.get("envvar_overrides"),
