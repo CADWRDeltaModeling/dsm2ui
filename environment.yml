@@ -53,6 +53,4 @@ dependencies:
   - pyyaml
   - ipykernel
   - pip:
-    # dvue is installed from GitHub (not conda-forge or PyPI)
-    - git+https://github.com/CADWRDeltaModeling/dvue.git#egg=dvue
     - -e .
