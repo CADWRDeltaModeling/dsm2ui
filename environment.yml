@@ -52,5 +52,4 @@ dependencies:
   - tqdm
   - pyyaml
   - ipykernel
-  - pip:
-    - -e .
+  - dvue
