@@ -46,9 +46,9 @@ def import_vtk_modules():
 import pyhecdss as dss
 from vtools.functions.filter import cosine_lanczos
 from pydsm.analysis.dsm2study import *
-from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
+from dvue.catalog import DataReferenceReader, DataReference, DataCatalog, build_catalog_from_dataframe
 from dvue.dataui import full_stack
-from dvue.tsdataui import TimeSeriesDataUIManager
+from dvue.tsdataui import TimeSeriesDataUIManager, TimeSeriesPlotAction
 
 import logging
 logger = logging.getLogger(__name__)
@@ -57,27 +57,30 @@ logger = logging.getLogger(__name__)
 class DSM2DSSReader(DataReferenceReader):
     """Reads a DSM2 DSS output channel time series via pydsm.dss.
 
-    Loads the **full** series on first call; subsequent calls for the same
-    channel are served from the :class:`~dvue.catalog.DataReference` cache.
-
-    The ``time_range`` attribute is ignored at read time — slicing happens
-    in :meth:`DSM2DataUIManager.get_data_for_time_range` so the full cached
-    series can be reused for any window.
+    The full series is loaded and the :class:`~dvue.catalog.DataReference`
+    cache stores the result keyed by ``time_range``.  When ``time_range`` is
+    provided the returned DataFrame is sliced to ``[start:end]`` before being
+    cached, so different windows are stored independently without reloading.
     """
 
     def load(self, **attributes) -> "pd.DataFrame":
+        import pandas as pd
         dssfile = attributes["FILE"]
         name = attributes["NAME"]
         variable = attributes["VARIABLE"]
+        time_range = attributes.get("time_range")
         pathname = f"//{name}/{variable}////"
         try:
             df, unit, ptype = next(dss.get_matching_ts(dssfile, pathname))
             df.attrs["unit"] = unit
             df.attrs["ptype"] = ptype
+            if time_range is not None and len(time_range) == 2:
+                start = pd.Timestamp(time_range[0])
+                end = pd.Timestamp(time_range[1])
+                df = df.loc[start:end]
             return df
         except StopIteration:
             logger.warning("No matching DSS time series for %s in %s", pathname, dssfile)
-            import pandas as pd
             return pd.DataFrame()
 
     def __repr__(self) -> str:
@@ -110,7 +113,7 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
             if hasattr(output_channels, "crs") and output_channels.crs is not None
             else None
         )
-        self._dvue_catalog = self._build_dvue_catalog(output_channels, _reader, geo_crs)
+        self._dvue_catalog = build_catalog_from_dataframe(output_channels, _reader, self._ref_name, geo_crs)
 
         super().__init__(file_number_column_name="FILE_NO", **kwargs)
         self.color_cycle_column = "NAME"
@@ -122,24 +125,13 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         """Unique DataReference name reconstructable from any selected table row."""
         return f'{row["FILE"]}::{row["NAME"]}/{row["VARIABLE"]}/{row["CHAN_NO"]}/{row["DISTANCE"]}'
 
-    def _build_dvue_catalog(self, output_channels, reader, crs=None) -> DataCatalog:
-        import pandas as pd
-        catalog = DataCatalog(crs=crs)
-        for _, row in output_channels.iterrows():
-            attrs = {k: v for k, v in row.items() if k != "geometry"}
-            if "geometry" in row.index and row["geometry"] is not None:
-                attrs["geometry"] = row["geometry"]
-            catalog.add(DataReference(
-                reader,
-                name=self._ref_name(row),
-                cache=True,  # full series cached; sliced per request in get_data_for_time_range
-                **attrs,
-            ))
-        return catalog
-
     @property
     def data_catalog(self) -> DataCatalog:
         return self._dvue_catalog
+
+    def get_data_reference(self, row):
+        """Look up DataReference by reconstructing its name from visible table columns."""
+        return self._dvue_catalog.get(self._ref_name(row))
 
     def build_station_name(self, r):
         if self.display_fileno:
@@ -1184,69 +1176,191 @@ class DSM2TidefileXsectUIManager(param.Parameterized):
         )
 
 
+class TidefileReader(DataReferenceReader):
+    """Reads a single DSM2 tidefile time series given catalog-entry attributes.
+
+    A single ``TidefileReader`` instance is shared across all
+    :class:`~dvue.catalog.DataReference` objects that point to the same
+    set of open tidefile handles (flyweight pattern).
+
+    When ``time_range`` is present in the attributes passed by
+    :meth:`~dvue.catalog.DataReference.getData`, it is converted to a DSM2
+    time-window string and forwarded to the underlying HydroH5/QualH5 reader
+    so that only the requested window is loaded from disk.  Caching per
+    ``(start, end)`` pair is handled by the ``DataReference``.
+
+    Parameters
+    ----------
+    tidefile_map : dict
+        ``{filepath: HydroH5 or QualH5}`` — open tidefile handles.
+    """
+
+    def __init__(self, tidefile_map: dict) -> None:
+        self._tidefile_map = tidefile_map
+
+    @staticmethod
+    def _to_time_window(time_range) -> str:
+        """Convert a ``(start, end)`` pair to a DSM2 time-window string."""
+        xtime_range = (
+            pd.to_datetime(time_range[0]).floor("D"),
+            pd.to_datetime(time_range[1]).ceil("D"),
+        )
+        return "-".join(x.strftime("%d%b%Y") for x in xtime_range)
+
+    def load(self, **attributes) -> pd.DataFrame:
+        filename = attributes["filename"]
+        variable = attributes["variable"]
+        id_ = attributes["id"]
+        time_range = attributes.get("time_range")
+        time_window = self._to_time_window(time_range) if time_range is not None else None
+        entry = {"filename": filename, "variable": variable, "id": id_}
+        h5 = self._tidefile_map[filename]
+        df = h5.get_data_for_catalog_entry(entry, time_window)
+        if df is not None and not df.empty:
+            df.attrs["unit"] = attributes.get("unit", "")
+        return df if df is not None else pd.DataFrame()
+
+    def __repr__(self) -> str:
+        return f"TidefileReader(files={list(self._tidefile_map.keys())!r})"
+
+
+class _TidefilePlotAction(TimeSeriesPlotAction):
+    """Plot action with DSM2 tidefile-specific curve labels and titles."""
+
+    @staticmethod
+    def _append_value(new_value, existing):
+        if new_value not in existing:
+            existing += f'{", " if existing else ""}{new_value}'
+        return existing
+
+    def create_curve(self, data, row, unit, file_index=""):
+        file_index_label = f"{file_index}: " if file_index else ""
+        crvlabel = f'{file_index_label}{row["id"]}/{row["variable"]}'
+        crv = hv.Curve(data.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
+        return crv.opts(
+            xlabel="Time",
+            ylabel=f'{row["variable"].title()} ({unit})',
+            title=f'{row["variable"]} @ {row["id"]}',
+            responsive=True,
+            active_tools=["wheel_zoom"],
+            tools=["hover"],
+        )
+
+    def append_to_title_map(self, title_map, group_key, row):
+        value = title_map.get(group_key, ["", ""])
+        value[0] = self._append_value(row["variable"], value[0])
+        value[1] = self._append_value(row["id"], value[1])
+        title_map[group_key] = value
+
+    def create_title(self, title_info) -> str:
+        if isinstance(title_info, list) and len(title_info) >= 2:
+            return f"{title_info[0]} @ {title_info[1]}"
+        return str(title_info)
+
+
 class DSM2TidefileUIManager(TimeSeriesDataUIManager):
+    """UI manager for one or more DSM2 HDF5 tidefile outputs.
+
+    Each data series is represented as a self-contained
+    :class:`~dvue.catalog.DataReference` backed by a shared
+    :class:`TidefileReader` (flyweight), making the catalog composable with
+    other catalog types in a mixed :class:`~dvue.catalog.DataCatalog`.
+    """
 
     def __init__(self, tidefiles, **kwargs):
         """
-        tidefiles: A list of tide files
+        Parameters
+        ----------
+        tidefiles : list of str
+            HDF5 tidefile paths (HydroH5 or QualH5).
+        channels : GeoDataFrame, optional
+            Channel geometries for map display.  Must have an ``id`` column
+            matching the numeric channel IDs extracted from catalog ``geoid``
+            values.
         """
-        self.time_range = kwargs.pop("time_range", None)
         self.channels = kwargs.pop("channels", None)
         self.tidefiles = tidefiles
         self.display_fileno = False
         self.tidefile_map = {
-            f: DSM2TidefileUIManager.read_tidefile(f) for _, f in enumerate(tidefiles)
+            f: DSM2TidefileUIManager.read_tidefile(f) for f in tidefiles
         }
-        self.dfcat = pd.concat(
-            [f.create_catalog() for k, f in self.tidefile_map.items()]
+        dfcat = pd.concat(
+            [h5.create_catalog() for h5 in self.tidefile_map.values()]
         )
-        self.dfcat.reset_index(drop=True, inplace=True)
-        self.dfcat["geoid"] = self.dfcat.id.str.split("_", expand=True).iloc[:, 1]
+        dfcat.reset_index(drop=True, inplace=True)
+        dfcat["geoid"] = dfcat["id"].str.split("_", expand=True).iloc[:, 1]
         if self.channels is not None:
-            self.channels.id = self.channels.id.astype("str")
-            self.channels.rename(columns={"id": "geoid"}, inplace=True)
-            self.dfcat = pd.merge(
-                self.channels,
-                self.dfcat,
-                left_on="geoid",
-                right_on="geoid",
-                how="right",
-            )
+            channels = self.channels.copy()
+            channels["id"] = channels["id"].astype("str")
+            channels = channels.rename(columns={"id": "geoid"})
+            dfcat = pd.merge(channels, dfcat, on="geoid", how="right")
+        self.dfcat = dfcat
         self.station_id_column = "geoid"
-        time_ranges = [f.get_start_end_dates() for k, f in self.tidefile_map.items()]
-        self.time_range = (
-            min([pd.to_datetime(t[0]) for t in time_ranges]),
-            max([pd.to_datetime(t[1]) for t in time_ranges]),
+        time_ranges = [h5.get_start_end_dates() for h5 in self.tidefile_map.values()]
+        _time_range = (
+            min(pd.to_datetime(t[0]) for t in time_ranges),
+            max(pd.to_datetime(t[1]) for t in time_ranges),
+        )
+        # Build DataCatalog backed by TidefileReader (flyweight)
+        self._reader = TidefileReader(self.tidefile_map)
+        geo_crs = (
+            str(self.channels.crs)
+            if self.channels is not None and hasattr(self.channels, "crs")
+            else None
+        )
+        self._dvue_catalog = build_catalog_from_dataframe(
+            self.dfcat, self._reader, self._build_ref_key, crs=geo_crs
         )
         super().__init__(
             filename_column="filename",
             file_number_column_name="FILE_NUM",
-            time_range=self.time_range,
+            time_range=_time_range,
             **kwargs,
         )
         self.color_cycle_column = "id"
         self.dashed_line_cycle_column = "filename"
         self.marker_cycle_column = "variable"
 
+    # ------------------------------------------------------------------
+    # Catalog / DataReference interface
+    # ------------------------------------------------------------------
+
+    @property
+    def data_catalog(self) -> DataCatalog:
+        return self._dvue_catalog
+
+    def _build_ref_key(self, row) -> str:
+        """Unique catalog key: filename + id + variable."""
+        return f'{row["filename"]}::{row["id"]}/{row["variable"]}'
+
+    def get_data_reference(self, row):
+        return self._dvue_catalog.get(self._build_ref_key(row))
+
+    @staticmethod
     def read_tidefile(tidefile, guess="hydro"):
         try:
             if guess == "hydro":
                 return HydroH5(tidefile)
             else:
                 return QualH5(tidefile)
-        except:
+        except Exception:
             if guess == "hydro":
                 return QualH5(tidefile)
             else:
                 return HydroH5(tidefile)
 
+    # ------------------------------------------------------------------
+    # TimeSeriesDataUIManager interface
+    # ------------------------------------------------------------------
+
+    def _make_plot_action(self):
+        return _TidefilePlotAction()
+
     def build_station_name(self, r):
         if self.display_fileno:
             return f'{r["FILE_NUM"]}:{r[self.station_id_column]}'
-        else:
-            return f"{r[self.station_id_column]}"
+        return f"{r[self.station_id_column]}"
 
-    # data related methods
     def get_data_catalog(self):
         return self.dfcat
 
@@ -1254,88 +1368,24 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         return self.time_range
 
     def _get_table_column_width_map(self):
-        """only columns to be displayed in the table should be included in the map"""
-        column_width_map = {
+        return {
             "geoid": "10%",
             "id": "15%",
             "variable": "10%",
             "unit": "10%",
         }
-        return column_width_map
 
     def get_table_filters(self):
-        table_filters = {
+        return {
             "geoid": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "id": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "variable": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "unit": {"type": "input", "func": "like", "placeholder": "Enter match"},
         }
-        return table_filters
-
-    def _append_value(self, new_value, value):
-        if new_value not in value:
-            value += f'{", " if value else ""}{new_value}'
-        return value
-
-    def append_to_title_map(self, title_map, unit, r):
-        if unit in title_map:
-            value = title_map[unit]
-        else:
-            value = ["", ""]
-        value[0] = self._append_value(r["variable"], value[0])
-        value[1] = self._append_value(r["id"], value[1])
-        title_map[unit] = value
-
-    def create_title(self, v):
-        title = f"{v[0]} @ {v[1]}"
-        return title
 
     def is_irregular(self, r):
         return False
 
-    def create_curve(self, df, r, unit, file_index=None):
-        file_index_label = f"{file_index}:" if file_index is not None else ""
-        crvlabel = f'{file_index_label}{r["id"]}/{r["variable"]}'
-        ylabel = f'{r["variable"]} ({unit})'
-        title = f'{r["variable"]} @ {r["id"]}'
-        irreg = self.is_irregular(r)
-        crv = hv.Curve(df.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
-        return crv.opts(
-            xlabel="Time",
-            ylabel=ylabel,
-            title=title,
-            responsive=True,
-            active_tools=["wheel_zoom"],
-            tools=["hover"],
-        )
-
-    def _get_timewindow_for_time_range(self, time_range):
-        # extend time range to include whole days
-        xtime_range = (
-            pd.to_datetime(time_range[0]).floor("D"),
-            pd.to_datetime(time_range[1]).ceil("D"),
-        )
-        return "-".join(map(lambda x: x.strftime("%d%b%Y"), xtime_range))
-
-    @lru_cache(maxsize=32)
-    def _get_data_for_catalog_entry(self, filename, variable, id, time_window):
-        entry = {self.filename_column: filename, "variable": variable, "id": id}
-        return self.tidefile_map[filename].get_data_for_catalog_entry(
-            entry, time_window
-        )
-
-    def get_data_for_time_range(self, r, time_range):
-        var = r["variable"]
-        time_window = self._get_timewindow_for_time_range(time_range)
-        df = self._get_data_for_catalog_entry(
-            r[self.filename_column], r["variable"], r["id"], time_window
-        )
-        unit = r["unit"]
-        ptype = "INST-VAL"
-        df = df[slice(*time_range)]
-        return df, unit, ptype
-
-    # methods below if geolocation data is available
     def get_tooltips(self):
         return [
             ("id", "@id"),
@@ -1347,11 +1397,9 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         return "variable"
 
     def get_map_color_columns(self):
-        """return the columns that can be used to color the map"""
         return ["variable"]
 
     def get_map_marker_columns(self):
-        """return the columns that can be used to color the map"""
         return ["variable"]
 
 
@@ -1643,7 +1691,13 @@ import click
     "--channel-shapefile",
     help="GeoJSON file for channel centerlines with DSM2 channel information",
 )
-def show_dsm2_output_ui(echo_files, channel_shapefile=None):
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    default=False,
+    help="Invalidate the in-memory data cache before launching the UI.",
+)
+def show_dsm2_output_ui(echo_files, channel_shapefile=None, clear_cache=False):
     """
     Show a user interface for viewing DSM2 output data
 
@@ -1662,6 +1716,8 @@ def show_dsm2_output_ui(echo_files, channel_shapefile=None):
     import cartopy.crs as ccrs
 
     plotter = build_output_plotter(*echo_files, channel_shapefile=channel_shapefile)
+    if clear_cache:
+        plotter.data_catalog.invalidate_all_caches()
     ui = dataui.DataUI(plotter, crs=ccrs.UTM(10))
     ui.create_view(title="DSM2 Output UI").show()
 
@@ -1673,7 +1729,13 @@ def show_dsm2_output_ui(echo_files, channel_shapefile=None):
     help="GeoJSON file for channel centerlines with DSM2 channel information",
     required=False,
 )
-def show_dsm2_tidefile_ui(tidefiles, channel_file=None):
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    default=False,
+    help="Invalidate the in-memory data cache before launching the UI.",
+)
+def show_dsm2_tidefile_ui(tidefiles, channel_file=None, clear_cache=False):
     """
     Show a user interface for viewing DSM2 tide files
 
@@ -1691,6 +1753,8 @@ def show_dsm2_tidefile_ui(tidefiles, channel_file=None):
         channels = gpd.read_file(channel_file)
 
     tidefile_manager = DSM2TidefileUIManager(tidefiles, channels=channels)
+    if clear_cache:
+        tidefile_manager.data_catalog.invalidate_all_caches()
     ui = dataui.DataUI(
         tidefile_manager, crs=ccrs.epsg("26910"), station_id_column="geoid"
     )

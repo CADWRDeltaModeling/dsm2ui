@@ -253,16 +253,16 @@ def _resolve_config(raw_config, base_dir, cli_overrides=None):
 
 
 class CalibNullReader(DataReferenceReader):
-    """Placeholder reader for CalibPlotUIManager entries.
+    """Null reader for CalibPlotUIManager catalog entries.
 
-    Calibration plots are built lazily inside :meth:`CalibPlotUIManager.create_panel`
-    via ``postpro_dsm2.build_plot()``; ``getData()`` is never called on these refs.
+    Calibration plots are rendered by :meth:`CalibPlotUIManager.create_panel`
+    via ``postpro_dsm2.build_plot()``.  ``getData()`` is not used for rendering,
+    but must succeed (returning an empty DataFrame) so that generic
+    :class:`~dvue.actions.PlotAction` pipelines can call it without raising.
     """
 
     def load(self, **attributes) -> pd.DataFrame:
-        raise NotImplementedError(
-            "CalibPlotUIManager entries are rendered via create_panel(), not getData()."
-        )
+        return pd.DataFrame()
 
     def __repr__(self) -> str:
         return "CalibNullReader()"
@@ -364,7 +364,7 @@ class CalibPlotUIManager(DataUIManager):
             if row.get("geometry") is not None:
                 attrs["geometry"] = row["geometry"]
             catalog.add(DataReference(
-                reader,
+                reader=reader,
                 name=f'{row["Name"]}_{row["vartype"]}',
                 cache=False,
                 **attrs,
@@ -374,6 +374,16 @@ class CalibPlotUIManager(DataUIManager):
     @property
     def data_catalog(self) -> DataCatalog:
         return self._dvue_catalog
+
+    def get_data_reference(self, row):
+        """Look up DataReference by reconstructing its name from row columns.
+
+        The display table is sliced to visible columns before the action
+        callback fires, so the 'name' column is not present in the row.
+        We reconstruct the name using the same formula as _build_dvue_catalog.
+        """
+        ref_name = f'{row["Name"]}_{row["vartype"]}'
+        return self._dvue_catalog.get(ref_name)
 
     def get_studies(self, varname):
         studies = list(self.config["study_files_dict"].keys())

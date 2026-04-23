@@ -46,7 +46,7 @@ class DeltaCDAreaReader(DataReferenceReader):
             return pd.DataFrame()
 
     def __repr__(self) -> str:
-        return "DeltaCDAreaReader()"
+        return f"DeltaCDAreaReader(files={list(self._datasets.keys())!r})"
 
 
 class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
@@ -142,7 +142,7 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
             if "geometry" in row.index and row["geometry"] is not None:
                 attrs["geometry"] = row["geometry"]
             catalog.add(DataReference(
-                reader,
+                reader=reader,
                 name=self._ref_name(row),
                 cache=True,
                 **attrs,
@@ -152,6 +152,10 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
     @property
     def data_catalog(self) -> DataCatalog:
         return self._dvue_catalog
+
+    def get_data_reference(self, row):
+        """Look up DataReference by reconstructing its name from visible table columns."""
+        return self._dvue_catalog.get(self._ref_name(row))
 
     def get_data_catalog_for_dataset(self, ds, nc_file_path):
         """

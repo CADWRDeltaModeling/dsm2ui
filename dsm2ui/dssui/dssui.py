@@ -22,7 +22,7 @@ pn.extension()
 import pyhecdss as dss
 from vtools.functions.filter import cosine_lanczos
 
-from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
+from dvue.catalog import DataReferenceReader, DataReference, DataCatalog, build_catalog_from_dataframe
 from dvue.dataui import DataUI, full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager
 
@@ -161,27 +161,21 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         self.dashed_line_cycle_column = "filename"
         self.marker_cycle_column = "F"
 
+    def build_ref_key(self, row):
+        """Unique catalog key: filename + pathname so the same DSS path in
+        different files gets its own DataReference."""
+        return f'{row["filename"]}::{self.build_pathname(row)}'
+
     def _build_dvue_catalog(self, crs=None) -> DataCatalog:
-        catalog = DataCatalog(crs=crs)
-        for _, row in self.dfcat.iterrows():
-            pathname = self.build_pathname(row)
-            attrs = {k: v for k, v in row.items() if k != "geometry"}
-            if "geometry" in row.index and row["geometry"] is not None:
-                attrs["geometry"] = row["geometry"]
-            try:
-                catalog.add(DataReference(
-                    self._reader,
-                    name=pathname,
-                    cache=True,
-                    **attrs,
-                ))
-            except ValueError:
-                pass  # duplicate pathname (same DSS entry in multiple files)
-        return catalog
+        return build_catalog_from_dataframe(self.dfcat, self._reader, self.build_ref_key, crs)
 
     @property
     def data_catalog(self) -> DataCatalog:
         return self._dvue_catalog
+
+    def get_data_reference(self, row):
+        """Look up DataReference by filename + pathname key."""
+        return self._dvue_catalog.get(self.build_ref_key(row))
 
     def __del__(self):
         if hasattr(self, "dssfiles"):
@@ -327,8 +321,15 @@ import click
     default="B",
     help="Station ID column in data catalog, e.g. B part for DSS file pathname",
 )
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    default=False,
+    help="Invalidate the in-memory data cache before launching the UI.",
+)
 def show_dss_ui(
-    dssfiles, location_file=None, location_id_column="station_id", station_id_column="B"
+    dssfiles, location_file=None, location_id_column="station_id", station_id_column="B",
+    clear_cache=False,
 ):
     """
     Show DSS UI for the given DSS files
@@ -380,5 +381,7 @@ def show_dss_ui(
         station_id_column=station_id_column,
         filename_column="filename",
     )
+    if clear_cache:
+        dssuimgr.data_catalog.invalidate_all_caches()
     ui = DataUI(dssuimgr, crs=crs_cartopy)
     ui.create_view(title="DSS Data UI").show()

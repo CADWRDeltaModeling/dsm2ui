@@ -26,7 +26,7 @@ import panel as pn
 pn.extension()
 
 from dvue import tsdataui
-from dvue.catalog import DataReferenceReader, DataReference, DataCatalog
+from dvue.catalog import DataReferenceReader, DataReference, DataCatalog, build_catalog_from_dataframe
 
 class DeltaCDNodeReader(DataReferenceReader):
     """Flyweight reader that extracts a time-series slice from an open xarray Dataset
@@ -58,7 +58,7 @@ class DeltaCDNodeReader(DataReferenceReader):
             return pd.DataFrame()
 
     def __repr__(self) -> str:
-        return "DeltaCDNodeReader()"
+        return f"DeltaCDNodeReader(files={list(self._datasets.keys())!r})"
 
 
 class DeltaCDNodesUIManager(tsdataui.TimeSeriesDataUIManager):
@@ -127,7 +127,7 @@ class DeltaCDNodesUIManager(tsdataui.TimeSeriesDataUIManager):
             if isinstance(catalog, gpd.GeoDataFrame) and catalog.crs is not None
             else None
         )
-        self._dvue_catalog = self._build_dvue_catalog(catalog, _reader, geo_crs)
+        self._dvue_catalog = build_catalog_from_dataframe(catalog, _reader, self._ref_name, geo_crs)
 
         kwargs['filename_column'] = "source"
         super().__init__(**kwargs)
@@ -141,23 +141,13 @@ class DeltaCDNodesUIManager(tsdataui.TimeSeriesDataUIManager):
         """Unique DataReference name reconstructable from any table row."""
         return f'{row["source"]}::{row["node"]}/{row["variable"]}'
 
-    def _build_dvue_catalog(self, dfcat, reader, crs=None) -> DataCatalog:
-        catalog = DataCatalog(crs=crs)
-        for _, row in dfcat.iterrows():
-            attrs = {k: v for k, v in row.items() if k != "geometry"}
-            if "geometry" in row.index and row["geometry"] is not None:
-                attrs["geometry"] = row["geometry"]
-            catalog.add(DataReference(
-                reader,
-                name=self._ref_name(row),
-                cache=True,
-                **attrs,
-            ))
-        return catalog
-
     @property
     def data_catalog(self) -> DataCatalog:
         return self._dvue_catalog
+
+    def get_data_reference(self, row):
+        """Look up DataReference by reconstructing its name from visible table columns."""
+        return self._dvue_catalog.get(self._ref_name(row))
 
     def get_data_catalog_for_dataset(self, ds, nc_file_path):
         """
@@ -377,13 +367,21 @@ def build_map(time, gdf, df=None, var=""):
     default=None,
     help="Path to the GeoJSON file containing node geometries",
 )
-def show_deltacd_nodes_ui(nc_files, nodes_file=None):
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    default=False,
+    help="Invalidate the in-memory data cache before launching the UI.",
+)
+def show_deltacd_nodes_ui(nc_files, nodes_file=None, clear_cache=False):
     """
     Show the DeltaCD Nodes UI Manager for the specified netCDF file(s) and nodes GeoJSON file.
     
     This UI is designed for netCDF files that use 'node' as the station dimension.
     """
     dcd_ui = DeltaCDNodesUIManager(*nc_files, nodes_file=nodes_file)
+    if clear_cache:
+        dcd_ui.data_catalog.invalidate_all_caches()
     from dvue import dataui
     dui = dataui.DataUI(dcd_ui, station_id_column="node", crs=ccrs.epsg(26910))
     dui.create_view().servable(title="DeltaCD Nodes UI Manager").show()
