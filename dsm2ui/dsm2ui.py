@@ -87,6 +87,48 @@ class DSM2DSSReader(DataReferenceReader):
         return "DSM2DSSReader()"
 
 
+class DSM2DSSDataReference(DataReference):
+    """DataReference subclass for DSM2 DSS channel output."""
+
+    ref_type = "dsm2_dss"
+
+
+class _DSM2DSSPlotAction(TimeSeriesPlotAction):
+    """Plot action for DSM2 DSS channel time series."""
+
+    @staticmethod
+    def _append_value(new_value, existing):
+        if new_value not in existing:
+            existing += f'{", " if existing else ""}{new_value}'
+        return existing
+
+    def create_curve(self, data, row, unit, file_index=""):
+        file_index_label = f"{file_index}:" if file_index else ""
+        crvlabel = f'{file_index_label}{row["NAME"]}/{row["VARIABLE"]}'
+        ylabel = f'{row["VARIABLE"]} ({unit})'
+        crv = hv.Curve(data.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
+        return crv.opts(
+            xlabel="Time",
+            ylabel=ylabel,
+            responsive=True,
+            active_tools=["wheel_zoom"],
+            tools=["hover"],
+        )
+
+    def append_to_title_map(self, title_map, group_key, row):
+        value = title_map.get(group_key, ["", "", "", ""])
+        value[0] = self._append_value(row["VARIABLE"], value[0])
+        value[1] = self._append_value(row["NAME"], value[1])
+        value[2] = self._append_value(str(row["CHAN_NO"]), value[2])
+        value[3] = self._append_value(str(row["DISTANCE"]), value[3])
+        title_map[group_key] = value
+
+    def create_title(self, title_info) -> str:
+        if isinstance(title_info, list) and len(title_info) >= 4:
+            return f"{title_info[1]} @ {title_info[2]} ({title_info[3]}::{title_info[0]})"
+        return str(title_info)
+
+
 class DSM2DataUIManager(TimeSeriesDataUIManager):
 
     def __init__(self, output_channels, **kwargs):
@@ -113,7 +155,14 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
             if hasattr(output_channels, "crs") and output_channels.crs is not None
             else None
         )
-        self._dvue_catalog = build_catalog_from_dataframe(output_channels, _reader, self._ref_name, geo_crs)
+        # Add canonical lowercase attrs alongside the existing uppercase DSM2 columns
+        # so that mixed catalogs and generic label code can find them.
+        _oc = output_channels.copy()
+        _oc["station_name"] = _oc["NAME"]
+        _oc["variable"] = _oc["VARIABLE"].str.lower()
+        self._dvue_catalog = build_catalog_from_dataframe(
+            _oc, _reader, self._ref_name, geo_crs, ref_class=DSM2DSSDataReference
+        )
 
         super().__init__(file_number_column_name="FILE_NO", **kwargs)
         self.color_cycle_column = "NAME"
@@ -132,6 +181,9 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
     def get_data_reference(self, row):
         """Look up DataReference by reconstructing its name from visible table columns."""
         return self._dvue_catalog.get(self._ref_name(row))
+
+    def _make_plot_action(self):
+        return _DSM2DSSPlotAction()
 
     def build_station_name(self, r):
         if self.display_fileno:
@@ -163,48 +215,6 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
             "INTERVAL": {"type": "input", "func": "like", "placeholder": "Enter match"},
         }
         return table_filters
-
-    def _append_value(self, new_value, value):
-        if new_value not in value:
-            value += f'{", " if value else ""}{new_value}'
-        return value
-
-    def append_to_title_map(self, title_map, unit, r):
-        if unit in title_map:
-            value = title_map[unit]
-        else:
-            value = ["", "", "", ""]
-        value[0] = self._append_value(r["VARIABLE"], value[0])
-        value[1] = self._append_value(r["NAME"], value[1])
-        value[2] = self._append_value(str(r["CHAN_NO"]), value[2])
-        value[3] = self._append_value(str(r["DISTANCE"]), value[3])
-        title_map[unit] = value
-
-    def create_title(self, v):
-        title = f"{v[1]} @ {v[2]} ({v[3]}::{v[0]})"
-        return title
-
-    def is_irregular(self, r):
-        return False
-
-    def create_curve(self, df, r, unit, file_index=None):
-        file_index_label = f"{file_index}:" if file_index is not None else ""
-        crvlabel = f'{file_index_label}{r["NAME"]}/{r["VARIABLE"]}'
-        ylabel = f'{r["VARIABLE"]} ({unit})'
-        title = f'{r["VARIABLE"]} @ {r["NAME"]} ({r["CHAN_NO"]}/{r["DISTANCE"]})'
-        irreg = self.is_irregular(r)
-        if irreg:
-            crv = hv.Scatter(df.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
-        else:
-            crv = hv.Curve(df.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
-        return crv.opts(
-            xlabel="Time",
-            ylabel=ylabel,
-            title=title,
-            responsive=True,
-            active_tools=["wheel_zoom"],
-            tools=["hover"],
-        )
 
     def get_data_for_time_range(self, r, time_range):
         ref = self._dvue_catalog.get(self._ref_name(r))
@@ -1224,6 +1234,12 @@ class TidefileReader(DataReferenceReader):
         return f"TidefileReader(files={list(self._tidefile_map.keys())!r})"
 
 
+class DSM2TidefileDataReference(DataReference):
+    """DataReference subclass for DSM2 HDF5 tidefile output."""
+
+    ref_type = "dsm2_hdf5"
+
+
 class _TidefilePlotAction(TimeSeriesPlotAction):
     """Plot action with DSM2 tidefile-specific curve labels and titles."""
 
@@ -1296,6 +1312,8 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             dfcat = pd.merge(channels, dfcat, on="geoid", how="right")
         self.dfcat = dfcat
         self.station_id_column = "geoid"
+        # Add canonical station_name for mixed-catalog compatibility
+        self.dfcat["station_name"] = self.dfcat["geoid"].fillna(self.dfcat["id"])
         time_ranges = [h5.get_start_end_dates() for h5 in self.tidefile_map.values()]
         _time_range = (
             min(pd.to_datetime(t[0]) for t in time_ranges),
@@ -1309,7 +1327,8 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             else None
         )
         self._dvue_catalog = build_catalog_from_dataframe(
-            self.dfcat, self._reader, self._build_ref_key, crs=geo_crs
+            self.dfcat, self._reader, self._build_ref_key, crs=geo_crs,
+            ref_class=DSM2TidefileDataReference,
         )
         super().__init__(
             filename_column="filename",

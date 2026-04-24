@@ -268,6 +268,12 @@ class CalibNullReader(DataReferenceReader):
         return "CalibNullReader()"
 
 
+class CalibDataReference(DataReference):
+    """DataReference subclass for calibration station entries."""
+
+    ref_type = "calib"
+
+
 class CalibPlotUIManager(DataUIManager):
 
     cache_status = param.String(default="", doc="Status message from last cache-clear operation")
@@ -363,7 +369,7 @@ class CalibPlotUIManager(DataUIManager):
             attrs = {k: v for k, v in row.items() if k != "geometry"}
             if row.get("geometry") is not None:
                 attrs["geometry"] = row["geometry"]
-            catalog.add(DataReference(
+            catalog.add(CalibDataReference(
                 reader=reader,
                 name=f'{row["Name"]}_{row["vartype"]}',
                 cache=False,
