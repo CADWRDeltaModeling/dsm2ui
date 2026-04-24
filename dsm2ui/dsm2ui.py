@@ -87,6 +87,15 @@ class DSM2DSSReader(DataReferenceReader):
         return "DSM2DSSReader()"
 
 
+def _smart_title(s: str) -> str:
+    """Title-case only when the string is ALL-CAPS and longer than 2 chars.
+
+    Keeps short abbreviations like ``EC``, ``DO``, and ``CFS`` unchanged while
+    converting ``FLOW`` → ``Flow`` and ``STAGE`` → ``Stage``.
+    """
+    return s.title() if (isinstance(s, str) and s.isupper() and len(s) > 2) else s
+
+
 class DSM2DSSDataReference(DataReference):
     """DataReference subclass for DSM2 DSS channel output."""
 
@@ -102,10 +111,23 @@ class _DSM2DSSPlotAction(TimeSeriesPlotAction):
             existing += f'{", " if existing else ""}{new_value}'
         return existing
 
+    def render(self, df, refs_and_data, manager):
+        """Pre-compute which columns vary across the selection, then delegate."""
+        self._varying = {
+            "NAME": df["NAME"].nunique() > 1 if "NAME" in df.columns else True,
+            "VARIABLE": df["VARIABLE"].nunique() > 1 if "VARIABLE" in df.columns else True,
+            "FILE": df["FILE"].nunique() > 1 if "FILE" in df.columns else False,
+        }
+        return super().render(df, refs_and_data, manager)
+
     def create_curve(self, data, row, unit, file_index=""):
+        varying = getattr(self, "_varying", {"NAME": True, "VARIABLE": True, "FILE": False})
         file_index_label = f"{file_index}:" if file_index else ""
-        crvlabel = f'{file_index_label}{row["NAME"]}/{row["VARIABLE"]}'
-        ylabel = f'{row["VARIABLE"]} ({unit})'
+        parts = [row["NAME"]]
+        if varying.get("VARIABLE", True):
+            parts.append(_smart_title(row["VARIABLE"]))
+        crvlabel = f'{file_index_label}{"/".join(parts)}'
+        ylabel = _smart_title(row["VARIABLE"]) + (f" ({unit})" if unit else "")
         crv = hv.Curve(data.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
         return crv.opts(
             xlabel="Time",
@@ -125,7 +147,7 @@ class _DSM2DSSPlotAction(TimeSeriesPlotAction):
 
     def create_title(self, title_info) -> str:
         if isinstance(title_info, list) and len(title_info) >= 4:
-            return f"{title_info[1]} @ {title_info[2]} ({title_info[3]}::{title_info[0]})"
+            return f"{title_info[1]} @ {title_info[2]} ({title_info[3]}::{_smart_title(title_info[0])})"
         return str(title_info)
 
 
@@ -1249,14 +1271,27 @@ class _TidefilePlotAction(TimeSeriesPlotAction):
             existing += f'{", " if existing else ""}{new_value}'
         return existing
 
+    def render(self, df, refs_and_data, manager):
+        """Pre-compute which columns vary across the selection, then delegate."""
+        self._varying = {
+            "id": df["id"].nunique() > 1 if "id" in df.columns else True,
+            "variable": df["variable"].nunique() > 1 if "variable" in df.columns else True,
+            "filename": df["filename"].nunique() > 1 if "filename" in df.columns else False,
+        }
+        return super().render(df, refs_and_data, manager)
+
     def create_curve(self, data, row, unit, file_index=""):
+        varying = getattr(self, "_varying", {"id": True, "variable": True, "filename": False})
         file_index_label = f"{file_index}: " if file_index else ""
-        crvlabel = f'{file_index_label}{row["id"]}/{row["variable"]}'
+        parts = [row["id"]]
+        if varying.get("variable", True):
+            parts.append(_smart_title(row["variable"]))
+        crvlabel = f'{file_index_label}{"/".join(parts)}'
+        ylabel = _smart_title(row["variable"]) + (f" ({unit})" if unit else "")
         crv = hv.Curve(data.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
         return crv.opts(
             xlabel="Time",
-            ylabel=f'{row["variable"].title()} ({unit})',
-            title=f'{row["variable"]} @ {row["id"]}',
+            ylabel=ylabel,
             responsive=True,
             active_tools=["wheel_zoom"],
             tools=["hover"],
@@ -1270,7 +1305,7 @@ class _TidefilePlotAction(TimeSeriesPlotAction):
 
     def create_title(self, title_info) -> str:
         if isinstance(title_info, list) and len(title_info) >= 2:
-            return f"{title_info[0]} @ {title_info[1]}"
+            return f"{_smart_title(title_info[0])} @ {title_info[1]}"
         return str(title_info)
 
 

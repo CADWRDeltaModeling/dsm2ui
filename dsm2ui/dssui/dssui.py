@@ -24,9 +24,103 @@ from vtools.functions.filter import cosine_lanczos
 
 from dvue.catalog import DataReferenceReader, DataReference, DataCatalog, build_catalog_from_dataframe
 from dvue.dataui import DataUI, full_stack
-from dvue.tsdataui import TimeSeriesDataUIManager
+from dvue.tsdataui import TimeSeriesDataUIManager, TimeSeriesPlotAction
 
 logger = logging.getLogger(__name__)
+
+
+def _smart_title(s: str) -> str:
+    """Title-case *s* only when it is ALL-CAPS and longer than 2 characters.
+
+    Keeps short abbreviations (EC, DO, CFS) unchanged while converting
+    long ALL-CAPS DSS variable names (FLOW → Flow, STAGE → Stage).
+    """
+    if isinstance(s, str) and s.isupper() and len(s) > 2:
+        return s.title()
+    return s
+
+
+class DSSTimeSeriesPlotAction(TimeSeriesPlotAction):
+    """``TimeSeriesPlotAction`` with DSS-aware axis labels and smart legend.
+
+    Produces clean, readable plots:
+    - **X-axis**: always "Time"
+    - **Y-axis**: title-cased variable + unit, e.g. "Flow (cfs)"
+    - **Legend / title**: only the DSS path-parts that actually vary across
+      the selected rows are shown, reducing noise when all selected curves
+      are for the same station or the same study.
+    """
+
+    def render(self, df, refs_and_data, manager):
+        """Pre-compute which DSS path parts vary, then delegate to super."""
+        self._varying = {
+            part: (df[part].nunique() > 1 if part in df.columns else False)
+            for part in ("B", "C", "A", "F")
+        }
+        self._multi_file = (
+            df[manager.filename_column].nunique() > 1
+            if hasattr(manager, "filename_column") and manager.filename_column in df.columns
+            else False
+        )
+        return super().render(df, refs_and_data, manager)
+
+    def create_curve(self, data, row, unit, file_index=""):
+        """Build a DSS curve with smart legend label, title-cased y-axis."""
+        varying = getattr(self, "_varying", {"B": True, "C": False, "A": False, "F": False})
+        multi_file = getattr(self, "_multi_file", bool(file_index))
+
+        # Build legend label from only the parts that vary
+        parts = []
+        if varying.get("B") or not any(varying.values()):
+            # Always show station when stations vary, or as fallback for a single curve
+            parts.append(str(row.get("B", "")))
+        if varying.get("C"):
+            parts.append(_smart_title(str(row.get("C", ""))))
+        if varying.get("F"):
+            parts.append(str(row.get("F", "")))
+        if multi_file and file_index:
+            parts.append(f"[{file_index}]")
+
+        label = " / ".join(p for p in parts if p) or str(row.get("B", "value"))
+
+        # Y-axis: title-cased variable + unit
+        c_part = _smart_title(str(row.get("C", "")))
+        ylabel = f"{c_part} ({unit})" if unit else c_part
+
+        crv = hv.Curve(data.iloc[:, [0]], label=label).redim(value=label)
+        return crv.opts(
+            xlabel="Time",
+            ylabel=ylabel,
+            responsive=True,
+            active_tools=["wheel_zoom"],
+            tools=["hover"],
+        )
+
+    def append_to_title_map(self, title_map, group_key, row):
+        """Accumulate sets of B, C, A, F values per unit group."""
+        if group_key not in title_map:
+            title_map[group_key] = {"B": set(), "C": set(), "A": set(), "F": set()}
+        for part in ("B", "C", "A", "F"):
+            val = row.get(part)
+            if val is not None and str(val).strip():
+                title_map[group_key][part].add(str(val))
+
+    def create_title(self, v) -> str:
+        """Format accumulated path-part sets into a readable panel title."""
+        if not isinstance(v, dict):
+            return str(v)
+        b_str = ", ".join(sorted(v["B"]))
+        c_str = ", ".join(_smart_title(c) for c in sorted(v["C"]))
+        a_str = ", ".join(sorted(v["A"]))
+        f_str = ", ".join(sorted(v["F"]))
+        parts = []
+        if b_str:
+            parts.append(b_str)
+        if c_str:
+            parts.append(f"({c_str})")
+        if a_str or f_str:
+            parts.append(f"[{a_str}/{f_str}]")
+        return " ".join(parts) if parts else str(v)
 
 
 class DSSReader(DataReferenceReader):
@@ -233,12 +327,21 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         }
         return table_filters
 
+    def _make_plot_action(self):
+        """Return a :class:`DSSTimeSeriesPlotAction` for DSS-aware labels."""
+        return DSSTimeSeriesPlotAction()
+
     def _append_value(self, new_value, value):
         if new_value not in value:
             value += f'{", " if value else ""}{new_value}'
         return value
 
-    def append_to_title_map(self, title_map, unit, r):
+    # NOTE: the three methods below are NOT called by the framework — the
+    # framework calls DSSTimeSeriesPlotAction methods instead (wired via
+    # _make_plot_action above).  They are kept here only to avoid breaking
+    # any existing subclasses that may override them directly on the manager.
+
+    def append_to_title_map(self, title_map, unit, r):  # dead — override DSSTimeSeriesPlotAction
         if unit in title_map:
             value = title_map[unit]
         else:
@@ -249,14 +352,14 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         value[3] = self._append_value(r["F"], value[3])
         title_map[unit] = value
 
-    def create_title(self, v):
+    def create_title(self, v):  # dead — override DSSTimeSeriesPlotAction
         title = f"{v[1]} @ {v[2]} ({v[3]}::{v[0]})"
         return title
 
     def is_irregular(self, r):
         return r["E"].startswith("IR-")
 
-    def create_curve(self, df, r, unit, file_index=None):
+    def create_curve(self, df, r, unit, file_index=None):  # dead — override DSSTimeSeriesPlotAction
         file_index_label = f"{file_index}:" if file_index is not None else ""
         crvlabel = f'{file_index_label}{r["B"]}/{r["C"]}'
         ylabel = f'{r["C"]} ({unit})'
@@ -269,7 +372,7 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
             responsive=True,
             active_tools=["wheel_zoom"],
             tools=["hover"],
-        )
+        )  # dead — override DSSTimeSeriesPlotAction.create_curve instead  # dead — override DSSTimeSeriesPlotAction.create_curve instead
 
     def get_data_for_time_range(self, r, time_range):
         pathname = self.build_pathname(r)

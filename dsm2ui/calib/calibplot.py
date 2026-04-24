@@ -21,6 +21,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _smart_title(s: str) -> str:
+    """Title-case *s* only when it is ALL-CAPS and longer than 2 characters.
+
+    Keeps short abbreviations (EC, DO, CFS) unchanged while converting
+    long ALL-CAPS DSS variable names (FLOW → Flow, STAGE → Stage).
+    """
+    if isinstance(s, str) and s.isupper() and len(s) > 2:
+        return s.title()
+    return s
+
 ## - Generic Plotting Functions ##
 import pyhecdss
 import numpy as np
@@ -118,7 +129,7 @@ def tsplot(dflist, names, timewindow=None, zoom_inst_plot=False):
         for df, name in zip(dflist, names)
     ]
     plt = [(c.redim(**{c.vdims[0].name: c.label}) if c.name != "" else c) for c in plt]
-    return hv.Overlay(plt)
+    return hv.Overlay(plt).opts(xlabel="Time")
 
 
 def scatterplot(dflist, names, index_x=0):
@@ -909,7 +920,7 @@ def build_inst_plot(
     """
     gridstyle = {"grid_line_alpha": 1, "grid_line_color": "lightgrey"}
     unit_string = get_units(flow_in_thousands, units)
-    y_axis_label = f"{vartype.name} @ {location.name} {unit_string}"
+    y_axis_label = f"{_smart_title(vartype.name)} @ {location.name} {unit_string}"
     # plot_data are scaled, if flow_in_thousands == True
     tsp_plot_data = [p.df for p in pp]
     cfs_to_cms = 0.028316847
@@ -976,7 +987,7 @@ def build_godin_plot(
     """
     gridstyle = {"grid_line_alpha": 1, "grid_line_color": "lightgrey"}
     unit_string = get_units(flow_in_thousands, units)
-    y_axis_label = f"{vartype.name} @ {location.name} {unit_string}"
+    y_axis_label = f"{_smart_title(vartype.name)} @ {location.name} {unit_string}"
     godin_y_axis_label = "Godin " + y_axis_label
     if manuscript_layout:
         godin_y_axis_label = "Tidal Avg. Flow (CMS)"
@@ -1089,7 +1100,7 @@ def build_scatter_plots(
             splot = (
                 scatterplot(splot_plot_data, [p.study.name for p in pp])
                 .opts(opts.Scatter(color=shift_cycle(hv.Cycle(cpalette))))
-                .opts(ylabel="Model", legend_position="top_left")
+                .opts(ylabel="Model " + unit_string, legend_position="top_left")
                 .opts(show_grid=True, frame_height=250, frame_width=250, data_aspect=1)
                 .opts(toolbar=toolbar_option)
             )
@@ -1530,7 +1541,7 @@ def build_metrics_table(
     """
     gridstyle = {"grid_line_alpha": 1, "grid_line_color": "lightgrey"}
     unit_string = get_units(flow_in_thousands, units)
-    y_axis_label = f"{vartype.name} @ {location.name} {unit_string}"
+    y_axis_label = f"{_smart_title(vartype.name)} @ {location.name} {unit_string}"
     godin_y_axis_label = "Godin " + y_axis_label
     # plot_data are scaled, if flow_in_thousands == True
     # gtsp_plot_data = [p.gdf for p in pp]
