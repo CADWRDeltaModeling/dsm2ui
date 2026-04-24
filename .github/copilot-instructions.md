@@ -20,6 +20,33 @@ pip install -e .
 ```bash
 pytest tests/
 ```
+## Running tests
+All tests are in the `tests/` directory. Run with `pytest`:
+# Terminal And Environment Rules
+
+- Use Command Prompt (`cmd`) for terminal commands in this repository.
+- Before any project command, run `conda activate dsm2ui` first.
+- Do not run project commands before environment activation.
+- If the environment is unavailable, stop and ask for the correct environment setup instead of continuing in a different shell.
+
+## Standard Command Sequence
+
+```bat
+conda activate dsm2ui
+<project command here>
+```
+
+## Examples
+
+```bat
+conda activate dsm2ui
+pytest tests/
+```
+
+```bat
+conda activate dsm2ui
+python -m dsm2ui.cli calib --help
+```
 
 ---
 
