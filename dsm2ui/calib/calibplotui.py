@@ -371,25 +371,31 @@ class CalibPlotUIManager(DataUIManager):
                 attrs["geometry"] = row["geometry"]
             catalog.add(CalibDataReference(
                 reader=reader,
-                name=f'{row["Name"]}_{row["vartype"]}',
+                name=self._ref_name(row),
                 cache=False,
                 **attrs,
             ))
         return catalog
+
+    @staticmethod
+    def _ref_name(row) -> str:
+        """Unique catalog key reconstructable from any selected table row."""
+        return f'{row["Name"]}_{row["vartype"]}'
 
     @property
     def data_catalog(self) -> DataCatalog:
         return self._dvue_catalog
 
     def get_data_reference(self, row):
-        """Look up DataReference by reconstructing its name from row columns.
+        """Look up DataReference by name when present; fall back to reconstructed key.
 
-        The display table is sliced to visible columns before the action
-        callback fires, so the 'name' column is not present in the row.
-        We reconstruct the name using the same formula as _build_dvue_catalog.
+        The ``'name'`` column is always present when the row comes from
+        ``_dfcat`` (built via ``catalog.to_dataframe().reset_index()``).
+        The fallback exists for any path that strips the name column.
         """
-        ref_name = f'{row["Name"]}_{row["vartype"]}'
-        return self._dvue_catalog.get(ref_name)
+        if "name" in row.index:
+            return self._dvue_catalog.get(row["name"])
+        return self._dvue_catalog.get(self._ref_name(row))
 
     def get_studies(self, varname):
         studies = list(self.config["study_files_dict"].keys())

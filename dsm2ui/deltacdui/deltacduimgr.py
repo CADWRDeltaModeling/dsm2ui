@@ -154,7 +154,9 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
         return self._dvue_catalog
 
     def get_data_reference(self, row):
-        """Look up DataReference by reconstructing its name from visible table columns."""
+        """Look up DataReference by name when present; fall back to reconstructed key."""
+        if "name" in row.index:
+            return self._dvue_catalog.get(row["name"])
         return self._dvue_catalog.get(self._ref_name(row))
 
     def get_data_catalog_for_dataset(self, ds, nc_file_path):

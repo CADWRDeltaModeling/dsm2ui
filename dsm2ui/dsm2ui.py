@@ -201,7 +201,15 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         return self._dvue_catalog
 
     def get_data_reference(self, row):
-        """Look up DataReference by reconstructing its name from visible table columns."""
+        """Look up DataReference by name when present; fall back to reconstructed key.
+
+        Rows from the display table always carry a ``'name'`` column (from
+        ``catalog.to_dataframe().reset_index()``) so the name-first path is
+        the normal case.  The fallback keeps homogeneous catalogs working when
+        the row comes from a context that has stripped ``'name'``.
+        """
+        if "name" in row.index:
+            return self._dvue_catalog.get(row["name"])
         return self._dvue_catalog.get(self._ref_name(row))
 
     def _make_plot_action(self):
@@ -1283,11 +1291,16 @@ class _TidefilePlotAction(TimeSeriesPlotAction):
     def create_curve(self, data, row, unit, file_index=""):
         varying = getattr(self, "_varying", {"id": True, "variable": True, "filename": False})
         file_index_label = f"{file_index}: " if file_index else ""
-        parts = [row["id"]]
-        if varying.get("variable", True):
-            parts.append(_smart_title(row["variable"]))
-        crvlabel = f'{file_index_label}{"/".join(parts)}'
-        ylabel = _smart_title(row["variable"]) + (f" ({unit})" if unit else "")
+        # Math refs have no filename; use their catalog name as the curve label.
+        if row.get("ref_type") == "math":
+            crvlabel = f'{file_index_label}{row.get("name", "math_ref")}'
+            ylabel = _smart_title(row.get("variable", "")) + (f" ({unit})" if unit else "")
+        else:
+            parts = [row["id"]]
+            if varying.get("variable", True):
+                parts.append(_smart_title(row["variable"]))
+            crvlabel = f'{file_index_label}{"/".join(parts)}'
+            ylabel = _smart_title(row["variable"]) + (f" ({unit})" if unit else "")
         crv = hv.Curve(data.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
         return crv.opts(
             xlabel="Time",
@@ -1388,6 +1401,9 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         return f'{row["filename"]}::{row["id"]}/{row["variable"]}'
 
     def get_data_reference(self, row):
+        """Look up DataReference by name when present; fall back to reconstructed key."""
+        if "name" in row.index:
+            return self._dvue_catalog.get(row["name"])
         return self._dvue_catalog.get(self._build_ref_key(row))
 
     @staticmethod
@@ -1411,12 +1427,14 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         return _TidefilePlotAction()
 
     def build_station_name(self, r):
+        # Math refs carry no filename; use their catalog name as the legend label.
+        if r.get("ref_type") == "math":
+            name = r.get("name")
+            if name and str(name) not in ("nan", "None", ""):
+                return str(name)
         if self.display_fileno:
             return f'{r["FILE_NUM"]}:{r[self.station_id_column]}'
         return f"{r[self.station_id_column]}"
-
-    def get_data_catalog(self):
-        return self.dfcat
 
     def get_time_range(self, dfcat):
         return self.time_range

@@ -268,7 +268,15 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         return self._dvue_catalog
 
     def get_data_reference(self, row):
-        """Look up DataReference by filename + pathname key."""
+        """Look up DataReference by filename + pathname key.
+
+        For math references (which have no DSS filename), the catalog key is
+        the reference ``name`` directly rather than the ``filename::pathname``
+        composite used for raw DSS entries.
+        """
+        filename = row.get("filename", None)
+        if pd.isna(filename):
+            return self._dvue_catalog.get(row["name"])
         return self._dvue_catalog.get(self.build_ref_key(row))
 
     def __del__(self):
