@@ -259,7 +259,8 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         self._dvue_catalog = self._build_dvue_catalog(geo_crs)
 
         super().__init__(**kwargs)
-        self.time_range = _time_range
+        if _time_range is not None:
+            self.time_range = _time_range
         self.color_cycle_column = "B"
         self.dashed_line_cycle_column = "filename"
         self.marker_cycle_column = "F"
@@ -315,8 +316,8 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         if self.time_range is None:  # guess from catalog of DSS files
             dftw = dfcat.D.str.split("-", expand=True)
             dftw.columns = ["Tmin", "Tmax"]
-            dftw["Tmin"] = pd.to_datetime(dftw["Tmin"], format="%d%b%Y")
-            dftw["Tmax"] = pd.to_datetime(dftw["Tmax"], format="%d%b%Y")
+            dftw["Tmin"] = pd.to_datetime(dftw["Tmin"].str.strip(), format="%d%b%Y")
+            dftw["Tmax"] = pd.to_datetime(dftw["Tmax"].str.strip(), format="%d%b%Y")
             tmin = dftw["Tmin"].min()
             tmax = dftw["Tmax"].max()
             self.time_range = (tmin, tmax)
