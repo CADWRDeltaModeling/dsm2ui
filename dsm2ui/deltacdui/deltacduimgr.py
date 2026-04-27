@@ -114,7 +114,7 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
         )
         self._dvue_catalog = self._build_dvue_catalog(catalog, _reader, geo_crs)
 
-        kwargs['filename_column'] = "source"
+        kwargs['url_column'] = "source"
         super().__init__(**kwargs)
         # Set up columns for visualization
         self.color_cycle_column = "area_id"

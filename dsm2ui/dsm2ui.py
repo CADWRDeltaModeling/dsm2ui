@@ -158,9 +158,9 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         output_channels is a geopandas dataframe with columns:
         NAME  CHAN_NO  DISTANCE  VARIABLE  INTERVAL  PERIOD_OP  FILE
         """
-        self.time_range = kwargs.pop("time_range", None)
+        _time_range = kwargs.pop("time_range", None)
         self.output_channels = output_channels
-        self.display_fileno = False
+        self.display_url_num = False
         filename_column = "FILE"
         unique_files = self.output_channels[filename_column].unique()
         if len(unique_files) > 1:
@@ -186,7 +186,8 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
             _oc, _reader, self._ref_name, geo_crs, ref_class=DSM2DSSDataReference
         )
 
-        super().__init__(file_number_column_name="FILE_NO", **kwargs)
+        super().__init__(url_num_column="FILE_NO", **kwargs)
+        self.time_range = _time_range
         self.color_cycle_column = "NAME"
         self.dashed_line_cycle_column = "FILE"
         self.marker_cycle_column = "VARIABLE"
@@ -216,7 +217,7 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         return _DSM2DSSPlotAction()
 
     def build_station_name(self, r):
-        if self.display_fileno:
+        if self.display_url_num:
             return f'{r["FILE_NO"]}:{r["NAME"]}'
         else:
             return f'{r["NAME"]}'
@@ -1344,7 +1345,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         """
         self.channels = kwargs.pop("channels", None)
         self.tidefiles = tidefiles
-        self.display_fileno = False
+        self.display_url_num = False
         self.tidefile_map = {
             f: DSM2TidefileUIManager.read_tidefile(f) for f in tidefiles
         }
@@ -1379,8 +1380,8 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             ref_class=DSM2TidefileDataReference,
         )
         super().__init__(
-            filename_column="filename",
-            file_number_column_name="FILE_NUM",
+            url_column="filename",
+            url_num_column="url_num",
             time_range=_time_range,
             **kwargs,
         )
@@ -1432,8 +1433,8 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             name = r.get("name")
             if name and str(name) not in ("nan", "None", ""):
                 return str(name)
-        if self.display_fileno:
-            return f'{r["FILE_NUM"]}:{r[self.station_id_column]}'
+        if self.display_url_num:
+            return f'{r["url_num"]}:{r[self.station_id_column]}'
         return f"{r[self.station_id_column]}"
 
     def get_time_range(self, dfcat):

@@ -129,7 +129,7 @@ class DeltaCDNodesUIManager(tsdataui.TimeSeriesDataUIManager):
         )
         self._dvue_catalog = build_catalog_from_dataframe(catalog, _reader, self._ref_name, geo_crs)
 
-        kwargs['filename_column'] = "source"
+        kwargs['url_column'] = "source"
         super().__init__(**kwargs)
         # Set up columns for visualization
         self.color_cycle_column = "node"
