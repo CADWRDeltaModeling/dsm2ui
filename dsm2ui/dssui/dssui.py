@@ -87,7 +87,15 @@ class DSSTimeSeriesPlotAction(TimeSeriesPlotAction):
         c_part = _smart_title(str(row.get("C", "")))
         ylabel = f"{c_part} ({unit})" if unit else c_part
 
-        crv = hv.Curve(data.iloc[:, [0]], label=label).redim(value=label)
+        # Normalize the data column to the semantic C-part name (e.g. "Stage")
+        # so that all curves for the same variable share the same HoloViews vdim.
+        # Without this, math refs return columns named after their ref name
+        # ("godinx", "czx", …) causing hv.Overlay to receive curves with different
+        # vdims and silently drop all but the first.
+        vdim_name = c_part if c_part else "value"
+        col_name = data.columns[0]
+        data_for_curve = data.iloc[:, [0]].rename(columns={col_name: vdim_name})
+        crv = hv.Curve(data_for_curve, label=label)
         return crv.opts(
             xlabel="Time",
             ylabel=ylabel,
