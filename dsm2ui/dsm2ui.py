@@ -1799,6 +1799,312 @@ def show_dsm2_output_ui(echo_files, channel_shapefile=None, clear_cache=False):
     ui.create_view(title="DSM2 Output UI").show()
 
 
+# ---------------------------------------------------------------------------
+# DSM2 Input Boundary Viewer — classes, builder, and CLI command
+# ---------------------------------------------------------------------------
+
+# Tables that reference DSS files via FILE + PATH columns.
+# Maps table name → name column (None = INPUT_GATE composite key).
+# Mirrors TS_TABLE_NAME_COL in pydsm.analysis.dsm2diff.
+INPUT_TS_TABLES = {
+    "BOUNDARY_FLOW": "NAME",
+    "BOUNDARY_STAGE": "NAME",
+    "SOURCE_FLOW": "NAME",
+    "SOURCE_FLOW_RESERVOIR": "NAME",
+    "INPUT_GATE": None,
+    "INPUT_TRANSFER_FLOW": "TRANSFER_NAME",
+    "OPRULE_TIME_SERIES": "NAME",
+}
+
+
+class DSM2EchoInputReader(DataReferenceReader):
+    """Reads a DSM2 input boundary time series from a HEC-DSS file.
+
+    Attributes passed by the DataReference:
+    - ``FILE``: absolute path to the DSS file
+    - ``PATH``: DSS pathname (``/A/B/C//E/F/``)
+    - ``SIGN``: multiplier (default 1.0)
+    - ``time_range``: optional ``(start, end)`` tuple
+    """
+
+    def load(self, **attributes) -> "pd.DataFrame":
+        import pandas as pd
+
+        dssfile = attributes["FILE"]
+        path = attributes["PATH"]
+        sign = float(attributes.get("SIGN", 1.0))
+        time_range = attributes.get("time_range")
+        try:
+            gen = dss.get_ts(dssfile, path)
+            result = next(gen, None)
+            if result is None:
+                logger.warning("No DSS data for path %s in %s", path, dssfile)
+                return pd.DataFrame()
+            ts, unit, ptype = result
+            # Squeeze single-column DataFrame → Series
+            if isinstance(ts, pd.DataFrame):
+                ts = ts.iloc[:, 0]
+            # Convert PeriodIndex → DatetimeIndex so .loc[start:end] works
+            if isinstance(ts.index, pd.PeriodIndex):
+                ts.index = ts.index.to_timestamp()
+            ts = sign * ts
+            if time_range is not None and len(time_range) == 2:
+                start = pd.Timestamp(time_range[0])
+                end = pd.Timestamp(time_range[1])
+                ts = ts.loc[start:end]
+            df = ts.to_frame(name="value")
+            df.attrs["unit"] = unit.lower() if isinstance(unit, str) else ""
+            df.attrs["ptype"] = ptype if ptype else "inst-val"
+            return df
+        except Exception as exc:
+            logger.warning("Error loading DSS path %s from %s: %s", path, dssfile, exc)
+            return pd.DataFrame()
+
+    def __repr__(self) -> str:
+        return "DSM2EchoInputReader()"
+
+
+class DSM2EchoInputDataReference(DataReference):
+    """DataReference subclass for DSM2 echo-file input boundary time series."""
+
+    ref_type = "dsm2_echo_input"
+
+
+class _DSM2EchoInputPlotAction(TimeSeriesPlotAction):
+    """Plot action for DSM2 input boundary time series."""
+
+    def render(self, df, refs_and_data, manager):
+        self._varying = {
+            "TABLE": df["TABLE"].nunique() > 1 if "TABLE" in df.columns else True,
+            "NAME": df["NAME"].nunique() > 1 if "NAME" in df.columns else True,
+            "ECHO_FILE": df["ECHO_FILE"].nunique() > 1 if "ECHO_FILE" in df.columns else False,
+        }
+        return super().render(df, refs_and_data, manager)
+
+    def create_curve(self, data, row, unit, file_index=""):
+        varying = getattr(self, "_varying", {"TABLE": True, "NAME": True, "ECHO_FILE": False})
+        file_index_label = f"{file_index}:" if file_index else ""
+        table_prefix = f'{row["TABLE"]}:' if varying.get("TABLE", True) else ""
+        crvlabel = f'{file_index_label}{table_prefix}{row["NAME"]}'
+        ylabel = unit if unit else "value"
+        crv = hv.Curve(data.iloc[:, [0]], label=crvlabel).redim(value=crvlabel)
+        return crv.opts(
+            xlabel="Time",
+            ylabel=ylabel,
+            responsive=True,
+            active_tools=["wheel_zoom"],
+            tools=["hover"],
+        )
+
+    def append_to_title_map(self, title_map, group_key, row):
+        existing = title_map.get(group_key, "")
+        entry = f'{row["TABLE"]}:{row["NAME"]}'
+        if entry not in existing:
+            existing += f'{", " if existing else ""}{entry}'
+        title_map[group_key] = existing
+
+    def create_title(self, title_info) -> str:
+        return str(title_info)
+
+
+class DSM2EchoInputUIManager(TimeSeriesDataUIManager):
+    """UI manager for DSM2 input boundary time series from one or more echo files.
+
+    Parameters
+    ----------
+    input_rows : pd.DataFrame
+        Must have columns: TABLE, NAME, FILE, PATH, SIGN, FILLIN, ECHO_FILE.
+        Optionally ECHO_FILE_NO when >1 unique echo files are present.
+    """
+
+    def __init__(self, input_rows, **kwargs):
+        _time_range = kwargs.pop("time_range", None)
+        self.input_rows = input_rows
+
+        # Determine whether multiple echo files are present.
+        unique_echo_files = input_rows["ECHO_FILE"].unique()
+        self.display_url_num = len(unique_echo_files) > 1
+
+        _reader = DSM2EchoInputReader()
+        self._dvue_catalog = build_catalog_from_dataframe(
+            input_rows, _reader, self._ref_name, ref_class=DSM2EchoInputDataReference
+        )
+
+        super().__init__(url_column="ECHO_FILE", url_num_column="ECHO_FILE_NO", **kwargs)
+        self.time_range = _time_range
+        self.color_cycle_column = "NAME"
+        self.dashed_line_cycle_column = "ECHO_FILE"
+        self.marker_cycle_column = "TABLE"
+
+    @staticmethod
+    def _ref_name(row) -> str:
+        """Unique DataReference name: echo_file :: TABLE/NAME."""
+        return f'{row["ECHO_FILE"]}::{row["TABLE"]}/{row["NAME"]}'
+
+    @property
+    def data_catalog(self) -> DataCatalog:
+        return self._dvue_catalog
+
+    def get_data_reference(self, row):
+        if "name" in row.index:
+            return self._dvue_catalog.get(row["name"])
+        return self._dvue_catalog.get(self._ref_name(row))
+
+    def _make_plot_action(self):
+        return _DSM2EchoInputPlotAction()
+
+    def build_station_name(self, r):
+        prefix = f'{r["ECHO_FILE_NO"]}:' if self.display_url_num and "ECHO_FILE_NO" in r.index else ""
+        return f'{prefix}{r["TABLE"]}:{r["NAME"]}'
+
+    def get_time_range(self, dfcat):
+        return self.time_range
+
+    def is_irregular(self, r):
+        return False
+
+    def _get_table_column_width_map(self):
+        return {
+            "TABLE": "15%",
+            "NAME": "20%",
+            "PATH": "35%",
+            "SIGN": "5%",
+            "FILLIN": "10%",
+        }
+
+    def get_table_filters(self):
+        return {
+            "TABLE": {"type": "input", "func": "like", "placeholder": "Enter match"},
+            "NAME": {"type": "input", "func": "like", "placeholder": "Enter match"},
+            "PATH": {"type": "input", "func": "like", "placeholder": "Enter match"},
+        }
+
+
+def _resolve_envvars(value: str, envvars: dict) -> str:
+    """Substitute ``${VAR}`` tokens in *value* using *envvars*."""
+    for k, v in envvars.items():
+        value = value.replace(f"${{{k}}}", str(v))
+    return value
+
+
+def build_input_plotter(*echo_files):
+    """Build a :class:`DSM2EchoInputUIManager` from one or more DSM2 echo files.
+
+    Each echo file is scanned for tables listed in :data:`INPUT_TS_TABLES`.
+    Rows with a ``FILE`` / ``PATH`` column pair are collected; ENVVAR entries
+    are used to resolve ``${VAR}`` placeholders in file paths.  FILE paths are
+    resolved relative to the *study root* (parent of the echo-file directory,
+    because DSM2 echo files live inside ``output/``).
+    """
+    rows = []
+    time_range = None
+
+    for echo_file in echo_files:
+        if not os.path.isfile(echo_file):
+            raise FileNotFoundError(f"Echo file not found: {echo_file}")
+
+        tables = load_echo_file(echo_file)
+
+        try:
+            current_time_range = get_runtime(tables)
+            if time_range is None:
+                time_range = current_time_range
+            else:
+                time_range = (
+                    min(time_range[0], current_time_range[0]),
+                    max(time_range[1], current_time_range[1]),
+                )
+        except Exception as exc:
+            logger.warning("Could not determine runtime for %s: %s", echo_file, exc)
+
+        # Build ENVVAR substitution map
+        envvars = {}
+        if "ENVVAR" in tables:
+            ev = tables["ENVVAR"]
+            if "NAME" in ev.columns and "VALUE" in ev.columns:
+                envvars = dict(zip(ev["NAME"].astype(str), ev["VALUE"].astype(str)))
+
+        for table_name, name_col in INPUT_TS_TABLES.items():
+            if table_name not in tables:
+                continue
+            tbl = tables[table_name]
+            if "FILE" not in tbl.columns or "PATH" not in tbl.columns:
+                continue
+
+            # INPUT_GATE: synthesize composite NAME column
+            if name_col is None:
+                tbl = tbl.copy()
+                tbl["NAME"] = (
+                    tbl["GATE_NAME"].astype(str)
+                    + "/"
+                    + tbl["DEVICE"].astype(str)
+                    + "/"
+                    + tbl["VARIABLE"].astype(str)
+                )
+                name_col = "NAME"
+
+            has_sign = "SIGN" in tbl.columns
+            has_fillin = "FILLIN" in tbl.columns
+
+            for _, row in tbl.iterrows():
+                raw_file = str(row["FILE"])
+                if raw_file.lower() == "constant":
+                    continue  # constant entries have no DSS file
+
+                resolved_file = _resolve_envvars(raw_file, envvars)
+
+                # Resolve relative paths: echo file lives in output/ → study root = ../
+                if not os.path.isabs(resolved_file):
+                    resolved_file = abs_path(resolved_file, echo_file, study_dir="../")
+
+                rows.append({
+                    "TABLE": table_name,
+                    "NAME": str(row[name_col]),
+                    "FILE": resolved_file,
+                    "PATH": str(row["PATH"]),
+                    "SIGN": float(row["SIGN"]) if has_sign else 1.0,
+                    "FILLIN": str(row["FILLIN"]) if has_fillin else "last",
+                    "ECHO_FILE": echo_file,
+                })
+
+    if not rows:
+        raise ValueError(
+            "No input boundary time series found in the provided echo files. "
+            "Expected at least one of: " + ", ".join(INPUT_TS_TABLES)
+        )
+
+    input_rows = pd.DataFrame(rows)
+    input_rows.reset_index(drop=True, inplace=True)
+
+    # Add ECHO_FILE_NO when >1 unique echo files (mirrors FILE_NO in build_output_plotter)
+    unique_echo_files = input_rows["ECHO_FILE"].unique()
+    if len(unique_echo_files) > 1:
+        echo_file_list = list(unique_echo_files)
+        input_rows["ECHO_FILE_NO"] = input_rows["ECHO_FILE"].apply(
+            lambda x: echo_file_list.index(x)
+        )
+
+    return DSM2EchoInputUIManager(input_rows, time_range=time_range)
+
+
+@click.command()
+@click.argument("echo_files", nargs=-1)
+def show_dsm2_input_ui(echo_files):
+    """Show a user interface for viewing DSM2 input boundary condition time series.
+
+    Scans the supplied echo files for DSS-backed input tables
+    (BOUNDARY_FLOW, BOUNDARY_STAGE, SOURCE_FLOW, SOURCE_FLOW_RESERVOIR,
+    INPUT_GATE, INPUT_TRANSFER_FLOW, OPRULE_TIME_SERIES) and launches an
+    interactive Panel table + plot viewer.
+
+    Supports one or more ECHO_FILES; when multiple files are supplied a
+    file-number prefix is added to each row to distinguish the sources.
+    """
+    plotter = build_input_plotter(*echo_files)
+    ui = dataui.DataUI(plotter)
+    ui.create_view(title="DSM2 Input UI").show()
+
+
 @click.command()
 @click.argument("tidefiles", nargs=-1)
 @click.option(
