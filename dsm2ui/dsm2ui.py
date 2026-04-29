@@ -186,7 +186,7 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
             _oc, _reader, self._ref_name, geo_crs, ref_class=DSM2DSSDataReference
         )
 
-        super().__init__(url_num_column="FILE_NO", **kwargs)
+        super().__init__(url_column="FILE", url_num_column="FILE_NO", **kwargs)
         self.time_range = _time_range
         self.color_cycle_column = "NAME"
         self.dashed_line_cycle_column = "FILE"
@@ -246,6 +246,10 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
             "INTERVAL": {"type": "input", "func": "like", "placeholder": "Enter match"},
         }
         return table_filters
+
+    def is_irregular(self, r):
+        interval = r.get("INTERVAL", "") if hasattr(r, "get") else getattr(r, "INTERVAL", "")
+        return str(interval).upper() in ("IR", "IR-YEAR", "IR-MONTH", "IR-DAY", "IRREG", "")
 
     def get_data_for_time_range(self, r, time_range):
         ref = self._dvue_catalog.get(self._ref_name(r))
