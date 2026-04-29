@@ -22,6 +22,7 @@ pytest tests/
 ```
 ## Running tests
 All tests are in the `tests/` directory. Run with `pytest`:
+
 # Terminal And Environment Rules
 
 - Use Command Prompt (`cmd`) for terminal commands in this repository.
