@@ -39,6 +39,15 @@ import copy
 import re
 
 cpalette = "Category10"
+
+def _normalize_dt_index(df):
+    """Coerce a DatetimeIndex to datetime64[ns] to avoid resolution mismatches
+    between pandas 2.0+ (datetime64[us]) and cached data (datetime64[ns])."""
+    if df is not None and isinstance(df.index, pd.DatetimeIndex) and df.index.dtype != "datetime64[ns]":
+        df = df.copy()
+        df.index = df.index.astype("datetime64[ns]")
+    return df
+
 def _normalize_timewindow(timewindow):
     """Normalise a timewindow string to 'YYYY-MM-DD:YYYY-MM-DD' format.
 
@@ -143,7 +152,7 @@ def scatterplot(dflist, names, index_x=0):
     Returns:
         Overlay: Overlay of Scatter
     """
-    dfa = pd.concat(dflist, axis=1)
+    dfa = pd.concat([_normalize_dt_index(df) for df in dflist], axis=1)
     dfa.columns = names
     dfa = dfa.resample("D").mean()
     return dfa.hvplot.scatter(x=dfa.columns[index_x], hover_cols="all")
@@ -282,7 +291,7 @@ def calculate_metrics(dflist, names, index_x=0, location=None):
     Returns:
         DataFrame: DataFrame of metrics
     """
-    dfa = pd.concat(dflist, axis=1)
+    dfa = pd.concat([_normalize_dt_index(df) for df in dflist], axis=1)
     dfa = dfa.dropna()
 
     # dfa = remove_data_for_time_windows(dfa, time_window_exclusion_list, location, invert_selection=invert_timewindow_exclusion)
