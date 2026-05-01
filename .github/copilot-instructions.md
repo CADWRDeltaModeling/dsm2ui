@@ -83,6 +83,58 @@ dsm2ui calib optimize --config <yml> [--dry-run] [--skip-init]  # gradient/DE op
 | `calib_optimize.py` | `optimize()`, `ObjectiveEvaluator`, `EvalResult`, `OptimizationResult`, parallel gradient, Nelder-Mead / L-BFGS-B |
 | `calib_cli.py` | Click CLI (`calib run`, `calib optimize`, `calib setup`) |
 | `calibrator_design.md` | Design decisions, workflow diagram, file structure |
+| `postpro_dsm2.py` | `process_model_data()`, `process_observed_data()`, `make_plots()` — JSON-config driven postprocessing |
+| `calibplot.py` | `load_data_for_plotting()`, `build_calib_plot_template()` — per-station plot construction |
+| `expression_eval.py` | `parse_expression_tokens()`, `eval_expression()` — safe arithmetic on DSS station series |
+
+---
+
+## Postpro / Calibration Plot System
+
+The `dsm2ui calib postpro run` workflow is distinct from the optimizer workflow. It uses `pydsm.analysis.postpro` and a JSON config (not YAML).
+
+### Key objects (from `pydsm.analysis.postpro`)
+- `Study(name, dssfile)` — a named HEC-DSS file (model or observed)
+- `Location(name, bpart, description, time_window_exclusion_list, threshold_value)` — one station row from a location CSV
+  - `name` = `dsm2_id` column (model B-part or expression)
+  - `bpart` = `obs_station_id` column (observed B-part or expression)
+- `VarType(name, units)` — e.g. `VarType("FLOW", "cfs")`
+- `PostProcessor(study, location, vartype)` — reads DSS, resamples, gap-fills, caches
+- `PostProCache` — `diskcache`-backed store keyed by `/{BPART}/{CPART}/{EPART}/`
+
+### Expression stations in location CSVs
+`obs_station_id` or `dsm2_id` may contain arithmetic expressions instead of plain station IDs. Detection rule: if the field is not a plain identifier (`^[a-zA-Z_][a-zA-Z0-9_]*$`) it is treated as an expression. Examples: `-VCU`, `SDC-GES`, `RSAC128-RSAC123`.
+
+- `_is_expression(s)` in `calibplot.py` performs the classification
+- `_compute_expression(p, expr, study, vartype)` loads each token station, evaluates the expression, and populates `p.df/gdf/high/low/amp` on the PostProcessor
+- The expression evaluator uses `dvue.math_reference._MATH_NAMESPACE` (safe namespace: numpy ufuncs, vtools filters, no builtins)
+- Full user guide: [station-math-expressions-plan.md](../station-math-expressions-plan.md)
+
+### Postpro config JSON structure
+```json
+{
+  "location_files_dict":   {"FLOW": "./location_info/calibration_flow_stations.csv", ...},
+  "observed_files_dict":   {"FLOW": "./observed_data/cdec/flow_merged.dss", ...},
+  "study_files_dict":      {"StudyName": "./model_output/run.dss"},
+  "vartype_dict":          {"FLOW": "cfs", "EC": "uS/cm", "STAGE": "feet"},
+  "process_vartype_dict":  {"FLOW": true, "EC": false},
+  "timewindow_dict":       {"default_timewindow": "hydro_calibration", "hydro_calibration": "01OCT2010 - 01OCT2012"},
+  "inst_plot_timewindow_dict": {"FLOW": "2011-09-01:2011-09-30", "EC": null}
+}
+```
+Generate a config: `dsm2ui calib postpro setup -s study/ -p postprocessing/ -o postpro_config.yml`
+
+### Location CSV columns
+`dsm2_id`, `obs_station_id`, `station_name`, `subtract` (use `no`), `time_window_exclusion_list`, `threshold_value`. Rows starting with `#` are skipped. Both `dsm2_id` and `obs_station_id` accept arithmetic expressions.
+
+### Parallel plot generation
+```bash
+dsm2ui calib postpro run plots postpro_config.yml --workers 4
+```
+Uses `ProcessPoolExecutor`; each worker is an independent process with its own webdriver. Do not use `--workers` > number of physical cores.
+
+### Cache invalidation
+Set `process_vartype_dict → VARTYPE: true` to reprocess and overwrite cache. The `model` step clears model cache by default unless `--skip-cached` is passed.
 
 ---
 
