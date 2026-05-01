@@ -389,6 +389,21 @@ Stations that cannot be snapped within the tolerance (default 100 ft) are writte
 cast a wider net. The output CSV has blank defaults for manual fields (`note`, `subtract`,
 `time_window_exclusion_list`, `Calibration Period`, etc.) which should be filled in before use.
 
+#### Computed (expression) stations in the station CSV
+
+Some calibration stations represent a mathematical combination of measurements rather than a single sensor — for example, a negated flow or the difference between two upstream/downstream gauges. These are supported by writing an arithmetic expression directly into the `obs_station_id` or `dsm2_id` column of the station CSV:
+
+| Column value | Behaviour |
+|---|---|
+| `FPT` (plain identifier) | Load station `FPT` directly from the DSS file |
+| `-VCU` | Negate the `VCU` time series |
+| `SDC-GES` | Subtract the `GES` time series from `SDC` |
+| `RSAC128-RSAC123` | Subtract `RSAC123` from `RSAC128` |
+
+Standard Python arithmetic (`+`, `-`, `*`, `/`, parentheses, numeric constants) is supported. Each identifier in the expression is looked up as a B-part station name in the same DSS file.
+
+See [station-math-expressions-plan.md](station-math-expressions-plan.md) for full details and examples.
+
 ---
 
 ### Channel geometry

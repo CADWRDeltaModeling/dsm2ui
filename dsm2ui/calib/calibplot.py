@@ -14,12 +14,65 @@ from bokeh.themes import built_in_themes
 
 #
 from pydsm.functions import tsmath
+from pydsm.functions import tidalhl as _tidalhl
 from pydsm.analysis import postpro
+from vtools.functions.filter import godin as _godin
+from dsm2ui.calib.expression_eval import parse_expression_tokens, eval_expression
 import datetime
 import sys
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_expression(p, expr, study, vartype):
+    """Evaluate *expr* against token stations and populate p.df/gdf/high/low/amp.
+
+    Each identifier in *expr* is loaded as a station B-part from the same DSS file
+    as *study*.  The expression is evaluated with a safe numpy/vtools namespace.
+    Results are stored directly on the PostProcessor *p* so that ``store_processed()``
+    can then cache them normally.
+    """
+    tokens = parse_expression_tokens(expr)
+    if not tokens:
+        logger.warning("Expression %r has no resolvable station tokens", expr)
+        return
+
+    series_map = {}
+    for tok in tokens:
+        tok_loc = postpro.Location(
+            name=tok,
+            bpart=tok,
+            description="",
+            time_window_exclusion_list="",
+            threshold_value="",
+        )
+        tok_p = postpro.PostProcessor(study, tok_loc, vartype)
+        if study.name == "Observed":
+            tok_p.do_resample_with_merge("15min")
+            tok_p.do_fill_in()
+        tok_p.process()
+        if tok_p.df is None:
+            logger.warning(
+                "Expression %r: token %r has no data in %s", expr, tok, study.dssfile
+            )
+            return
+        series_map[tok] = tok_p.df.iloc[:, 0]
+
+    try:
+        composite = eval_expression(expr, series_map)
+    except ValueError as exc:
+        logger.warning("Expression evaluation failed for %r: %s", expr, exc)
+        return
+
+    bpart = p.location.bpart or p.location.name
+    p.df = composite.to_frame(name=bpart)
+    if len(p.df) > 0:
+        p.gdf = _godin(p.df)
+        p.high, p.low = _tidalhl.get_tidal_hl_rolling(p.df)
+        p.amp = _tidalhl.get_tidal_amplitude(p.high, p.low)
+    else:
+        p.gdf = p.high = p.low = p.amp = None
 
 
 def _smart_title(s: str) -> str:
@@ -37,6 +90,16 @@ import pyhecdss
 import numpy as np
 import copy
 import re
+
+_SIMPLE_ID_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+
+
+def _is_expression(s):
+    """Return True if *s* is an arithmetic expression rather than a plain station ID.
+
+    E.g. '-VCU', 'SDC-GES', 'RSAC128-RSAC123' -> True; 'VCU', 'RSAC128' -> False.
+    """
+    return bool(s) and not _SIMPLE_ID_RE.match(s)
 
 cpalette = "Category10"
 
@@ -851,20 +914,39 @@ def load_data_for_plotting(studies, location, vartype, timewindow):
             loc = location
         p = postpro.PostProcessor(study, loc, vartype)
 
-        invert_series = False
-        if study.name == "Observed" and "-" in location.bpart:
-            invert_series = True
+        # Determine active expression for this study.
+        if study.name == "Observed":
+            expr = location.bpart if _is_expression(location.bpart) else None
+        else:
+            expr = location.name if _is_expression(location.name) else None
 
-        success = p.load_processed(timewindow=timewindow, invert_series=invert_series)
-        if not success:  # try on-demand processing (only if not already a cached failure)
-            if not p.has_cached_failure():
-                p.process()
-                p.store_processed()
-                logger.debug("On-demand processing complete for %s", p)
-                success = p.load_processed(
-                    timewindow=timewindow, invert_series=invert_series
-                )
-                logger.debug("Load after on-demand processing: success=%s", success)
+        if expr:
+            # Expression path: try cache first, compute on miss.
+            success = p.load_processed(timewindow=timewindow)
+            if not success:
+                if not p.has_cached_failure():
+                    _compute_expression(p, expr, study, vartype)
+                    if p.df is not None:
+                        p.store_processed()
+                        logger.debug("Expression processing complete for %s expr=%r", p, expr)
+                        success = p.load_processed(timewindow=timewindow)
+                        logger.debug("Load after expression processing: success=%s", success)
+        else:
+            # Standard path.
+            invert_series = False
+            if study.name == "Observed" and "-" in location.bpart:
+                invert_series = True
+
+            success = p.load_processed(timewindow=timewindow, invert_series=invert_series)
+            if not success:  # try on-demand processing (only if not already a cached failure)
+                if not p.has_cached_failure():
+                    p.process()
+                    p.store_processed()
+                    logger.debug("On-demand processing complete for %s", p)
+                    success = p.load_processed(
+                        timewindow=timewindow, invert_series=invert_series
+                    )
+                    logger.debug("Load after on-demand processing: success=%s", success)
         if success:
             pp.append(p)
         else:
