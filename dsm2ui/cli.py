@@ -343,13 +343,14 @@ def node_map_flow_splits(node_shapefile, hydro_echo_file):
     default="",
 )
 @click.argument("json_config_file")
-@click.option("--dask/--no-dask", default=False)
+@click.option("--dask/--no-dask", default=False, hidden=True)
 @click.option("--skip-cached", is_flag=True, default=False, help="Use existing post-processing cache instead of clearing and recomputing (applies to model and plots).")
-def exec_postpro_dsm2(process_name, json_config_file, dask, skip_cached):
+@click.option("--workers", default=1, show_default=True, type=click.INT, help="Number of parallel worker processes for the 'plots' step.")
+def exec_postpro_dsm2(process_name, json_config_file, dask, skip_cached, workers):
     """Run a DSM2 post-processing step (observed, model, plots, heatmaps, validation_bar_charts, or copy_plot_files)."""
     setup_logging()
     from dsm2ui.calib import postpro_dsm2
-    postpro_dsm2.run_process(process_name, json_config_file, dask, skip_if_cached=skip_cached)
+    postpro_dsm2.run_process(process_name, json_config_file, dask, skip_if_cached=skip_cached, n_workers=workers)
 
 
 # ---------------------------------------------------------------------------

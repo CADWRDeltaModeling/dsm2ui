@@ -12,11 +12,24 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+def _worker_init():
+    """Initializer for each ProcessPoolExecutor worker process.
+
+    Spawned processes don't inherit log handlers, so we set them up here.
+    Panel extension must also be initialised before the first plot is built.
+    """
+    from dsm2ui._logging import setup_logging
+    setup_logging()
+    import panel as pn
+    pn.extension()
+
+
 # dask is a parallel processing library. Using it will save a lot of time, but error
 # messages will not be as helpful, so set to False for debugging.
 # Another option is to set scheduler (below) to single_threaded
 
 import dask
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dask.distributed import Client, LocalCluster
 from . import calibplot
 from . import calib_heatmap
@@ -584,7 +597,7 @@ def postpro_copy_plot_files(cluster, config_data):
             i += 1
 
 
-def postpro_plots(cluster, config_data, use_dask, skip_if_cached=False):
+def postpro_plots(cluster, config_data, use_dask, skip_if_cached=False, n_workers=1):
     vartype_dict = config_data["vartype_dict"]
     location_files_dict = config_data["location_files_dict"]
     observed_files_dict = config_data["observed_files_dict"]
@@ -710,6 +723,51 @@ def postpro_plots(cluster, config_data, use_dask, skip_if_cached=False):
                         for location in locations
                     ]
                     dask.compute(tasks)
+                elif n_workers > 1:
+                    import time as _time
+                    logger.info(
+                        "Generating plots in parallel: %d stations, vartype=%s, workers=%d",
+                        n_locations, vartype.name, n_workers,
+                    )
+                    _t0_all = _time.monotonic()
+                    _kwargs = dict(
+                        write_html=write_html,
+                        write_graphics=write_graphics,
+                        gate_studies=gate_studies,
+                        gate_locations=gate_locations,
+                        gate_vartype=gate_vartype,
+                        metrics_table_list=metrics_table_list,
+                    )
+                    with ProcessPoolExecutor(
+                        max_workers=n_workers,
+                        initializer=_worker_init,
+                    ) as pool:
+                        future_to_loc = {
+                            pool.submit(
+                                build_and_save_plot,
+                                config_data, studies, loc, vartype,
+                                **_kwargs,
+                            ): (i, loc)
+                            for i, loc in enumerate(locations, start=1)
+                        }
+                        for future in as_completed(future_to_loc):
+                            _i, loc = future_to_loc[future]
+                            try:
+                                future.result()
+                                logger.info(
+                                    "[%d/%d] Done: %s/%s",
+                                    _i, n_locations, loc.name, vartype.name,
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    "[%d/%d] Unable to create plots/metrics for %s: %s",
+                                    _i, n_locations, loc.name, e,
+                                )
+                    _elapsed = _time.monotonic() - _t0_all
+                    logger.info(
+                        "Finished %d %s plots in %.0fs (avg %.1fs/station)",
+                        n_locations, vartype.name, _elapsed, _elapsed / max(n_locations, 1),
+                    )
                 else:
                     import time as _time
                     logger.info(
@@ -765,11 +823,12 @@ def check_config_data(config_data):
         exit(0)
 
 
-def run_process(process_name, config_filename, use_dask, skip_if_cached=False):
+def run_process(process_name, config_filename, use_dask, skip_if_cached=False, n_workers=1):
     """
     process_name (str): should be 'model', 'observed', 'plots', or 'bars'
     config_filename (str): filename of config (json) file
     use_dask (boolean): if true, dask will be used
+    n_workers (int): number of parallel worker processes for the 'plots' step (default: 1 = sequential)
     """
     import csv
 
@@ -808,7 +867,7 @@ def run_process(process_name, config_filename, use_dask, skip_if_cached=False):
     elif process_name.lower() == "observed":
         postpro_observed(cluster, config_data, use_dask)
     elif process_name.lower() == "plots":
-        postpro_plots(cluster, config_data, use_dask, skip_if_cached=skip_if_cached)
+        postpro_plots(cluster, config_data, use_dask, skip_if_cached=skip_if_cached, n_workers=n_workers)
     elif process_name.lower() == "validation_bar_charts":
         postpro_validation_bar_charts(cluster, config_data)
     elif process_name.lower() == "heatmaps":
