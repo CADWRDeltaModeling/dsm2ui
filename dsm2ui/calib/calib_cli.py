@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import click
+from dsm2ui._logging import setup_logging
 
 # ---------------------------------------------------------------------------
 # Template YAML — written by ``calib init``
@@ -163,17 +164,7 @@ _config_option = click.option(
 
 
 def _setup_logging(log_level: str) -> logging.Logger:
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    # pyhecdss uses a broken logging.debug(..., (RuntimeWarning,)) call that
-    # crashes Python's log formatter when DEBUG is enabled.  Silence it.
-    logging.getLogger("pyhecdss").setLevel(logging.WARNING)
-    # matplotlib font_manager is extremely verbose at DEBUG level.
-    logging.getLogger("matplotlib").setLevel(logging.WARNING)
-    return logging.getLogger("dsm2ui.calib")
+    return setup_logging(log_level)
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +601,7 @@ def calib_postpro():
 )
 def calib_postpro_run(process_name, json_config_file, dask, skip_cached):
     """Run a DSM2 post-processing step (observed, model, plots, heatmaps, validation_bar_charts, or copy_plot_files)."""
+    setup_logging()
     from dsm2ui.calib import postpro_dsm2
     postpro_dsm2.run_process(process_name, json_config_file, dask, skip_if_cached=skip_cached)
 

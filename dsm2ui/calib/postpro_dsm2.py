@@ -584,11 +584,23 @@ def postpro_copy_plot_files(cluster, config_data):
             i += 1
 
 
-def postpro_plots(cluster, config_data, use_dask):
+def postpro_plots(cluster, config_data, use_dask, skip_if_cached=False):
     vartype_dict = config_data["vartype_dict"]
     location_files_dict = config_data["location_files_dict"]
     observed_files_dict = config_data["observed_files_dict"]
     study_files_dict = config_data["study_files_dict"]
+    if not skip_if_cached:
+        # Clear stale diskcache so old datetime64[ns] entries don't cause dtype mismatches
+        _all_dssfiles = set(
+            f for f in list(observed_files_dict.values()) + list(study_files_dict.values())
+            if f is not None
+        )
+        for _dssfile in _all_dssfiles:
+            try:
+                postpro.PostProCache(_dssfile).clear()
+                logger.debug("Cleared postpro cache for %s", _dssfile)
+            except Exception as _e:
+                logger.warning("Could not clear postpro cache for %s: %s", _dssfile, _e)
     inst_plot_timewindow_dict = config_data["inst_plot_timewindow_dict"]
     gate_file_dict = (
         config_data["gate_file_dict"] if "gate_file_dict" in config_data else None
@@ -796,7 +808,7 @@ def run_process(process_name, config_filename, use_dask, skip_if_cached=False):
     elif process_name.lower() == "observed":
         postpro_observed(cluster, config_data, use_dask)
     elif process_name.lower() == "plots":
-        postpro_plots(cluster, config_data, use_dask)
+        postpro_plots(cluster, config_data, use_dask, skip_if_cached=skip_if_cached)
     elif process_name.lower() == "validation_bar_charts":
         postpro_validation_bar_charts(cluster, config_data)
     elif process_name.lower() == "heatmaps":

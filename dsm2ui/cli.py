@@ -3,6 +3,7 @@
 import sys
 import click
 from dsm2ui._version import __version__
+from dsm2ui._logging import setup_logging
 
 CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
@@ -343,9 +344,10 @@ def node_map_flow_splits(node_shapefile, hydro_echo_file):
 )
 @click.argument("json_config_file")
 @click.option("--dask/--no-dask", default=False)
-@click.option("--skip-cached", is_flag=True, default=False, help="Skip locations already present in the post-processing cache (model only).")
+@click.option("--skip-cached", is_flag=True, default=False, help="Use existing post-processing cache instead of clearing and recomputing (applies to model and plots).")
 def exec_postpro_dsm2(process_name, json_config_file, dask, skip_cached):
     """Run a DSM2 post-processing step (observed, model, plots, heatmaps, validation_bar_charts, or copy_plot_files)."""
+    setup_logging()
     from dsm2ui.calib import postpro_dsm2
     postpro_dsm2.run_process(process_name, json_config_file, dask, skip_if_cached=skip_cached)
 
@@ -378,6 +380,7 @@ def exec_dsm2_chan_mann_disp(
     dsm2_channels_output_filename,
 ):
     """Apply group-based Manning's n and dispersion values to a DSM2 channels input file."""
+    setup_logging()
     from dsm2ui import dsm2_chan_mann_disp
     dsm2_chan_mann_disp.prepro(
         chan_to_group_filename,
@@ -400,6 +403,7 @@ def exec_dsm2_chan_mann_disp(
 @click.argument("json_config_file")
 def exec_checklist_dsm2(process_name, json_config_file):
     """Run a DSM2 calibration checklist step (resample, extract, or plot)."""
+    setup_logging()
     from dsm2ui.calib import checklist_dsm2
     checklist_dsm2.run_checklist(process_name, json_config_file)
 
@@ -449,6 +453,7 @@ def datastore_to_dss(
     datastore_dir, dssfile, param, repo_level="screened", unit_name=None
 ):
     """Reads datastore timeseries files and writes to a DSS file."""
+    setup_logging()
     from dsm2ui import datastore2dss
     datastore2dss.read_from_datastore_write_to_dss(
         datastore_dir, dssfile, param, repo_level, unit_name=unit_name
@@ -488,6 +493,7 @@ def datastore_to_dss(
 )
 def datastore_to_stationfile(datastore_dir, stationfile, param):
     """Writes station_id, latitude, longitude to a csv file."""
+    setup_logging()
     from dsm2ui import datastore2dss
     datastore2dss.write_station_lat_lng(datastore_dir, stationfile, param)
 
