@@ -11,6 +11,7 @@ import holoviews as hv
 
 from dsm2ui.calib.calibplot import (
     _smart_title,
+    _normalize_dt_index,
     _normalize_timewindow,
     parse_time_window,
     time_window_exclusion,
@@ -324,3 +325,104 @@ class TestCalculateMetrics:
         empty = pd.DataFrame({"obs": []}, index=pd.DatetimeIndex([]))
         result = calculate_metrics([empty, empty], ["obs", "model"])
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _normalize_dt_index
+# ---------------------------------------------------------------------------
+
+class TestNormalizeDtIndex:
+    """Tests for the datetime resolution normalisation helper."""
+
+    def _make_df(self, n=10, freq="15min", dtype="datetime64[ns]"):
+        idx = pd.date_range("2020-01-01", periods=n, freq=freq).astype(dtype)
+        return pd.DataFrame({"v": range(n)}, index=idx)
+
+    def test_ns_index_unchanged(self):
+        df = self._make_df(dtype="datetime64[ns]")
+        out = _normalize_dt_index(df)
+        assert out.index.dtype == np.dtype("datetime64[ns]")
+
+    def test_us_index_coerced_to_ns(self):
+        df = self._make_df(dtype="datetime64[us]")
+        out = _normalize_dt_index(df)
+        assert out.index.dtype == np.dtype("datetime64[ns]"), (
+            f"Expected datetime64[ns], got {out.index.dtype}"
+        )
+
+    def test_us_index_does_not_mutate_original(self):
+        df = self._make_df(dtype="datetime64[us]")
+        original_dtype = df.index.dtype
+        _normalize_dt_index(df)
+        assert df.index.dtype == original_dtype  # returns a copy, not in-place
+
+    def test_none_passthrough(self):
+        assert _normalize_dt_index(None) is None
+
+
+# ---------------------------------------------------------------------------
+# calculate_metrics -- mixed datetime resolution (ns vs us)
+# ---------------------------------------------------------------------------
+
+class TestCalculateMetricsMixedResolution:
+    """Regression: pd.concat(axis=1) inside calculate_metrics must not raise
+    ValueError when DataFrames have datetime64[ns] vs datetime64[us] indices
+    (pandas 2.0+ returns datetime64[us] from pyhecdss while cache holds ns)."""
+
+    def _make(self, dtype, seed=0, n=40, col="v"):
+        rng = np.random.default_rng(seed)
+        idx = pd.date_range("2020-01-01", periods=n, freq="D").astype(dtype)
+        return pd.DataFrame({col: rng.random(n)}, index=idx)
+
+    def test_ns_obs_us_model_no_raise(self):
+        result = calculate_metrics(
+            [self._make("datetime64[ns]", col="obs"), self._make("datetime64[us]", seed=1, col="model")],
+            ["obs", "model"],
+        )
+        assert result is not None
+
+    def test_us_obs_ns_model_no_raise(self):
+        result = calculate_metrics(
+            [self._make("datetime64[us]", col="obs"), self._make("datetime64[ns]", seed=2, col="model")],
+            ["obs", "model"],
+        )
+        assert result is not None
+
+    def test_both_us_no_regression(self):
+        result = calculate_metrics(
+            [self._make("datetime64[us]", seed=3, col="obs"), self._make("datetime64[us]", seed=4, col="model")],
+            ["obs", "model"],
+        )
+        assert result is not None
+
+    def test_slope_plausible_with_mixed_resolution(self):
+        """Values must be computed correctly after normalisation."""
+        rng = np.random.default_rng(99)
+        n = 50
+        obs_vals = rng.random(n)
+        model_vals = obs_vals + rng.normal(0, 0.02, n)
+        idx_ns = pd.date_range("2020-01-01", periods=n, freq="D").astype("datetime64[ns]")
+        idx_us = pd.date_range("2020-01-01", periods=n, freq="D").astype("datetime64[us]")
+        df_ns = pd.DataFrame({"obs": obs_vals}, index=idx_ns)
+        df_us = pd.DataFrame({"model": model_vals}, index=idx_us)
+        result = calculate_metrics([df_ns, df_us], ["obs", "model"])
+        assert result is not None
+        assert abs(result.iloc[0]["regression_slope"] - 1.0) < 0.2
+
+
+# ---------------------------------------------------------------------------
+# scatterplot -- mixed datetime resolution
+# ---------------------------------------------------------------------------
+
+class TestScatterplotMixedResolution:
+    """scatterplot() calls pd.concat(axis=1) and must not raise on mixed dtypes."""
+
+    def test_ns_plus_us_does_not_raise(self):
+        n = 30
+        rng = np.random.default_rng(7)
+        idx_ns = pd.date_range("2020-01-01", periods=n, freq="D").astype("datetime64[ns]")
+        idx_us = pd.date_range("2020-01-01", periods=n, freq="D").astype("datetime64[us]")
+        df1 = pd.DataFrame({"obs": rng.random(n)}, index=idx_ns)
+        df2 = pd.DataFrame({"model": rng.random(n)}, index=idx_us)
+        result = scatterplot([df1, df2], ["obs", "model"])
+        assert result is not None
