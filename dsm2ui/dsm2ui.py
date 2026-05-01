@@ -183,10 +183,12 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         _oc["station_name"] = _oc["NAME"]
         _oc["variable"] = _oc["VARIABLE"].str.lower()
         self._dvue_catalog = build_catalog_from_dataframe(
-            _oc, _reader, self._ref_name, geo_crs, ref_class=DSM2DSSDataReference
+            _oc, _reader, self._ref_name, geo_crs, ref_class=DSM2DSSDataReference,
+            key_attributes=["NAME", "VARIABLE"],
         )
 
         super().__init__(url_column="FILE", url_num_column="FILE_NO", **kwargs)
+        self.identity_key_columns = ["NAME", "VARIABLE"]
         self.time_range = _time_range
         self.color_cycle_column = "NAME"
         self.dashed_line_cycle_column = "FILE"
@@ -1382,6 +1384,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         self._dvue_catalog = build_catalog_from_dataframe(
             self.dfcat, self._reader, self._build_ref_key, crs=geo_crs,
             ref_class=DSM2TidefileDataReference,
+            key_attributes=["station_name", "variable"],
         )
         super().__init__(
             url_column="filename",
@@ -1389,6 +1392,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             time_range=_time_range,
             **kwargs,
         )
+        self.identity_key_columns = ["station_name", "variable"]
         self.color_cycle_column = "id"
         self.dashed_line_cycle_column = "filename"
         self.marker_cycle_column = "variable"

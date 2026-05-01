@@ -259,6 +259,7 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         self._dvue_catalog = self._build_dvue_catalog(geo_crs)
 
         super().__init__(**kwargs)
+        self.identity_key_columns = ["A", "B", "C", "F"]
         if _time_range is not None:
             self.time_range = _time_range
         self.color_cycle_column = "B"
@@ -271,7 +272,10 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         return f'{row["filename"]}::{self.build_pathname(row)}'
 
     def _build_dvue_catalog(self, crs=None) -> DataCatalog:
-        return build_catalog_from_dataframe(self.dfcat, self._reader, self.build_ref_key, crs)
+        return build_catalog_from_dataframe(
+            self.dfcat, self._reader, self.build_ref_key, crs,
+            key_attributes=["A", "B", "C", "F"],
+        )
 
     @property
     def data_catalog(self) -> DataCatalog:
