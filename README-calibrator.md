@@ -260,15 +260,16 @@ dsm2ui calib postpro run PROCESS_NAME JSON_CONFIG_FILE [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--dask / --no-dask` | `--no-dask` | Run post-processing steps with Dask |
 | `--skip-cached` | false | Use the existing post-processing cache instead of clearing and recomputing (applies to `model` and `plots`; by default the cache is cleared on each run) |
+| `--workers N` | `1` | Number of parallel worker processes for the `plots` step. Each worker is a separate OS process with its own webdriver instance — `N` webdrivers start in parallel, then each is reused across its share of stations. Recommended: `4`–`8` for a typical workstation. |
 
 ```bash
 dsm2ui calib postpro run observed calib_config.json
 dsm2ui calib postpro run model calib_config.json         # clears cache, reprocesses all
 dsm2ui calib postpro run model calib_config.json --skip-cached  # reuses existing cache
-dsm2ui calib postpro run plots calib_config.json         # clears cache, regenerates all plots
-dsm2ui calib postpro run plots calib_config.json --skip-cached  # reuses existing cache
+dsm2ui calib postpro run plots calib_config.json         # sequential (default)
+dsm2ui calib postpro run plots calib_config.json --workers 4    # 4 parallel workers
+dsm2ui calib postpro run plots calib_config.json --workers 4 --skip-cached  # parallel + reuse cache
 ```
 
 ---

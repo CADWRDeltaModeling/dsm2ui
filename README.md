@@ -261,15 +261,16 @@ Run a DSM2 post-processing step driven by a JSON config.
 |---|---|
 | `PROCESS_NAME` | Step: `observed`, `model`, `plots`, `heatmaps`, `validation_bar_charts`, `copy_plot_files` |
 | `JSON_CONFIG_FILE` | Path to the JSON config file |
-| `--dask / --no-dask` | Use Dask for parallel processing (default: off) |
 | `--skip-cached` | Use the existing post-processing cache instead of clearing and recomputing (applies to `model` and `plots` steps; by default the cache is cleared on each run) |
+| `--workers N` | Number of parallel worker processes for the `plots` step (default: `1` = sequential). Each worker is a separate OS process with its own webdriver instance. Recommended: `4`–`8` for a typical workstation. |
 
 ```bash
 dsm2ui calib postpro run observed calib_config.json
 dsm2ui calib postpro run model calib_config.json         # clears cache, reprocesses all
 dsm2ui calib postpro run model calib_config.json --skip-cached  # reuses existing cache
-dsm2ui calib postpro run plots calib_config.json         # clears cache, regenerates all plots
-dsm2ui calib postpro run plots calib_config.json --skip-cached  # reuses existing cache
+dsm2ui calib postpro run plots calib_config.json         # sequential (default)
+dsm2ui calib postpro run plots calib_config.json --workers 4    # 4 parallel workers
+dsm2ui calib postpro run plots calib_config.json --workers 4 --skip-cached  # parallel + reuse cache
 dsm2ui calib postpro run heatmaps calib_config.json
 ```
 
