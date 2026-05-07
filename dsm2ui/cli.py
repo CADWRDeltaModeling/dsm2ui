@@ -108,21 +108,36 @@ def ui_group():
 main.add_command(ui_group)
 
 
+def _default_channel_shapefile():
+    """Return path to the bundled DSM2 channel centerline GeoJSON."""
+    import pathlib
+    return str(pathlib.Path(__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson")
+
+
+def _default_node_shapefile():
+    """Return path to the bundled DSM2 node GeoJSON."""
+    import pathlib
+    return str(pathlib.Path(__file__).parent / "dsm2gis" / "dsm2_nodes_8_2.geojson")
+
+
 @ui_group.command(name="map")
 @click.argument(
-    "hydro_echo_file", type=click.Path(dir_okay=False, exists=True, readable=True)
+    "hydro_echo_files",
+    nargs=-1,
+    required=True,
+    type=click.Path(dir_okay=False, exists=True, readable=True),
 )
 @click.option(
     "--channel", "flowline_shapefile",
     type=click.Path(dir_okay=False, exists=True, readable=True),
     default=None,
-    help="Flowline shapefile — show channel map colored by Manning/dispersion/length.",
+    help="Channel centerline shapefile. Defaults to the bundled GeoJSON.",
 )
 @click.option(
     "--node", "node_shapefile",
     type=click.Path(dir_okay=False, exists=True, readable=True),
     default=None,
-    help="Node shapefile — show node flow-split network map.",
+    help="Node shapefile — show node flow-split network map. Defaults to bundled GeoJSON when provided.",
 )
 @click.option(
     "-c", "--colored-by",
@@ -137,32 +152,47 @@ main.add_command(ui_group)
     default=None,
     help="Base hydro echo file for comparison overlay (channel map only).",
 )
-def ui_map(hydro_echo_file, flowline_shapefile, node_shapefile, colored_by, base_file):
+def ui_map(hydro_echo_files, flowline_shapefile, node_shapefile, colored_by, base_file):
     """Show an interactive DSM2 network map.
 
-    Use --channel FLOWLINE_SHP for a channel map colored by Manning/dispersion/length.
-    Use --node NODE_SHP for a node flow-split map.
-    Both flags may be combined to show both maps together.
+    One or more HYDRO_ECHO_FILES may be supplied; when multiple are given each
+    gets its own map panel arranged in a Column.
+
+    --channel defaults to the bundled centerline GeoJSON when omitted.
+    Use --node to additionally show a node flow-split map (single file only).
     """
-    if not flowline_shapefile and not node_shapefile:
-        raise click.UsageError("Provide at least one of --channel or --node.")
+    if not flowline_shapefile:
+        flowline_shapefile = _default_channel_shapefile()
     import panel as pn
     pn.extension()
-    panels = []
-    if flowline_shapefile:
-        from dsm2ui.dsm2ui import DSM2FlowlineMap
-        mapui = DSM2FlowlineMap(flowline_shapefile, hydro_echo_file, base_file)
+    from dsm2ui.dsm2ui import DSM2FlowlineMap
+
+    if len(hydro_echo_files) == 1:
+        mapui = DSM2FlowlineMap(flowline_shapefile, hydro_echo_files[0], base_file)
         if colored_by == "ALL":
-            panels.append(pn.Column(
+            channel_panel = pn.Column(
                 *[mapui.show_map_colored_by_column(c.upper()) for c in ["MANNING", "DISPERSION", "LENGTH"]]
-            ))
+            )
         else:
-            panels.append(mapui.show_map_colored_by_column(colored_by.upper()))
-    if node_shapefile:
-        from dsm2ui import dsm2ui as _dsm2ui
-        netmap = _dsm2ui.DSM2GraphNetworkMap(node_shapefile, hydro_echo_file)
-        panels.append(netmap.get_panel())
-    layout = panels[0] if len(panels) == 1 else pn.Column(*panels)
+            channel_panel = mapui.show_map_colored_by_column(colored_by.upper())
+        if node_shapefile:
+            from dsm2ui import dsm2ui as _dsm2ui
+            netmap = _dsm2ui.DSM2GraphNetworkMap(node_shapefile, hydro_echo_files[0])
+            layout = pn.Column(channel_panel, netmap.get_panel())
+        else:
+            layout = channel_panel
+    else:
+        if colored_by == "ALL":
+            layout = pn.Column(*[
+                DSM2FlowlineMap.multi_file_panel(
+                    flowline_shapefile, hydro_echo_files, c.upper(), base_file
+                )
+                for c in ["MANNING", "DISPERSION", "LENGTH"]
+            ])
+        else:
+            layout = DSM2FlowlineMap.multi_file_panel(
+                flowline_shapefile, hydro_echo_files, colored_by.upper(), base_file
+            )
     pn.serve(layout, websocket_max_message_size=100 * 1024 * 1024)
 
 
@@ -267,10 +297,13 @@ main.add_command(datastore_group)
 
 @main.command(name="channel-map", hidden=True)
 @click.argument(
-    "flowline_shapefile", type=click.Path(dir_okay=False, exists=True, readable=True)
-)
-@click.argument(
     "hydro_echo_file", type=click.Path(dir_okay=False, exists=True, readable=True)
+)
+@click.option(
+    "--channel", "flowline_shapefile",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Channel centerline shapefile. Defaults to the bundled GeoJSON.",
 )
 @click.option(
     "-c",
@@ -281,8 +314,10 @@ main.add_command(datastore_group)
 @click.option(
     "--base-file", "-b", type=click.Path(dir_okay=False, exists=True, readable=True)
 )
-def map_channels_colored(flowline_shapefile, hydro_echo_file, colored_by, base_file):
+def map_channels_colored(hydro_echo_file, flowline_shapefile, colored_by, base_file):
     """Show an interactive map of DSM2 channels colored by Manning's n, dispersion, or length."""
+    if not flowline_shapefile:
+        flowline_shapefile = _default_channel_shapefile()
     import panel as pn
     from dsm2ui.dsm2ui import DSM2FlowlineMap
     pn.extension()
@@ -306,13 +341,18 @@ def map_channels_colored(flowline_shapefile, hydro_echo_file, colored_by, base_f
 
 @main.command(name="node-map", hidden=True)
 @click.argument(
-    "node_shapefile", type=click.Path(dir_okay=False, exists=True, readable=True)
-)
-@click.argument(
     "hydro_echo_file", type=click.Path(dir_okay=False, exists=True, readable=True)
 )
-def node_map_flow_splits(node_shapefile, hydro_echo_file):
+@click.option(
+    "--node", "node_shapefile",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Node GeoJSON. Defaults to the bundled DSM2 v8.2 node GeoJSON.",
+)
+def node_map_flow_splits(hydro_echo_file, node_shapefile):
     """Show an interactive panel map of DSM2 network nodes and flow splits."""
+    if not node_shapefile:
+        node_shapefile = _default_node_shapefile()
     import panel as pn
     from dsm2ui import dsm2ui as _dsm2ui
     pn.extension()
@@ -509,11 +549,13 @@ def datastore_to_stationfile(datastore_dir, stationfile, param):
     type=click.Path(dir_okay=False, exists=True, readable=True),
 )
 @click.argument(
-    "centerlines_file",
-    type=click.Path(dir_okay=False, exists=True, readable=True),
-)
-@click.argument(
     "output_file", type=click.Path(dir_okay=False, exists=False, readable=False)
+)
+@click.option(
+    "--centerlines", "centerlines_file",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Channel centerlines GeoJSON. Defaults to the bundled DSM2 v8.2 GeoJSON.",
 )
 @click.option(
     "--distance-tolerance",
@@ -522,9 +564,11 @@ def datastore_to_stationfile(datastore_dir, stationfile, param):
     help="Maximum distance from a line that a station can be to be considered on that line",
 )
 def stations_output_file(
-    stations_file, centerlines_file, output_file, distance_tolerance=100
+    stations_file, output_file, centerlines_file, distance_tolerance=100
 ):
     """[Deprecated] Use 'dsm2ui station-map to-dsm2' instead."""
+    if not centerlines_file:
+        centerlines_file = _default_channel_shapefile()
     from pydsm.viz import dsm2gis
     dsm2gis.create_stations_output_file(
         stations_file=stations_file,
@@ -550,12 +594,14 @@ def station_map_group():
     type=click.Path(dir_okay=False, exists=True, readable=True),
 )
 @click.argument(
-    "centerlines_geojson",
-    type=click.Path(dir_okay=False, exists=True, readable=True),
-)
-@click.argument(
     "output_csv",
     type=click.Path(dir_okay=False),
+)
+@click.option(
+    "--centerlines", "centerlines_geojson",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Channel centerlines GeoJSON. Defaults to the bundled DSM2 v8.2 GeoJSON.",
 )
 @click.option(
     "--distance-tolerance",
@@ -571,7 +617,7 @@ def station_map_group():
     default=None,
     help="Write unmatched stations to this CSV (default: <output>_unmatched.csv).",
 )
-def station_map_to_dsm2(stations_csv, centerlines_geojson, output_csv, distance_tolerance, unmatched_csv):
+def station_map_to_dsm2(stations_csv, output_csv, centerlines_geojson, distance_tolerance, unmatched_csv):
     """Snap lat/lon stations to DSM2 channels, writing NAME (uppercased), CHAN_NO, DISTANCE.
 
     Stations that cannot be snapped within the distance tolerance are written to
@@ -588,6 +634,8 @@ def station_map_to_dsm2(stations_csv, centerlines_geojson, output_csv, distance_
 
     stations_df = pd.read_csv(stations_csv)
 
+    if not centerlines_geojson:
+        centerlines_geojson = _default_channel_shapefile()
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
         tmp_path = tmp.name
     try:
@@ -625,20 +673,24 @@ def station_map_to_dsm2(stations_csv, centerlines_geojson, output_csv, distance_
     type=click.Path(dir_okay=False, exists=True, readable=True),
 )
 @click.argument(
-    "centerlines_geojson",
-    type=click.Path(dir_okay=False, exists=True, readable=True),
-)
-@click.argument(
     "output_geojson",
     type=click.Path(dir_okay=False),
 )
-def station_map_from_dsm2(echo_file, centerlines_geojson, output_geojson):
+@click.option(
+    "--centerlines", "centerlines_geojson",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Channel centerlines GeoJSON. Defaults to the bundled DSM2 v8.2 GeoJSON.",
+)
+def station_map_from_dsm2(echo_file, output_geojson, centerlines_geojson):
     """Geolocate DSM2 OUTPUT_CHANNEL stations from an echo file to a GeoJSON.
 
     Reads the CHANNEL and OUTPUT_CHANNEL tables from the DSM2 echo file,
     interpolates each station's position along its channel centerline, and
     writes a GeoJSON with NAME, CHAN_NO, DISTANCE and point geometry.
     """
+    if not centerlines_geojson:
+        centerlines_geojson = _default_channel_shapefile()
     from pydsm.viz import dsm2gis
     dsm2gis.geolocate_output_locations.callback(echo_file, centerlines_geojson, output_geojson)
 

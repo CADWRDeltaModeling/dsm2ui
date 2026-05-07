@@ -110,21 +110,31 @@ dsm2ui ui xsect hydro.h5
 
 #### `ui map`
 
-Show an interactive DSM2 network map. Use `--channel` for a channel map colored by Manning's n, dispersion, or length. Use `--node` for a node flow-split map. Both flags may be combined. At least one of `--channel` or `--node` is required.
+Show an interactive DSM2 network map colored by Manning's n, dispersion, or length. One or more echo files may be supplied; multiple files each get their own map panel stacked vertically.
+
+All shapefile options default to the bundled DSM2 v8.2 GeoJSONs (`dsm2ui/dsm2gis/`) so no paths are required for a quick look.
 
 | Argument / Option | Type | Default | Description |
 |---|---|---|---|
-| `HYDRO_ECHO` | path | — | DSM2 hydro echo file |
-| `--channel FILE` | path | — | Flowline shapefile for channel map |
-| `--node FILE` | path | — | Node shapefile for node flow-split map |
+| `HYDRO_ECHO_FILES...` | paths | *(required)* | One or more DSM2 hydro echo files |
+| `--channel FILE` | path | bundled centerlines GeoJSON | Channel centerline file for the channel map |
+| `--node FILE` | path | bundled node GeoJSON | Node GeoJSON — adds a node flow-split map (single-file mode only) |
 | `-c / --colored-by` | `MANNING\|DISPERSION\|LENGTH\|ALL` | `MANNING` | Attribute to color channels by |
-| `-b / --base-file FILE` | path | — | Base hydro echo file for comparison overlay |
+| `-b / --base-file FILE` | path | — | Base hydro echo file; map shows differences, hover shows value and base value |
 
 ```bash
-dsm2ui ui map hydro_echo.inp --channel flowlines.shp
-dsm2ui ui map hydro_echo.inp --channel flowlines.shp -c DISPERSION
-dsm2ui ui map hydro_echo.inp --channel flowlines.shp --node nodes.shp
-dsm2ui ui map hydro_echo.inp --channel flowlines.shp -b base_echo.inp -c ALL
+# Quickest start — uses bundled GeoJSONs automatically
+dsm2ui ui map hydro_echo.inp
+
+# Custom GeoJSON; compare two files side-by-side
+dsm2ui ui map hydro_echo.inp --channel flowlines.geojson -c DISPERSION
+dsm2ui ui map file_a.inp file_b.inp
+
+# Difference map vs a base run
+dsm2ui ui map hydro_echo.inp -b base_echo.inp -c ALL
+
+# Also show the node flow-split map
+dsm2ui ui map hydro_echo.inp --node nodes.geojson
 ```
 
 #### `dss-ui`
@@ -430,7 +440,7 @@ dsm2ui mann-disp chan_to_group.csv group_mann_disp.csv \
 
 Convert between real-world lat/lon station locations and DSM2 channel-output positions (`CHAN_NO` + `DISTANCE`), and vice versa.
 
-The bundled centerlines file for DSM2 v8.2 is:
+Both subcommands default to the bundled DSM2 v8.2 centerlines when `--centerlines` is omitted:
 `dsm2ui/dsm2gis/dsm2_channels_centerlines_8_2.geojson`
 
 #### `station-map to-dsm2`
@@ -440,31 +450,36 @@ Snap lat/lon stations to DSM2 channels. Output columns are `NAME` (uppercased st
 | Argument / Option | Type | Default | Description |
 |---|---|---|---|
 | `STATIONS_CSV` | path | — | Station CSV with `station_id`, `lat`, `lon` columns |
-| `CENTERLINES_GEOJSON` | path | — | DSM2 channel centerlines GeoJSON (UTM Zone 10N) |
 | `OUTPUT_CSV` | path | — | Output CSV with `NAME`, `CHAN_NO`, `DISTANCE` |
+| `--centerlines FILE` | path | bundled centerlines GeoJSON | DSM2 channel centerlines GeoJSON (UTM Zone 10N) |
 | `--distance-tolerance INT` | int | `100` | Max distance (ft) from centerline to consider a match |
 | `--unmatched FILE` | path | `<output>_unmatched.csv` | CSV for stations that could not be snapped |
 
 ```bash
-dsm2ui station-map to-dsm2 stations.csv channels_centerlines.geojson output_locs.csv
+# Quickest form — uses bundled centerlines automatically
+dsm2ui station-map to-dsm2 stations.csv output_locs.csv
 
-# Wider tolerance; explicit unmatched output
-dsm2ui station-map to-dsm2 stations.csv channels_centerlines.geojson output_locs.csv \
-    --distance-tolerance 200 --unmatched unmatched.csv
+# Custom centerlines; wider tolerance
+dsm2ui station-map to-dsm2 stations.csv output_locs.csv \
+    --centerlines my_channels.geojson --distance-tolerance 200 --unmatched unmatched.csv
 ```
 
 #### `station-map from-dsm2`
 
 Geolocate DSM2 `OUTPUT_CHANNEL` stations from an echo file. Reads `CHANNEL` and `OUTPUT_CHANNEL` tables, interpolates each station's position along its channel centerline, and writes a GeoJSON with `NAME`, `CHAN_NO`, `DISTANCE`, and point geometry (EPSG:26910).
 
-| Argument | Description |
-|---|---|
-| `ECHO_FILE` | DSM2 echo/input file containing `CHANNEL` and `OUTPUT_CHANNEL` tables |
-| `CENTERLINES_GEOJSON` | DSM2 channel centerlines GeoJSON |
-| `OUTPUT_GEOJSON` | Output GeoJSON of geolocated stations |
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `ECHO_FILE` | path | — | DSM2 echo/input file containing `CHANNEL` and `OUTPUT_CHANNEL` tables |
+| `OUTPUT_GEOJSON` | path | — | Output GeoJSON of geolocated stations |
+| `--centerlines FILE` | path | bundled centerlines GeoJSON | DSM2 channel centerlines GeoJSON |
 
 ```bash
-dsm2ui station-map from-dsm2 hydro_echo.inp channels_centerlines.geojson stations.geojson
+# Quickest form — uses bundled centerlines automatically
+dsm2ui station-map from-dsm2 hydro_echo.inp stations.geojson
+
+# Custom centerlines
+dsm2ui station-map from-dsm2 hydro_echo.inp stations.geojson --centerlines my_channels.geojson
 ```
 
 ---

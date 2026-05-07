@@ -13,8 +13,57 @@ from holoviews import opts
 hv.extension("bokeh")
 import hvplot.pandas
 
-#
-import panel as pn
+# ---------------------------------------------------------------------------
+# Colorcet colormap palettes available for the channel map widget.
+# Uses short-name aliases (no b_ prefix) which are matplotlib Colormap objects.
+# ---------------------------------------------------------------------------
+_SEQ_CMAP_CANDIDATES = [
+    "rainbow", "fire", "bmy", "blues", "bgy", "colorwheel", "isolum", "kbc",
+]
+_DIV_CMAP_CANDIDATES = [
+    "bkr", "bky", "gwv", "coolwarm", "diverging_bwr_20_95_c54",
+    "diverging_linear_bjy_30_90_c45", "diverging_rainbow_bgymr_45_85_c67",
+]
+_SEQ_CMAPS = {name: getattr(cc, name) for name in _SEQ_CMAP_CANDIDATES if hasattr(cc, name)}
+_DIV_CMAPS = {name: getattr(cc, name) for name in _DIV_CMAP_CANDIDATES if hasattr(cc, name)}
+
+
+def _make_controls(is_diff, vmin, vmax, column_name):
+    """Create and return (cmap_selector, lo_input, hi_input) Panel widgets."""
+    cmap_options = _DIV_CMAPS if is_diff else _SEQ_CMAPS
+    default_cmap = next(iter(cmap_options))
+    step = max((vmax - vmin) / 200, 1e-6)
+    if is_diff:
+        val = max(abs(vmin), abs(vmax))
+        init_lo, init_hi = -val, val
+    else:
+        init_lo, init_hi = vmin, vmax
+    cmap_selector = pn.widgets.Select(
+        name="Colormap",
+        options=list(cmap_options.keys()),
+        value=default_cmap,
+        width=160,
+    )
+    lo_input = pn.widgets.FloatInput(
+        name=f"{column_name} min",
+        value=round(init_lo, 6),
+        step=step,
+        width=140,
+    )
+    hi_input = pn.widgets.FloatInput(
+        name=f"{column_name} max",
+        value=round(init_hi, 6),
+        step=step,
+        width=140,
+    )
+    cnorm_selector = pn.widgets.Select(
+        name="Color norm",
+        options=["linear", "eq_hist", "log"],
+        value="linear",
+        width=110,
+    )
+    return cmap_selector, lo_input, hi_input, cnorm_selector
+
 
 # Try to load VTK extension, but make it optional
 HAS_VTK = False
@@ -1499,17 +1548,64 @@ class DSM2FlowlineMap:
             self.tables_base = load_echo_file(self.hydro_echo_file_base)
             # assumption that there is a match on the index of the tables
             for column in ["MANNING", "LENGTH", "DISPERSION"]:
-                self.tables["CHANNEL"].loc[:, column] = (
-                    self.tables["CHANNEL"].loc[:, column]
-                    - self.tables_base["CHANNEL"].loc[:, column]
-                )
+                curr_vals = self.tables["CHANNEL"][column].copy()
+                base_vals = self.tables_base["CHANNEL"][column].copy()
+                self.tables["CHANNEL"].loc[:, f"{column}_VALUE"] = curr_vals
+                self.tables["CHANNEL"].loc[:, f"{column}_BASE"] = base_vals
+                self.tables["CHANNEL"].loc[:, column] = curr_vals - base_vals
         self.dsm2_chans_joined = self._join_channels_info_with_shapefile(
             self.dsm2_chans, self.tables
         )
-        self.map = hv.element.tiles.CartoLight().opts(width=800, height=600, alpha=0.5)
+        self.map = hv.element.tiles.CartoLight().opts(frame_width=800, frame_height=600, alpha=0.5)
 
     def _join_channels_info_with_shapefile(self, dsm2_chans, tables):
         return dsm2_chans.merge(tables["CHANNEL"], right_on="CHAN_NO", left_on="id")
+
+    @staticmethod
+    def _extract_echo_info(tables, filepath):
+        """Return a dict of display-ready metadata from a parsed echo tables dict."""
+        info = {"File": os.path.basename(filepath), "Path": str(filepath)}
+        if "ENVVAR" in tables:
+            try:
+                envvar = tables["ENVVAR"].set_index("NAME")["VALUE"]
+                for key in ["DSM2MODIFIER", "DSM2OUTPUTDIR", "DSM2INPUTDIR"]:
+                    if key in envvar.index:
+                        info[key] = envvar[key]
+            except Exception:
+                pass
+        if "SCALAR" in tables:
+            try:
+                scalar = tables["SCALAR"].set_index("NAME")["VALUE"]
+                for key in ["run_start_date", "run_end_date", "title"]:
+                    if key in scalar.index:
+                        info[key] = str(scalar[key]).strip('"')
+            except Exception:
+                pass
+        return info
+
+    def _make_info_panel(self):
+        """Build a Panel Markdown pane showing echo file metadata."""
+        def _section(label, info):
+            lines = [f"### {label}"]
+            lines.append(f"**File:** `{info.get('File', '')}`")
+            lines.append(f"**Path:** `{info.get('Path', '')}`")
+            for key, display in [
+                ("DSM2MODIFIER", "DSM2MODIFIER"),
+                ("title", "Title"),
+                ("run_start_date", "Run start"),
+                ("run_end_date", "Run end"),
+                ("DSM2OUTPUTDIR", "Output dir"),
+            ]:
+                if key in info:
+                    lines.append(f"**{display}:** {info[key]}")
+            return "\n\n".join(lines)
+
+        info = self._extract_echo_info(self.tables, self.hydro_echo_file)
+        text = _section("Echo file", info)
+        if self.hydro_echo_file_base:
+            info_base = self._extract_echo_info(self.tables_base, self.hydro_echo_file_base)
+            text += "\n\n---\n\n" + _section("Base file", info_base)
+        return pn.pane.Markdown(text, width=300, styles={"overflow-y": "auto"})
 
     def show_map_colored_by_length_matplotlib(self):
         return self.dsm2_chans.plot(figsize=(10, 10), column="length_ft", legend=True)
@@ -1519,30 +1615,127 @@ class DSM2FlowlineMap:
             figsize=(10, 10), column="MANNING", legend=True
         )
 
-    def show_map_colored_by_column(self, column_name="MANNING"):
-        titlestr = column_name
-        cmap = cc.b_rainbow_bgyrm_35_85_c71
-        if self.hydro_echo_file_base:
-            titlestr = titlestr + " Difference from base"
-            cmap = cc.b_diverging_bwr_20_95_c54
-            # make diffs range centered on 0 difference
-            amin = abs(self.dsm2_chans_joined[column_name].min())
-            amax = abs(self.dsm2_chans_joined[column_name].max())
-            val = max(amin, amax)
-            clim = (-val, val)
+    def _make_reactive_map_row(self, column_name, cmap_selector, lo_input, hi_input, cnorm_selector, shared_vals=None):
+        """Return pn.Row(reactive_map_pane, info_pane) bound to the given widgets.
 
-        plot = self.dsm2_chans_joined.hvplot(
-            c=column_name,
-            hover_cols=["CHAN_NO", column_name, "UPNODE", "DOWNNODE"],
-            title=titlestr,
-        ).opts(
-            opts.Polygons(
-                color_index=column_name, colorbar=True, line_alpha=0, cmap=cmap
+        Parameters
+        ----------
+        shared_vals : np.ndarray or None
+            Combined values from *all* maps in a multi-file layout.  When
+            ``cnorm == 'eq_hist'`` and this is provided, percentile ranks are
+            computed against the joint distribution so all maps share the same
+            colour scale.  When None the native per-map eq_hist is used.
+        """
+        import numpy as _np
+        is_diff = bool(self.hydro_echo_file_base)
+        cmap_options = _DIV_CMAPS if is_diff else _SEQ_CMAPS
+        if is_diff:
+            hover_cols = ["CHAN_NO", column_name, f"{column_name}_VALUE", f"{column_name}_BASE", "UPNODE", "DOWNNODE"]
+        else:
+            hover_cols = ["CHAN_NO", column_name, "UPNODE", "DOWNNODE"]
+        titlestr = column_name + (" Difference from base" if is_diff else "")
+        base_map = self.map
+        joined = self.dsm2_chans_joined
+        rank_col = f"_rank_{column_name}"
+        # Pre-sort once for fast searchsorted at render time
+        shared_sorted = _np.sort(shared_vals) if shared_vals is not None else None
+
+        @pn.depends(cmap_selector.param.value, lo_input.param.value, hi_input.param.value, cnorm_selector.param.value)
+        def _plot(cmap_name, lo, hi, cnorm):
+            cmap = cmap_options.get(cmap_name, next(iter(cmap_options.values())))
+            clim = (lo, hi) if lo < hi else (hi, lo)
+
+            if cnorm == "eq_hist" and shared_sorted is not None:
+                # Compute joint-distribution rank then remap to [lo, hi] so
+                # the colorbar naturally displays real values.
+                plot_joined = joined.copy()
+                # Use only the portion of the joint distribution within [lo, hi]
+                window = shared_sorted[(shared_sorted >= lo) & (shared_sorted <= hi)]
+                if len(window) < 2:
+                    window = shared_sorted
+                vals = _np.clip(plot_joined[column_name].values, lo, hi)
+                ranks = _np.searchsorted(window, vals) / max(len(window) - 1, 1)
+                # Remap [0, 1] rank → [lo, hi] so colorbar shows real values
+                plot_joined[rank_col] = lo + ranks * (hi - lo)
+                plot_c = rank_col
+                plot_clim = clim
+                plot_cnorm = "linear"
+                extra_opts = {}
+            else:
+                plot_joined = joined
+                plot_c = column_name
+                plot_clim = clim
+                plot_cnorm = cnorm
+                extra_opts = {}
+
+            plot = plot_joined.hvplot(
+                c=plot_c,
+                hover_cols=hover_cols,
+                title=titlestr,
+            ).opts(
+                opts.Polygons(
+                    colorbar=True,
+                    line_alpha=0,
+                    cmap=cmap,
+                    color=hv.dim(plot_c),
+                    clim=plot_clim,
+                    cnorm=plot_cnorm,
+                    **extra_opts,
+                )
             )
+            return base_map * plot
+
+        return pn.Row(_plot, self._make_info_panel())
+
+    def show_map_colored_by_column(self, column_name="MANNING", controls=None):
+        """Return a Panel layout.
+
+        If *controls* is None, create and embed a fresh widget row at the top.
+        If *controls* is a ``(cmap_selector, lo_input, hi_input)`` tuple, use
+        those shared widgets and return only the map row (no widget row).
+        """
+        col_values = self.dsm2_chans_joined[column_name]
+        vmin = float(col_values.min())
+        vmax = float(col_values.max())
+        if vmin == vmax:
+            vmin -= 1.0
+            vmax += 1.0
+
+        if controls is None:
+            is_diff = bool(self.hydro_echo_file_base)
+            cmap_sel, lo_input, hi_input, cnorm_sel = _make_controls(is_diff, vmin, vmax, column_name)
+            map_row = self._make_reactive_map_row(column_name, cmap_sel, lo_input, hi_input, cnorm_sel)
+            return pn.Column(
+                pn.Row(cmap_sel, lo_input, hi_input, cnorm_sel),
+                map_row,
+            )
+        return self._make_reactive_map_row(column_name, *controls)
+
+    @classmethod
+    def multi_file_panel(cls, shapefile, echo_files, column_name="MANNING", base_file=None):
+        """Build a panel showing *echo_files* with one shared control row.
+
+        When *Color norm* is set to ``eq_hist`` all maps use the same joint
+        percentile distribution so the colour scales remain comparable.
+        """
+        import pandas as _pd
+        import numpy as _np
+        mapuis = [cls(shapefile, f, base_file) for f in echo_files]
+        is_diff = bool(base_file)
+        all_vals_series = _pd.concat([m.dsm2_chans_joined[column_name] for m in mapuis])
+        shared_vals = all_vals_series.values
+        vmin = float(shared_vals.min())
+        vmax = float(shared_vals.max())
+        if vmin == vmax:
+            vmin -= 1.0
+            vmax += 1.0
+        cmap_sel, lo_input, hi_input, cnorm_sel = _make_controls(is_diff, vmin, vmax, column_name)
+        controls = (cmap_sel, lo_input, hi_input, cnorm_sel)
+        map_rows = [m._make_reactive_map_row(column_name, *controls, shared_vals=shared_vals) for m in mapuis]
+        return pn.Column(
+            pn.Row(cmap_sel, lo_input, hi_input, cnorm_sel),
+            *map_rows,
         )
-        if self.hydro_echo_file_base:
-            plot = plot.opts(clim=clim)
-        return self.map * plot
 
     def show_map_colored_by_manning(self):
         return self.show_map_colored_by_column("MANNING")
@@ -1925,16 +2118,17 @@ class DSM2EchoInputUIManager(TimeSeriesDataUIManager):
         _time_range = kwargs.pop("time_range", None)
         self.input_rows = input_rows
 
-        # Determine whether multiple echo files are present.
-        unique_echo_files = input_rows["ECHO_FILE"].unique()
-        self.display_url_num = len(unique_echo_files) > 1
+        # source mirrors ECHO_FILE so DataCatalog can auto-compute source_num for multi-file display.
+        _input_rows = input_rows.copy()
+        _input_rows["source"] = _input_rows["ECHO_FILE"]
 
         _reader = DSM2EchoInputReader()
         self._dvue_catalog = build_catalog_from_dataframe(
-            input_rows, _reader, self._ref_name, ref_class=DSM2EchoInputDataReference
+            _input_rows, _reader, self._ref_name, primary_key=["name"],
+            ref_class=DSM2EchoInputDataReference
         )
 
-        super().__init__(url_column="ECHO_FILE", url_num_column="ECHO_FILE_NO", **kwargs)
+        super().__init__(**kwargs)
         self.time_range = _time_range
         self.color_cycle_column = "NAME"
         self.dashed_line_cycle_column = "ECHO_FILE"
