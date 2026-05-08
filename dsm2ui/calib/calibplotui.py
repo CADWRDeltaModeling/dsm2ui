@@ -364,7 +364,7 @@ class CalibPlotUIManager(DataUIManager):
     def _build_dvue_catalog(self) -> DataCatalog:
         dfcat = self._build_raw_catalog()
         reader = CalibNullReader()
-        catalog = DataCatalog(crs="EPSG:4326")
+        catalog = DataCatalog(primary_key=["name"], crs="EPSG:4326")
         for _, row in dfcat.iterrows():
             attrs = {k: v for k, v in row.items() if k != "geometry"}
             if row.get("geometry") is not None:

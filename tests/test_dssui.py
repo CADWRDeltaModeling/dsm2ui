@@ -1,4 +1,4 @@
-"""Tests for DSSDataUIManager FILE_NUM / table-column consistency.
+"""Tests for DSSDataUIManager source_num / table-column consistency.
 
 These tests mock ``pyhecdss.DSSFile`` so no real DSS files are needed.
 """
@@ -66,34 +66,36 @@ def _patch_dss():
 
 
 class TestDSSDataUIManagerSingleFile:
-    def test_no_file_num_in_columns(self, _patch_dss):
+    def test_no_source_num_in_columns(self, _patch_dss):
         _patch_dss("file_a.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", filename_column="filename")
-        assert mgr.display_fileno is False
-        assert "FILE_NUM" not in mgr.get_table_columns()
+        mgr = DSSDataUIManager("file_a.dss")
+        df = mgr.get_data_catalog()
+        assert "source_num" not in df.columns
+        assert "source_num" not in mgr.get_table_columns()
 
     def test_table_columns_subset_of_catalog(self, _patch_dss):
         _patch_dss("file_a.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", filename_column="filename")
+        mgr = DSSDataUIManager("file_a.dss")
         df = mgr.get_data_catalog()
         missing = set(mgr.get_table_columns()) - set(df.columns)
         assert missing == set(), f"Columns {missing} not in catalog DataFrame"
 
 
 class TestDSSDataUIManagerMultipleFiles:
-    def test_file_num_in_columns(self, _patch_dss):
+    def test_source_num_in_columns(self, _patch_dss):
         # Same pathnames in both files — the real-world case
         _patch_dss("file_a.dss")
         _patch_dss("file_b.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", "file_b.dss", filename_column="filename")
-        assert mgr.display_fileno is True
-        assert "FILE_NUM" in mgr.get_table_columns()
+        mgr = DSSDataUIManager("file_a.dss", "file_b.dss")
+        df = mgr.get_data_catalog()
+        assert "source_num" in df.columns
+        assert "source_num" in mgr.get_table_columns()
 
     def test_same_pathname_both_files_present(self, _patch_dss):
         """Same DSS pathname in two files must produce two separate catalog rows."""
@@ -101,19 +103,19 @@ class TestDSSDataUIManagerMultipleFiles:
         _patch_dss("file_b.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", "file_b.dss", filename_column="filename")
+        mgr = DSSDataUIManager("file_a.dss", "file_b.dss")
         df = mgr.get_data_catalog()
         # 2 rows per file × 2 files = 4 total rows (no deduplication across files)
         assert len(df) == 4
 
-    def test_file_num_in_catalog_df(self, _patch_dss):
+    def test_source_num_in_catalog_df(self, _patch_dss):
         _patch_dss("file_a.dss")
         _patch_dss("file_b.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", "file_b.dss", filename_column="filename")
+        mgr = DSSDataUIManager("file_a.dss", "file_b.dss")
         df = mgr.get_data_catalog()
-        assert "FILE_NUM" in df.columns
+        assert "source_num" in df.columns
 
     def test_table_columns_subset_of_catalog(self, _patch_dss):
         """Regression: all table columns must exist in the catalog DataFrame."""
@@ -121,22 +123,22 @@ class TestDSSDataUIManagerMultipleFiles:
         _patch_dss("file_b.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", "file_b.dss", filename_column="filename")
+        mgr = DSSDataUIManager("file_a.dss", "file_b.dss")
         df = mgr.get_data_catalog()
         missing = set(mgr.get_table_columns()) - set(df.columns)
         assert missing == set(), f"Columns {missing} not in catalog DataFrame"
 
-    def test_catalog_consistent_across_calls(self, _patch_dss):
-        """Regression: second get_data_catalog() must still have FILE_NUM."""
+    def test_source_num_consistent_across_calls(self, _patch_dss):
+        """Regression: second get_data_catalog() must still have source_num."""
         _patch_dss("file_a.dss")
         _patch_dss("file_b.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", "file_b.dss", filename_column="filename")
+        mgr = DSSDataUIManager("file_a.dss", "file_b.dss")
         df1 = mgr.get_data_catalog()
         df2 = mgr.get_data_catalog()
-        assert "FILE_NUM" in df1.columns
-        assert "FILE_NUM" in df2.columns
+        assert "source_num" in df1.columns
+        assert "source_num" in df2.columns
 
 
 class TestBuildPathname:
@@ -144,7 +146,7 @@ class TestBuildPathname:
         _patch_dss("file_a.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", filename_column="filename")
+        mgr = DSSDataUIManager("file_a.dss")
         row = pd.Series({"A": "AREA", "B": "STA001", "C": "EC", "E": "1HOUR", "F": "VER1"})
         assert mgr.build_pathname(row) == "/AREA/STA001/EC//1HOUR/VER1/"
 
@@ -159,7 +161,7 @@ class TestDSSDataUIManagerCacheClear:
         _patch_dss("file_a.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", filename_column="filename")
+        mgr = DSSDataUIManager("file_a.dss")
         # Warm cache on every ref
         for ref in mgr.data_catalog.list():
             ref.getData()
@@ -172,7 +174,7 @@ class TestDSSDataUIManagerCacheClear:
         _patch_dss("file_a.dss")
         from dsm2ui.dssui.dssui import DSSDataUIManager
 
-        mgr = DSSDataUIManager("file_a.dss", filename_column="filename")
+        mgr = DSSDataUIManager("file_a.dss")
         assert mgr.data_catalog.invalidate_all_caches() is mgr.data_catalog
 
 

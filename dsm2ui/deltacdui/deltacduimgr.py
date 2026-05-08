@@ -114,7 +114,6 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
         )
         self._dvue_catalog = self._build_dvue_catalog(catalog, _reader, geo_crs)
 
-        kwargs['url_column'] = "source"
         super().__init__(**kwargs)
         # Set up columns for visualization
         self.color_cycle_column = "area_id"
@@ -136,7 +135,7 @@ class DeltaCDUIManager(tsdataui.TimeSeriesDataUIManager):
         return f"{source}::{area_id}/{variable}"
 
     def _build_dvue_catalog(self, dfcat, reader, crs=None) -> DataCatalog:
-        catalog = DataCatalog(crs=crs)
+        catalog = DataCatalog(primary_key=["name"], crs=crs)
         for _, row in dfcat.iterrows():
             attrs = {k: v for k, v in row.items() if k != "geometry"}
             if "geometry" in row.index and row["geometry"] is not None:

@@ -127,9 +127,10 @@ class DeltaCDNodesUIManager(tsdataui.TimeSeriesDataUIManager):
             if isinstance(catalog, gpd.GeoDataFrame) and catalog.crs is not None
             else None
         )
-        self._dvue_catalog = build_catalog_from_dataframe(catalog, _reader, self._ref_name, geo_crs)
+        self._dvue_catalog = build_catalog_from_dataframe(
+            catalog, _reader, self._ref_name, primary_key=["name"], crs=geo_crs,
+        )
 
-        kwargs['url_column'] = "source"
         super().__init__(**kwargs)
         # Set up columns for visualization
         self.color_cycle_column = "node"

@@ -209,13 +209,6 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         """
         _time_range = kwargs.pop("time_range", None)
         self.output_channels = output_channels
-        self.display_url_num = False
-        filename_column = "FILE"
-        unique_files = self.output_channels[filename_column].unique()
-        if len(unique_files) > 1:
-            output_channels["FILE_NO"] = output_channels[filename_column].apply(
-                lambda x: unique_files.tolist().index(x)
-            )
         self.station_id_column = "NAME"
 
         # Build DataCatalog before super().__init__() because the parent
@@ -228,16 +221,17 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         )
         # Add canonical lowercase attrs alongside the existing uppercase DSM2 columns
         # so that mixed catalogs and generic label code can find them.
+        # source mirrors FILE so DataCatalog can auto-compute source_num for multi-file display.
         _oc = output_channels.copy()
         _oc["station_name"] = _oc["NAME"]
         _oc["variable"] = _oc["VARIABLE"].str.lower()
+        _oc["source"] = _oc["FILE"]
         self._dvue_catalog = build_catalog_from_dataframe(
-            _oc, _reader, self._ref_name, geo_crs, ref_class=DSM2DSSDataReference,
-            key_attributes=["NAME", "VARIABLE"],
+            _oc, _reader, self._ref_name, primary_key=["name"], crs=geo_crs,
+            ref_class=DSM2DSSDataReference,
         )
 
-        super().__init__(url_column="FILE", url_num_column="FILE_NO", **kwargs)
-        self.identity_key_columns = ["NAME", "VARIABLE"]
+        super().__init__(**kwargs)
         self.time_range = _time_range
         self.color_cycle_column = "NAME"
         self.dashed_line_cycle_column = "FILE"
@@ -268,10 +262,9 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         return _DSM2DSSPlotAction()
 
     def build_station_name(self, r):
-        if self.display_url_num:
-            return f'{r["FILE_NO"]}:{r["NAME"]}'
-        else:
-            return f'{r["NAME"]}'
+        if "source_num" in r.index:
+            return f'{r["source_num"]}:{r["NAME"]}'
+        return f'{r["NAME"]}'
 
     def get_time_range(self, dfcat):
         return self.time_range
@@ -1400,7 +1393,6 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         """
         self.channels = kwargs.pop("channels", None)
         self.tidefiles = tidefiles
-        self.display_url_num = False
         self.tidefile_map = {
             f: DSM2TidefileUIManager.read_tidefile(f) for f in tidefiles
         }
@@ -1416,8 +1408,10 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             dfcat = pd.merge(channels, dfcat, on="geoid", how="right")
         self.dfcat = dfcat
         self.station_id_column = "geoid"
-        # Add canonical station_name for mixed-catalog compatibility
+        # Add canonical station_name for mixed-catalog compatibility.
+        # source mirrors filename so DataCatalog can auto-compute source_num.
         self.dfcat["station_name"] = self.dfcat["geoid"].fillna(self.dfcat["id"])
+        self.dfcat["source"] = self.dfcat["filename"]
         time_ranges = [h5.get_start_end_dates() for h5 in self.tidefile_map.values()]
         _time_range = (
             min(pd.to_datetime(t[0]) for t in time_ranges),
@@ -1431,17 +1425,13 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             else None
         )
         self._dvue_catalog = build_catalog_from_dataframe(
-            self.dfcat, self._reader, self._build_ref_key, crs=geo_crs,
-            ref_class=DSM2TidefileDataReference,
-            key_attributes=["station_name", "variable"],
+            self.dfcat, self._reader, self._build_ref_key, primary_key=["name"],
+            crs=geo_crs, ref_class=DSM2TidefileDataReference,
         )
         super().__init__(
-            url_column="filename",
-            url_num_column="url_num",
             time_range=_time_range,
             **kwargs,
         )
-        self.identity_key_columns = ["station_name", "variable"]
         self.color_cycle_column = "id"
         self.dashed_line_cycle_column = "filename"
         self.marker_cycle_column = "variable"
@@ -1490,8 +1480,8 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             name = r.get("name")
             if name and str(name) not in ("nan", "None", ""):
                 return str(name)
-        if self.display_url_num:
-            return f'{r["url_num"]}:{r[self.station_id_column]}'
+        if "source_num" in r.index:
+            return f'{r["source_num"]}:{r[self.station_id_column]}'
         return f"{r[self.station_id_column]}"
 
     def get_time_range(self, dfcat):
@@ -2152,7 +2142,7 @@ class DSM2EchoInputUIManager(TimeSeriesDataUIManager):
         return _DSM2EchoInputPlotAction()
 
     def build_station_name(self, r):
-        prefix = f'{r["ECHO_FILE_NO"]}:' if self.display_url_num and "ECHO_FILE_NO" in r.index else ""
+        prefix = f'{r["source_num"]}:' if "source_num" in r.index else ""
         return f'{prefix}{r["TABLE"]}:{r["NAME"]}'
 
     def get_time_range(self, dfcat):

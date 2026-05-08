@@ -177,7 +177,7 @@ class TestHeterogeneousCatalog:
 
         dummy_df = pd.DataFrame({"value": [1.0, 2.0]})
 
-        cat = DataCatalog()
+        cat = DataCatalog(primary_key=["name"])
 
         cat.add(DataReference(
             reader=_make_reader(dummy_df),

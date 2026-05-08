@@ -57,11 +57,7 @@ class DSSTimeSeriesPlotAction(TimeSeriesPlotAction):
             part: (df[part].nunique() > 1 if part in df.columns else False)
             for part in ("B", "C", "A", "F")
         }
-        self._multi_file = (
-            df[manager.url_column].nunique() > 1
-            if hasattr(manager, "url_column") and manager.url_column in df.columns
-            else False
-        )
+        self._multi_file = "source_num" in df.columns
         return super().render(df, refs_and_data, manager)
 
     def create_curve(self, data, row, unit, file_index=""):
@@ -212,6 +208,7 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         This is merged with the data catalog to get the station locations.
         """
         _time_range = kwargs.pop("time_range", None)
+        kwargs.pop("filename_column", None)  # removed in dvue primary_key migration; ignored
         self.geo_locations = kwargs.pop("geo_locations", None)
         self.geo_id_column = kwargs.pop("geo_id_column", "station_id")
         self.station_id_column = kwargs.pop(
@@ -259,7 +256,6 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         self._dvue_catalog = self._build_dvue_catalog(geo_crs)
 
         super().__init__(**kwargs)
-        self.identity_key_columns = ["A", "B", "C", "F"]
         if _time_range is not None:
             self.time_range = _time_range
         self.color_cycle_column = "B"
@@ -272,9 +268,11 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         return f'{row["filename"]}::{self.build_pathname(row)}'
 
     def _build_dvue_catalog(self, crs=None) -> DataCatalog:
+        # source mirrors filename so DataCatalog can auto-compute source_num for multi-file display.
+        dfcat = self.dfcat.copy()
+        dfcat["source"] = dfcat["filename"]
         return build_catalog_from_dataframe(
-            self.dfcat, self._reader, self.build_ref_key, crs,
-            key_attributes=["A", "B", "C", "F"],
+            dfcat, self._reader, self.build_ref_key, primary_key=["name"], crs=crs,
         )
 
     @property
@@ -303,10 +301,10 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
 
     def build_station_name(self, r):
         pathname = self.build_pathname(r)
-        if "FILE_NUM" not in r:
+        if "source_num" not in r:
             return f"{pathname}"
         else:
-            return f'{r["FILE_NUM"]}:{pathname}'
+            return f'{r["source_num"]}:{pathname}'
 
     def _build_map_pathname_to_catalog(self, dfcat):
         dfcatpath = dfcat.copy()
@@ -504,7 +502,6 @@ def show_dss_ui(
         geo_locations=geodf,
         geo_id_column=location_id_column,
         station_id_column=station_id_column,
-        url_column="filename",
     )
     if clear_cache:
         dssuimgr.data_catalog.invalidate_all_caches()
