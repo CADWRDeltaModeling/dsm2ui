@@ -295,15 +295,6 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         interval = r.get("INTERVAL", "") if hasattr(r, "get") else getattr(r, "INTERVAL", "")
         return str(interval).upper() in ("IR", "IR-YEAR", "IR-MONTH", "IR-DAY", "IRREG", "")
 
-    def get_data_for_time_range(self, r, time_range):
-        ref = self._dvue_catalog.get(self._ref_name(r))
-        # Load full series (cached); slice to the requested window here.
-        df = ref.getData()
-        unit = df.attrs.get("unit", "")
-        ptype = df.attrs.get("ptype", "inst-val")
-        df = df[slice(*time_range)]
-        return df, unit, ptype
-
     # methods below if geolocation data is available
     def get_tooltips(self):
         return [

@@ -279,15 +279,37 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
     def data_catalog(self) -> DataCatalog:
         return self._dvue_catalog
 
-    def get_data_reference(self, row):
-        """Look up DataReference by filename + pathname key.
+    def get_data_catalog(self):
+        """Return the catalog DataFrame with an injected ``label`` column.
 
-        For math references (which have no DSS filename), the catalog key is
-        the reference ``name`` directly rather than the ``filename::pathname``
-        composite used for raw DSS entries.
+        For raw DSS refs ``label`` is blank — the row is already identified by
+        its A/B/C/E/F parts and the ugly composite catalog key
+        (``filename::pathname``) should not be surfaced to users.
+        For math/transform refs ``label`` mirrors the catalog ``name`` (a
+        clean short key like ``"JER__tf"``) so users can distinguish derived
+        rows from the raw entries they were created from.
         """
-        filename = row.get("filename", None)
-        if pd.isna(filename):
+        df = self._dvue_catalog.to_dataframe().reset_index()
+        df["label"] = df.apply(
+            lambda r: r["name"] if r.get("ref_type", "raw") != "raw" else "",
+            axis=1,
+        )
+        return df
+
+    def get_data_reference(self, row):
+        """Look up DataReference by name (always reliable).
+
+        Always use ``row["name"]`` — the catalog key stored in the DataFrame
+        index and surfaced as a column after ``reset_index()``.  This works
+        correctly for both raw DSS refs (keyed as ``filename::pathname``) and
+        math/transform refs (keyed as a clean short name like ``"JER__tf"``).
+
+        Never branch on ``pd.isna(row["filename"])`` to detect math refs.
+        ``TransformToCatalogAction`` inherits *all* original-ref attributes
+        (including ``filename``) into the new ``MathDataReference``, so the
+        NaN guard silently falls through to the wrong lookup path.
+        """
+        if "name" in row.index:
             return self._dvue_catalog.get(row["name"])
         return self._dvue_catalog.get(self.build_ref_key(row))
 
@@ -328,17 +350,19 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
     def _get_table_column_width_map(self):
         """only columns to be displayed in the table should be included in the map"""
         column_width_map = {
-            "A": "15%",
-            "B": "15%",
-            "C": "15%",
-            "E": "10%",
-            "F": "15%",
+            "label": "15%",
+            "A": "14%",
+            "B": "14%",
+            "C": "14%",
+            "E": "9%",
+            "F": "14%",
             "D": "20%",
         }
         return column_width_map
 
     def get_table_filters(self):
         table_filters = {
+            "label": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "A": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "B": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "C": {"type": "input", "func": "like", "placeholder": "Enter match"},
@@ -395,8 +419,7 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         )  # dead — override DSSTimeSeriesPlotAction.create_curve instead  # dead — override DSSTimeSeriesPlotAction.create_curve instead
 
     def get_data_for_time_range(self, r, time_range):
-        pathname = self.build_pathname(r)
-        ref = self._dvue_catalog.get(pathname)
+        ref = self.get_data_reference(r)
         df = ref.getData(time_range=time_range)
         unit = df.attrs.get("unit", "")
         ptype = df.attrs.get("ptype", "inst-val")
