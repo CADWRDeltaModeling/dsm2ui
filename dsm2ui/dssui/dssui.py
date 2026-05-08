@@ -280,21 +280,7 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         return self._dvue_catalog
 
     def get_data_catalog(self):
-        """Return the catalog DataFrame with an injected ``label`` column.
-
-        For raw DSS refs ``label`` is blank — the row is already identified by
-        its A/B/C/E/F parts and the ugly composite catalog key
-        (``filename::pathname``) should not be surfaced to users.
-        For math/transform refs ``label`` mirrors the catalog ``name`` (a
-        clean short key like ``"JER__tf"``) so users can distinguish derived
-        rows from the raw entries they were created from.
-        """
-        df = self._dvue_catalog.to_dataframe().reset_index()
-        df["label"] = df.apply(
-            lambda r: r["name"] if r.get("ref_type", "raw") != "raw" else "",
-            axis=1,
-        )
-        return df
+        return self._dvue_catalog.to_dataframe().reset_index()
 
     def get_data_reference(self, row):
         """Look up DataReference by name (always reliable).
@@ -349,8 +335,7 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
 
     def _get_table_column_width_map(self):
         """only columns to be displayed in the table should be included in the map"""
-        column_width_map = {
-            "label": "15%",
+        return {
             "A": "14%",
             "B": "14%",
             "C": "14%",
@@ -358,18 +343,15 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
             "F": "14%",
             "D": "20%",
         }
-        return column_width_map
 
     def get_table_filters(self):
-        table_filters = {
-            "label": {"type": "input", "func": "like", "placeholder": "Enter match"},
+        return {
             "A": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "B": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "C": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "E": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "F": {"type": "input", "func": "like", "placeholder": "Enter match"},
         }
-        return table_filters
 
     def _make_plot_action(self):
         """Return a :class:`DSSTimeSeriesPlotAction` for DSS-aware labels."""
