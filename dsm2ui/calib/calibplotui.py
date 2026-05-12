@@ -821,7 +821,14 @@ import click
     multiple=True,
     help="Override an options_dict entry as KEY=VALUE (e.g. --option write_html=false).",
 )
-def calib_plot_ui(config_file, base_dir=None, clear_cache=False, vartypes=(), options=(), **kwargs):
+@click.option(
+    "--port",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Port for the web server (0 = random available port).",
+)
+def calib_plot_ui(config_file, base_dir=None, clear_cache=False, vartypes=(), options=(), port=0, **kwargs):
     """Launch the interactive calibration plot UI from a YAML config file.
 
     config_file: str
@@ -872,12 +879,15 @@ def calib_plot_ui(config_file, base_dir=None, clear_cache=False, vartypes=(), op
             (-124.848974, 32.534156),
         ]
     )
-    manager = CalibPlotUIManager(
-        config_file,
-        base_dir=base_dir,
-        polygon_bounds=california,
-        cli_overrides=cli_overrides or None,
-        **kwargs,
-    )
+    from dsm2ui.session import serve_session_app
 
-    DataUI(manager).create_view(title="DSM2 Calib Plot UI").show()
+    def build_manager():
+        return CalibPlotUIManager(
+            config_file,
+            base_dir=base_dir,
+            polygon_bounds=california,
+            cli_overrides=cli_overrides or None,
+            **kwargs,
+        )
+
+    serve_session_app(build_manager, title="DSM2 Calib Plot UI", port=port)

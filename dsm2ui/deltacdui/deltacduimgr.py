@@ -384,13 +384,28 @@ import click
     default=None,
     help="Path to the GeoJSON file containing area geometries",
 )
-def show_deltacd_ui(nc_files, geojson_file=None):
+@click.option(
+    "--port",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Port for the web server (0 = random available port).",
+)
+def show_deltacd_ui(nc_files, geojson_file=None, port=0, port=0):
     """
     Show the DeltaCD UI Manager for the specified netCDF file and GeoJSON file.
     """
-    dcd_ui = DeltaCDUIManager(*nc_files, geojson_file=geojson_file)
-    from dvue import dataui
     import cartopy.crs as ccrs
-    dui=dataui.DataUI(dcd_ui, station_id_column="area_id", crs=ccrs.epsg(26910))
-    dui.create_view().servable(title="DeltaCD UI Manager").show()
+    from dsm2ui.session import serve_session_app
+
+    def build_manager():
+        return DeltaCDUIManager(*nc_files, geojson_file=geojson_file)
+
+    serve_session_app(
+        build_manager,
+        title="DeltaCD UI",
+        port=port,
+        crs=ccrs.epsg(26910),
+        station_id_column="area_id",
+    )
 

@@ -455,9 +455,16 @@ import click
     default=False,
     help="Invalidate the in-memory data cache before launching the UI.",
 )
+@click.option(
+    "--port",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Port for the web server (0 = random available port).",
+)
 def show_dss_ui(
     dssfiles, location_file=None, location_id_column="station_id", station_id_column="B",
-    clear_cache=False,
+    clear_cache=False, port=0,
 ):
     """
     Show DSS UI for the given DSS files
@@ -502,13 +509,23 @@ def show_dss_ui(
                 f"Station ID column {location_id_column} not found in location file"
             )
 
-    dssuimgr = DSSDataUIManager(
-        *dssfiles,
-        geo_locations=geodf,
-        geo_id_column=location_id_column,
+    from dsm2ui.session import serve_session_app
+
+    def build_manager():
+        mgr = DSSDataUIManager(
+            *dssfiles,
+            geo_locations=geodf,
+            geo_id_column=location_id_column,
+            station_id_column=station_id_column,
+        )
+        if clear_cache:
+            mgr.data_catalog.invalidate_all_caches()
+        return mgr
+
+    serve_session_app(
+        build_manager,
+        title="DSS Data UI",
+        port=port,
+        crs=crs_cartopy,
         station_id_column=station_id_column,
     )
-    if clear_cache:
-        dssuimgr.data_catalog.invalidate_all_caches()
-    ui = DataUI(dssuimgr, crs=crs_cartopy)
-    ui.create_view(title="DSS Data UI").show()

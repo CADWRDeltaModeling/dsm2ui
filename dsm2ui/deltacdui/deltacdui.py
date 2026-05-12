@@ -376,18 +376,34 @@ def build_map(time, gdf, df=None, var=""):
     default=False,
     help="Invalidate the in-memory data cache before launching the UI.",
 )
-def show_deltacd_nodes_ui(nc_files, nodes_file=None, clear_cache=False):
+@click.option(
+    "--port",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Port for the web server (0 = random available port).",
+)
+def show_deltacd_nodes_ui(nc_files, nodes_file=None, clear_cache=False, port=0, port=0):
     """
     Show the DeltaCD Nodes UI Manager for the specified netCDF file(s) and nodes GeoJSON file.
     
     This UI is designed for netCDF files that use 'node' as the station dimension.
     """
-    dcd_ui = DeltaCDNodesUIManager(*nc_files, nodes_file=nodes_file)
-    if clear_cache:
-        dcd_ui.data_catalog.invalidate_all_caches()
-    from dvue import dataui
-    dui = dataui.DataUI(dcd_ui, station_id_column="node", crs=ccrs.epsg(26910))
-    dui.create_view().servable(title="DeltaCD Nodes UI Manager").show()
+    from dsm2ui.session import serve_session_app
+
+    def build_manager():
+        mgr = DeltaCDNodesUIManager(*nc_files, nodes_file=nodes_file)
+        if clear_cache:
+            mgr.data_catalog.invalidate_all_caches()
+        return mgr
+
+    serve_session_app(
+        build_manager,
+        title="DeltaCD Nodes UI",
+        port=port,
+        crs=ccrs.epsg(26910),
+        station_id_column="node",
+    )
 
 
 @click.command()
