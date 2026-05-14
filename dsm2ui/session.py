@@ -13,14 +13,22 @@ from __future__ import annotations
 from pathlib import Path
 from dvue.session_persistence import (
     install_session_handler,
+    make_reset_session_button,
     snapshot,
     restore,
 )
 from dvue.session_persistence import serve_session_app as _serve_session_app
 
-__all__ = ["install_session_handler", "snapshot", "restore", "serve_session_app"]
+__all__ = [
+    "install_session_handler",
+    "make_reset_session_button",
+    "snapshot",
+    "restore",
+    "serve_session_app",
+]
 
 _DEFAULT_CACHE_DIR = Path.home() / ".dsm2ui_sessions"
+_DEFAULT_COOKIE_NAME = "dsm2ui_user_id"
 
 
 def serve_session_app(
@@ -29,13 +37,23 @@ def serve_session_app(
     port: int = 0,
     crs=None,
     station_id_column: str | None = None,
+    cookie_name: str = _DEFAULT_COOKIE_NAME,
     cache_dir: str | Path | None = None,
+    persist: bool = True,
+    show_reset_session_button: bool = True,
     **pn_serve_kwargs,
 ) -> None:
     """Launch a session-aware Panel app for a dsm2ui manager.
 
     Delegates to :func:`dvue.session_persistence.serve_session_app` with
-    ``cache_dir`` defaulting to ``~/.dsm2ui_sessions``.
+    dsm2ui-specific defaults:
+
+    - ``cookie_name`` defaults to ``"dsm2ui_user_id"`` to avoid collisions
+      with other dvue apps served on the same origin.
+    - ``cache_dir`` defaults to ``~/.dsm2ui_sessions``.
+    - ``persist`` defaults to ``True`` (disk persistence across server
+      restarts is enabled by default for dsm2ui apps).
+    - ``show_reset_session_button`` defaults to ``True``.
 
     Parameters
     ----------
@@ -49,17 +67,48 @@ def serve_session_app(
         Cartopy CRS for the map panel.  ``None`` → no map.
     station_id_column:
         Column identifying stations in the catalog.
+    cookie_name:
+        Name of the persistent user-identity cookie.  Default
+        ``"dsm2ui_user_id"``.
     cache_dir:
         Diskcache directory.  Defaults to ``~/.dsm2ui_sessions``.
+    persist:
+        Enable Layer 2 disk persistence: save/restore ``time_range`` and
+        table ``selection`` across server restarts using diskcache.
+        Default ``True``.
+    show_reset_session_button:
+        When ``True`` (default), automatically set
+        ``show_reset_session_button=True`` and
+        ``session_cookie_name=cookie_name`` on the manager returned by
+        *build_manager_fn* so that ``DataUI`` renders a "Reset Session"
+        button in the action bar.
     **pn_serve_kwargs:
         Forwarded to ``pn.serve()``.
     """
+    _cookie = cookie_name
+    _build_fn = build_manager_fn
+
+    if show_reset_session_button:
+        def _build_fn_with_session():
+            mgr = _build_fn()
+            if hasattr(mgr, "show_reset_session_button"):
+                mgr.show_reset_session_button = True
+            if hasattr(mgr, "session_cookie_name"):
+                mgr.session_cookie_name = _cookie
+            return mgr
+
+        _effective_build = _build_fn_with_session
+    else:
+        _effective_build = _build_fn
+
     _serve_session_app(
-        build_manager_fn,
+        _effective_build,
         title=title,
         port=port,
         crs=crs,
         station_id_column=station_id_column,
+        cookie_name=_cookie,
         cache_dir=cache_dir if cache_dir is not None else _DEFAULT_CACHE_DIR,
+        persist=persist,
         **pn_serve_kwargs,
     )
