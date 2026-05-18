@@ -383,13 +383,19 @@ def build_map(time, gdf, df=None, var=""):
     type=int,
     help="Port for the web server (0 = random available port).",
 )
-def show_deltacd_nodes_ui(nc_files, nodes_file=None, clear_cache=False, port=0, port=0):
+@click.option(
+    "--desktop",
+    is_flag=True,
+    default=False,
+    help="Open in a native desktop window (requires pywebview).",
+)
+def show_deltacd_nodes_ui(nc_files, nodes_file=None, clear_cache=False, port=0, desktop=False):
     """
     Show the DeltaCD Nodes UI Manager for the specified netCDF file(s) and nodes GeoJSON file.
     
     This UI is designed for netCDF files that use 'node' as the station dimension.
     """
-    from dsm2ui.session import serve_session_app
+    from dsm2ui.session import serve_session_app, serve_desktop_app
 
     def build_manager():
         mgr = DeltaCDNodesUIManager(*nc_files, nodes_file=nodes_file)
@@ -397,7 +403,8 @@ def show_deltacd_nodes_ui(nc_files, nodes_file=None, clear_cache=False, port=0, 
             mgr.data_catalog.invalidate_all_caches()
         return mgr
 
-    serve_session_app(
+    _serve = serve_desktop_app if desktop else serve_session_app
+    _serve(
         build_manager,
         title="DeltaCD Nodes UI",
         port=port,

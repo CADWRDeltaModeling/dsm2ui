@@ -391,17 +391,24 @@ import click
     type=int,
     help="Port for the web server (0 = random available port).",
 )
-def show_deltacd_ui(nc_files, geojson_file=None, port=0, port=0):
+@click.option(
+    "--desktop",
+    is_flag=True,
+    default=False,
+    help="Open in a native desktop window (requires pywebview).",
+)
+def show_deltacd_ui(nc_files, geojson_file=None, port=0, desktop=False):
     """
     Show the DeltaCD UI Manager for the specified netCDF file and GeoJSON file.
     """
     import cartopy.crs as ccrs
-    from dsm2ui.session import serve_session_app
+    from dsm2ui.session import serve_session_app, serve_desktop_app
 
     def build_manager():
         return DeltaCDUIManager(*nc_files, geojson_file=geojson_file)
 
-    serve_session_app(
+    _serve = serve_desktop_app if desktop else serve_session_app
+    _serve(
         build_manager,
         title="DeltaCD UI",
         port=port,

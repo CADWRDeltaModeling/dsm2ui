@@ -1959,7 +1959,13 @@ import click
     type=int,
     help="Port for the web server (0 = random available port).",
 )
-def show_dsm2_output_ui(echo_files, channel_shapefile=None, clear_cache=False, port=0):
+@click.option(
+    "--desktop",
+    is_flag=True,
+    default=False,
+    help="Open in a native desktop window (requires pywebview).",
+)
+def show_dsm2_output_ui(echo_files, channel_shapefile=None, clear_cache=False, port=0, desktop=False):
     """
     Show a user interface for viewing DSM2 output data
 
@@ -1976,7 +1982,7 @@ def show_dsm2_output_ui(echo_files, channel_shapefile=None, clear_cache=False, p
 
     """
     import cartopy.crs as ccrs
-    from dsm2ui.session import serve_session_app
+    from dsm2ui.session import serve_session_app, serve_desktop_app
 
     def build_manager():
         plotter = build_output_plotter(*echo_files, channel_shapefile=channel_shapefile)
@@ -1984,7 +1990,8 @@ def show_dsm2_output_ui(echo_files, channel_shapefile=None, clear_cache=False, p
             plotter.data_catalog.invalidate_all_caches()
         return plotter
 
-    serve_session_app(build_manager, title="DSM2 Output UI", port=port, crs=ccrs.UTM(10))
+    _serve = serve_desktop_app if desktop else serve_session_app
+    _serve(build_manager, title="DSM2 Output UI", port=port, crs=ccrs.UTM(10))
 
 
 # ---------------------------------------------------------------------------
@@ -2285,7 +2292,13 @@ def build_input_plotter(*echo_files):
     type=int,
     help="Port for the web server (0 = random available port).",
 )
-def show_dsm2_input_ui(echo_files, port=0):
+@click.option(
+    "--desktop",
+    is_flag=True,
+    default=False,
+    help="Open in a native desktop window (requires pywebview).",
+)
+def show_dsm2_input_ui(echo_files, port=0, desktop=False):
     """Show a user interface for viewing DSM2 input boundary condition time series.
 
     Scans the supplied echo files for DSS-backed input tables
@@ -2296,12 +2309,13 @@ def show_dsm2_input_ui(echo_files, port=0):
     Supports one or more ECHO_FILES; when multiple files are supplied a
     file-number prefix is added to each row to distinguish the sources.
     """
-    from dsm2ui.session import serve_session_app
+    from dsm2ui.session import serve_session_app, serve_desktop_app
 
     def build_manager():
         return build_input_plotter(*echo_files)
 
-    serve_session_app(build_manager, title="DSM2 Input UI", port=port)
+    _serve = serve_desktop_app if desktop else serve_session_app
+    _serve(build_manager, title="DSM2 Input UI", port=port)
 @click.command()
 @click.argument("tidefiles", nargs=-1)
 @click.option(
@@ -2322,7 +2336,13 @@ def show_dsm2_input_ui(echo_files, port=0):
     type=int,
     help="Port for the web server (0 = random available port).",
 )
-def show_dsm2_tidefile_ui(tidefiles, channel_file=None, clear_cache=False, port=0):
+@click.option(
+    "--desktop",
+    is_flag=True,
+    default=False,
+    help="Open in a native desktop window (requires pywebview).",
+)
+def show_dsm2_tidefile_ui(tidefiles, channel_file=None, clear_cache=False, port=0, desktop=False):
     """
     Show a user interface for viewing DSM2 tide files
 
@@ -2334,7 +2354,7 @@ def show_dsm2_tidefile_ui(tidefiles, channel_file=None, clear_cache=False, port=
 
     """
     import cartopy.crs as ccrs
-    from dsm2ui.session import serve_session_app
+    from dsm2ui.session import serve_session_app, serve_desktop_app
 
     channels = None
     if channel_file is not None:
@@ -2346,7 +2366,8 @@ def show_dsm2_tidefile_ui(tidefiles, channel_file=None, clear_cache=False, port=
             mgr.data_catalog.invalidate_all_caches()
         return mgr
 
-    serve_session_app(
+    _serve = serve_desktop_app if desktop else serve_session_app
+    _serve(
         build_manager,
         title="DSM2 Tidefile UI",
         port=port,

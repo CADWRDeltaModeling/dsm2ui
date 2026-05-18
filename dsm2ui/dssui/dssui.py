@@ -462,9 +462,15 @@ import click
     type=int,
     help="Port for the web server (0 = random available port).",
 )
+@click.option(
+    "--desktop",
+    is_flag=True,
+    default=False,
+    help="Open in a native desktop window (requires pywebview).",
+)
 def show_dss_ui(
     dssfiles, location_file=None, location_id_column="station_id", station_id_column="B",
-    clear_cache=False, port=0,
+    clear_cache=False, port=0, desktop=False,
 ):
     """
     Show DSS UI for the given DSS files
@@ -509,7 +515,7 @@ def show_dss_ui(
                 f"Station ID column {location_id_column} not found in location file"
             )
 
-    from dsm2ui.session import serve_session_app
+    from dsm2ui.session import serve_session_app, serve_desktop_app
 
     def build_manager():
         mgr = DSSDataUIManager(
@@ -522,7 +528,8 @@ def show_dss_ui(
             mgr.data_catalog.invalidate_all_caches()
         return mgr
 
-    serve_session_app(
+    _serve = serve_desktop_app if desktop else serve_session_app
+    _serve(
         build_manager,
         title="DSS Data UI",
         port=port,
