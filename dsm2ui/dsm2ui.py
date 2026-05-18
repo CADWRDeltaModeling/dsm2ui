@@ -1513,6 +1513,82 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
     def get_map_marker_columns(self):
         return ["variable"]
 
+    def add_source_files(self, *paths: str) -> list:
+        """Incrementally add one or more HDF5 tidefile paths to the live catalog.
+
+        Accepts ``.h5`` or ``.hdf5`` files.  New channel/variable entries are
+        appended to the shared :class:`TidefileReader` and
+        :attr:`data_catalog`.
+
+        Returns a list of paths that produced at least one new entry.
+        """
+        added_paths = []
+        for path in paths:
+            if not any(str(path).lower().endswith(ext) for ext in (".h5", ".hdf5")):
+                logger.warning("add_source_files: unsupported file type, skipping %s", path)
+                continue
+            if path in self.tidefile_map:
+                logger.info("add_source_files: already loaded, skipping %s", path)
+                continue
+            try:
+                h5 = DSM2TidefileUIManager.read_tidefile(path)
+            except Exception as exc:
+                logger.error("add_source_files: cannot open %s: %s", path, exc)
+                continue
+
+            self.tidefile_map[path] = h5
+            # Update the shared reader so existing refs still work.
+            self._reader._tidefile_map[path] = h5
+
+            try:
+                dfnew = h5.create_catalog()
+            except Exception as exc:
+                logger.error("add_source_files: cannot read catalog of %s: %s", path, exc)
+                continue
+
+            dfnew.reset_index(drop=True, inplace=True)
+            dfnew["geoid"] = dfnew["id"].str.split("_", expand=True).iloc[:, 1]
+            dfnew["station_name"] = dfnew["geoid"].fillna(dfnew["id"])
+            dfnew["source"] = path
+
+            n_before = len(self._dvue_catalog)
+            for _, row in dfnew.iterrows():
+                ref_name = self._build_ref_key(row)
+                try:
+                    ref = DSM2TidefileDataReference(
+                        reader=self._reader,
+                        name=ref_name,
+                        source=path,
+                        cache=True,
+                        **{k: row[k] for k in dfnew.columns if k in row.index},
+                    )
+                    self._dvue_catalog.add(ref)
+                except ValueError:
+                    pass  # pk collision — already present
+                except Exception as exc:
+                    logger.warning(
+                        "add_source_files: skipping ref %s: %s", ref_name, exc
+                    )
+
+            if len(self._dvue_catalog) > n_before:
+                # Expand time range to cover new tidefile.
+                try:
+                    t0, t1 = h5.get_start_end_dates()
+                    cur = self.time_range or (None, None)
+                    new_start = min(pd.to_datetime(t0), cur[0]) if cur[0] else pd.to_datetime(t0)
+                    new_end = max(pd.to_datetime(t1), cur[1]) if cur[1] else pd.to_datetime(t1)
+                    self.time_range = (new_start, new_end)
+                except Exception:
+                    pass
+                added_paths.append(path)
+                logger.info(
+                    "add_source_files: added %d refs from %s",
+                    len(self._dvue_catalog) - n_before,
+                    path,
+                )
+
+        return added_paths
+
 
 class DSM2FlowlineMap:
 
@@ -2174,6 +2250,63 @@ class DSM2EchoInputUIManager(TimeSeriesDataUIManager):
             "NAME": {"type": "input", "func": "like", "placeholder": "Enter match"},
             "PATH": {"type": "input", "func": "like", "placeholder": "Enter match"},
         }
+
+    def add_source_files(self, *paths: str) -> list:
+        """Incrementally add one or more DSM2 echo ``.inp`` files to the live catalog.
+
+        Each echo file is scanned for input boundary time series tables and the
+        resulting rows are appended to the live :attr:`data_catalog`.
+
+        Returns a list of paths that produced at least one new entry.
+        """
+        added_paths = []
+        for path in paths:
+            if not str(path).lower().endswith(".inp"):
+                logger.warning("add_source_files: unsupported file type, skipping %s", path)
+                continue
+            # Skip if this echo file is already present in the catalog.
+            existing_echo_files = set(self.input_rows["ECHO_FILE"].unique())
+            if path in existing_echo_files:
+                logger.info("add_source_files: already loaded, skipping %s", path)
+                continue
+            try:
+                new_mgr = build_input_plotter(path)
+            except Exception as exc:
+                logger.error("add_source_files: cannot parse %s: %s", path, exc)
+                continue
+
+            new_rows = new_mgr.input_rows
+            n_before = len(self._dvue_catalog)
+            for _, row in new_rows.iterrows():
+                ref_name = self._ref_name(row)
+                try:
+                    ref = DSM2EchoInputDataReference(
+                        reader=DSM2EchoInputReader(),
+                        name=ref_name,
+                        source=path,
+                        cache=True,
+                        **{k: row[k] for k in new_rows.columns},
+                    )
+                    self._dvue_catalog.add(ref)
+                except ValueError:
+                    pass  # pk collision — already present
+                except Exception as exc:
+                    logger.warning(
+                        "add_source_files: skipping ref %s: %s", ref_name, exc
+                    )
+
+            if len(self._dvue_catalog) > n_before:
+                self.input_rows = pd.concat(
+                    [self.input_rows, new_rows], ignore_index=True
+                )
+                added_paths.append(path)
+                logger.info(
+                    "add_source_files: added %d refs from %s",
+                    len(self._dvue_catalog) - n_before,
+                    path,
+                )
+
+        return added_paths
 
 
 def _resolve_envvars(value: str, envvars: dict) -> str:

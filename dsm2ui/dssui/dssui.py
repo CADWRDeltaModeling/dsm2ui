@@ -426,6 +426,95 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         """return the columns that can be used to color the map"""
         return ["C", "A", "F"]
 
+    def add_source_files(self, *paths: str) -> list:
+        """Incrementally add one or more `.dss` files to the live catalog.
+
+        For each path that ends with ``.dss`` and has not already been loaded,
+        opens the file, reads its catalog, registers new entries in the shared
+        :class:`DSSReader`, and appends corresponding
+        :class:`~dvue.catalog.DataReference` objects to the live
+        :attr:`data_catalog`.
+
+        Parameters
+        ----------
+        *paths : str
+            Absolute OS paths to ``.dss`` files.
+
+        Returns
+        -------
+        list[str]
+            Paths that produced at least one new catalog entry.
+        """
+        added_paths = []
+        for path in paths:
+            if not str(path).lower().endswith(".dss"):
+                logger.warning("add_source_files: unsupported file type, skipping %s", path)
+                continue
+            if path in self.dssfh:
+                logger.info("add_source_files: already loaded, skipping %s", path)
+                continue
+            try:
+                fh = dss.DSSFile(path)
+            except Exception as exc:
+                logger.error("add_source_files: cannot open %s: %s", path, exc)
+                continue
+            try:
+                dfcat = fh.read_catalog()
+            except Exception as exc:
+                logger.error("add_source_files: cannot read catalog of %s: %s", path, exc)
+                fh.close()
+                continue
+
+            dsscat = self._build_map_pathname_to_catalog(dfcat)
+            dfcat = dfcat.drop(columns=["T"])
+            dfcat["filename"] = path
+            dfcat["source"] = path
+
+            # Register with the shared reader so existing DataReference
+            # load machinery works without modification.
+            self._reader._dssfh_map[path] = fh
+            self._reader._dss_catalog_map[path] = dsscat
+
+            # Also update manager-level state for consistency.
+            self.dssfh[path] = fh
+            self.dsscats[path] = dsscat
+
+            # Merge into the flat catalog DataFrame.
+            self.dfcat = pd.concat(
+                [self.dfcat, dfcat], ignore_index=True
+            ).drop_duplicates().reset_index(drop=True)
+
+            # Add new DataReference entries to the live DataCatalog.
+            n_before = len(self._dvue_catalog)
+            for _, row in dfcat.iterrows():
+                ref_name = self.build_ref_key(row)
+                try:
+                    from dvue.catalog import DataReference
+                    ref = DataReference(
+                        reader=self._reader,
+                        name=ref_name,
+                        source=path,
+                        cache=True,
+                        **{k: row[k] for k in ["filename", "A", "B", "C", "D", "E", "F"]},
+                    )
+                    self._dvue_catalog.add(ref)
+                except ValueError:
+                    pass  # pk collision — entry already exists, skip silently
+                except Exception as exc:
+                    logger.warning(
+                        "add_source_files: skipping ref %s: %s", ref_name, exc
+                    )
+
+            if len(self._dvue_catalog) > n_before:
+                added_paths.append(path)
+                logger.info(
+                    "add_source_files: added %d refs from %s",
+                    len(self._dvue_catalog) - n_before,
+                    path,
+                )
+
+        return added_paths
+
 
 
 import glob

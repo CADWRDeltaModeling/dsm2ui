@@ -329,6 +329,65 @@ class DeltaCDNodesUIManager(tsdataui.TimeSeriesDataUIManager):
         title = f"{v[1]} ({v[0]})"
         return title
 
+    def add_source_files(self, *paths: str) -> list:
+        """Incrementally add one or more ``.nc`` netCDF files to the live catalog.
+
+        Returns a list of paths that produced at least one new entry.
+        """
+        added_paths = []
+        for path in paths:
+            if not str(path).lower().endswith(".nc"):
+                logger.warning("add_source_files: unsupported file type, skipping %s", path)
+                continue
+            if path in self.datasets:
+                logger.info("add_source_files: already loaded, skipping %s", path)
+                continue
+            try:
+                ds = xr.open_dataset(path)
+            except Exception as exc:
+                logger.error("add_source_files: cannot open %s: %s", path, exc)
+                continue
+
+            self.datasets[path] = ds
+
+            try:
+                dfnew = self.get_data_catalog_for_dataset(ds, path)
+            except Exception as exc:
+                logger.error("add_source_files: cannot read catalog of %s: %s", path, exc)
+                continue
+
+            n_before = len(self._dvue_catalog)
+            _reader = DeltaCDNodeReader(self.datasets)
+            for _, row in dfnew.iterrows():
+                ref_name = self._ref_name(row)
+                try:
+                    from dvue.catalog import DataReference
+                    attrs = {k: v for k, v in row.items() if k != "geometry"}
+                    ref = DataReference(
+                        reader=_reader,
+                        name=ref_name,
+                        source=path,
+                        cache=True,
+                        **attrs,
+                    )
+                    self._dvue_catalog.add(ref)
+                except ValueError:
+                    pass  # pk collision
+                except Exception as exc:
+                    logger.warning(
+                        "add_source_files: skipping ref %s: %s", ref_name, exc
+                    )
+
+            if len(self._dvue_catalog) > n_before:
+                added_paths.append(path)
+                logger.info(
+                    "add_source_files: added %d refs from %s",
+                    len(self._dvue_catalog) - n_before,
+                    path,
+                )
+
+        return added_paths
+
 
 def build_map(time, gdf, df=None, var=""):
     if var == "diversion":
