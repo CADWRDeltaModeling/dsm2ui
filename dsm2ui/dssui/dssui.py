@@ -214,8 +214,6 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         self.station_id_column = kwargs.pop(
             "station_id_column", "B"
         )  # The column in the data catalog that contains the station id
-        if len(dssfiles) == 0:
-            raise ValueError("At least one DSS file is required")
         self.dssfiles = dssfiles
         dfcats = []
         dssfh = {}
@@ -229,8 +227,12 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
             dfcats.append(dfcat)
         self.dssfh = dssfh
         self.dsscats = dsscats
-        self.dfcat = pd.concat(dfcats)
-        self.dfcat = self.dfcat.drop_duplicates().reset_index(drop=True)
+        if dfcats:
+            self.dfcat = pd.concat(dfcats).drop_duplicates().reset_index(drop=True)
+        else:
+            # No files supplied — start with an empty catalog; files can be
+            # added later via drag-and-drop or the "Add Files" toolbar button.
+            self.dfcat = pd.DataFrame(columns=["A", "B", "C", "D", "E", "F", "filename"])
         # add in the geo locations
         if self.geo_locations is not None:
             # DSS names are always in upper case
@@ -324,6 +326,8 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         Calculate time range from the data catalog
         """
         if self.time_range is None:  # guess from catalog of DSS files
+            if "D" not in dfcat.columns or dfcat.empty:
+                return None
             dftw = dfcat.D.str.split("-", expand=True)
             dftw.columns = ["Tmin", "Tmax"]
             dftw["Tmin"] = pd.to_datetime(dftw["Tmin"].str.strip(), format="%d%b%Y")
