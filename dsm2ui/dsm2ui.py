@@ -1560,7 +1560,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
                         name=ref_name,
                         source=path,
                         cache=True,
-                        **{k: row[k] for k in dfnew.columns if k in row.index},
+                        **{k: row[k] for k in dfnew.columns if k in row.index and k != "source"},
                     )
                     self._dvue_catalog.add(ref)
                 except ValueError:
@@ -2285,7 +2285,7 @@ class DSM2EchoInputUIManager(TimeSeriesDataUIManager):
                         name=ref_name,
                         source=path,
                         cache=True,
-                        **{k: row[k] for k in new_rows.columns},
+                        **{k: row[k] for k in new_rows.columns if k != "source"},
                     )
                     self._dvue_catalog.add(ref)
                 except ValueError:

@@ -362,7 +362,7 @@ class DeltaCDNodesUIManager(tsdataui.TimeSeriesDataUIManager):
                 ref_name = self._ref_name(row)
                 try:
                     from dvue.catalog import DataReference
-                    attrs = {k: v for k, v in row.items() if k != "geometry"}
+                    attrs = {k: v for k, v in row.items() if k not in ("geometry", "source")}
                     ref = DataReference(
                         reader=_reader,
                         name=ref_name,
