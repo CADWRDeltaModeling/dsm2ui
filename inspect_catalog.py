@@ -1,0 +1,27 @@
+﻿import sys
+import pandas as pd
+import os
+print('pandas version:', pd.__version__)
+print('default string dtype:', pd.options.future.infer_string)
+sys.path.insert(0,'d:/dev/dsm2ui')
+sys.path.insert(0,'d:/dev/pydsm')
+from dsm2ui.dsm2ui import DSM2TidefileUIManager
+mgr = DSM2TidefileUIManager([])
+print('Initial get_data_catalog():')
+init_df = mgr.get_data_catalog()
+print('  shape:', init_df.shape)
+print('  columns:', init_df.columns.tolist())
+print()
+mgr.add_source_files(r'D:\delta\dsm2_studies\studies\historical\output\hist_fc_mss.h5')
+print('After add_source_files:')
+df = mgr.get_data_catalog()
+print('  shape:', df.shape)
+print('  columns:', df.columns.tolist())
+print('  dtypes:', df.dtypes.to_dict())
+print()
+new_cols = mgr.get_table_columns()
+print('get_table_columns():', new_cols)
+sliced = df.reindex(columns=new_cols)
+print('sliced dtypes:', sliced.dtypes.to_dict())
+print('sliced head:')
+print(sliced.head(3).to_string())

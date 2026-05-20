@@ -1387,27 +1387,33 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         self.tidefile_map = {
             f: DSM2TidefileUIManager.read_tidefile(f) for f in tidefiles
         }
-        dfcat = pd.concat(
-            [h5.create_catalog() for h5 in self.tidefile_map.values()]
-        )
-        dfcat.reset_index(drop=True, inplace=True)
-        dfcat["geoid"] = dfcat["id"].str.split("_", expand=True).iloc[:, 1]
-        if self.channels is not None:
-            channels = self.channels.copy()
-            channels["id"] = channels["id"].astype("str")
-            channels = channels.rename(columns={"id": "geoid"})
-            dfcat = pd.merge(channels, dfcat, on="geoid", how="right")
+        if self.tidefile_map:
+            dfcat = pd.concat(
+                [h5.create_catalog() for h5 in self.tidefile_map.values()]
+            )
+            dfcat.reset_index(drop=True, inplace=True)
+            dfcat["geoid"] = dfcat["id"].str.split("_", expand=True).iloc[:, 1]
+            if self.channels is not None:
+                channels = self.channels.copy()
+                channels["id"] = channels["id"].astype("str")
+                channels = channels.rename(columns={"id": "geoid"})
+                dfcat = pd.merge(channels, dfcat, on="geoid", how="right")
+            dfcat["station_name"] = dfcat["geoid"].fillna(dfcat["id"])
+            dfcat["source"] = dfcat["filename"]
+            time_ranges = [h5.get_start_end_dates() for h5 in self.tidefile_map.values()]
+            _time_range = (
+                min(pd.to_datetime(t[0]) for t in time_ranges),
+                max(pd.to_datetime(t[1]) for t in time_ranges),
+            )
+        else:
+            # No files supplied — start with an empty catalog; files can be
+            # added later via drag-and-drop or the "Add Files" toolbar button.
+            dfcat = pd.DataFrame(
+                columns=["id", "geoid", "variable", "filename", "station_name", "source"]
+            )
+            _time_range = None
         self.dfcat = dfcat
         self.station_id_column = "geoid"
-        # Add canonical station_name for mixed-catalog compatibility.
-        # source mirrors filename so DataCatalog can auto-compute source_num.
-        self.dfcat["station_name"] = self.dfcat["geoid"].fillna(self.dfcat["id"])
-        self.dfcat["source"] = self.dfcat["filename"]
-        time_ranges = [h5.get_start_end_dates() for h5 in self.tidefile_map.values()]
-        _time_range = (
-            min(pd.to_datetime(t[0]) for t in time_ranges),
-            max(pd.to_datetime(t[1]) for t in time_ranges),
-        )
         # Build DataCatalog backed by TidefileReader (flyweight)
         self._reader = TidefileReader(self.tidefile_map)
         geo_crs = (
@@ -1419,10 +1425,13 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             self.dfcat, self._reader, self._build_ref_key, primary_key=["name"],
             crs=geo_crs, ref_class=DSM2TidefileDataReference,
         )
-        super().__init__(
-            time_range=_time_range,
-            **kwargs,
-        )
+        # Must be initialised before super().__init__() because the base class
+        # calls get_time_range() → get_data_catalog() during __init__.
+        self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
+        super_kwargs = dict(**kwargs)
+        if _time_range is not None:
+            super_kwargs["time_range"] = _time_range
+        super().__init__(**super_kwargs)
         self.color_cycle_column = "id"
         self.dashed_line_cycle_column = "filename"
         self.marker_cycle_column = "variable"
@@ -1430,6 +1439,18 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
     # ------------------------------------------------------------------
     # Catalog / DataReference interface
     # ------------------------------------------------------------------
+
+    def get_data_catalog(self):
+        """Return the cached display DataFrame.
+
+        Rebuilds from the catalog only when its size diverges from the cache —
+        i.e. a math/transform ref was added by TransformToCatalogAction after
+        the last file load.  Raw file adds are handled incrementally via concat
+        inside :meth:`add_source_files`.
+        """
+        if len(self._dvue_catalog) != len(self._display_dfcat):
+            self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
+        return self._display_dfcat
 
     @property
     def data_catalog(self) -> DataCatalog:
@@ -1514,11 +1535,14 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         return ["variable"]
 
     def add_source_files(self, *paths: str) -> list:
-        """Incrementally add one or more HDF5 tidefile paths to the live catalog.
+        """Add one or more HDF5 tidefile paths to the live catalog.
 
         Accepts ``.h5`` or ``.hdf5`` files.  New channel/variable entries are
         appended to the shared :class:`TidefileReader` and
-        :attr:`data_catalog`.
+        :attr:`data_catalog`.  The display DataFrame is rebuilt from the
+        catalog after each successful add — the same path used in
+        :meth:`__init__` — so both loading routes always produce an identical
+        :attr:`_display_dfcat` structure.
 
         Returns a list of paths that produced at least one new entry.
         """
@@ -1530,6 +1554,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             if path in self.tidefile_map:
                 logger.info("add_source_files: already loaded, skipping %s", path)
                 continue
+
             try:
                 h5 = DSM2TidefileUIManager.read_tidefile(path)
             except Exception as exc:
@@ -1546,6 +1571,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
                 logger.error("add_source_files: cannot read catalog of %s: %s", path, exc)
                 continue
 
+            # Enrich — identical steps to __init__.
             dfnew.reset_index(drop=True, inplace=True)
             dfnew["geoid"] = dfnew["id"].str.split("_", expand=True).iloc[:, 1]
             dfnew["station_name"] = dfnew["geoid"].fillna(dfnew["id"])
@@ -1570,7 +1596,13 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
                         "add_source_files: skipping ref %s: %s", ref_name, exc
                     )
 
-            if len(self._dvue_catalog) > n_before:
+            n_added = len(self._dvue_catalog) - n_before
+            if n_added > 0:
+                # Rebuild display DataFrame from the catalog — same path as
+                # __init__.  Called from the background thread (_do_add in
+                # session_persistence) so it does not block the IOLoop.
+                self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
+
                 # Expand time range to cover new tidefile.
                 try:
                     t0, t1 = h5.get_start_end_dates()
@@ -1583,7 +1615,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
                 added_paths.append(path)
                 logger.info(
                     "add_source_files: added %d refs from %s",
-                    len(self._dvue_catalog) - n_before,
+                    n_added,
                     path,
                 )
 
