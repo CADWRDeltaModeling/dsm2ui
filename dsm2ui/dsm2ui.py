@@ -96,6 +96,7 @@ import pyhecdss as dss
 from vtools.functions.filter import cosine_lanczos
 from pydsm.analysis.dsm2study import *
 from dvue.catalog import DataReferenceReader, DataReference, DataCatalog, build_catalog_from_dataframe
+from dvue.registry import ReaderRegistry
 from dvue.dataui import full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager, TimeSeriesPlotAction
 
@@ -104,23 +105,60 @@ logger = logging.getLogger(__name__)
 
 
 class DSM2DSSReader(DataReferenceReader):
-    """Reads a DSM2 DSS output channel time series via pydsm.dss.
+    """Reads a DSM2 DSS output channel time series via pyhecdss.
 
-    The full series is loaded and the :class:`~dvue.catalog.DataReference`
-    cache stores the result keyed by ``time_range``.  When ``time_range`` is
-    provided the returned DataFrame is sliced to ``[start:end]`` before being
-    cached, so different windows are stored independently without reloading.
+    One instance per DSS file, cached by :class:`~dvue.registry.ReaderRegistry`
+    under key ``("dsm2_dss", source)``.
+
+    Parameters
+    ----------
+    source : str
+        Absolute path to the DSS file.
     """
+
+    #: C-part values treated as time-series output channels for scan().
+    _OUTPUT_CPARTS = {"FLOW", "STAGE", "EC", "VELOCITY", "SALINITY", "TEMP", "DO"}
+
+    def __init__(self, source: str) -> None:
+        self._source = source
+
+    @classmethod
+    def scan(cls, path: str) -> list:
+        """Open *path* and return one :class:`DSM2DSSDataReference` per output-channel path."""
+        import pandas as pd
+        refs = []
+        with dss.DSSFile(path) as f:
+            df_cat = f.read_catalog()
+        if df_cat is None or df_cat.empty:
+            return refs
+        if "C" in df_cat.columns:
+            df_cat = df_cat[df_cat["C"].str.upper().isin(cls._OUTPUT_CPARTS)]
+        for _, row in df_cat.iterrows():
+            b_part = str(row.get("B", ""))
+            c_part = str(row.get("C", ""))
+            interval = str(row.get("E", ""))
+            ref = DSM2DSSDataReference(
+                source=path,
+                name=f"{path}::{b_part}/{c_part}",
+                cache=True,
+                NAME=b_part,
+                VARIABLE=c_part,
+                FILE=path,
+                INTERVAL=interval,
+                station_name=b_part,
+                variable=c_part.lower(),
+            )
+            refs.append(ref)
+        return refs
 
     def load(self, **attributes) -> "pd.DataFrame":
         import pandas as pd
-        dssfile = attributes["FILE"]
         name = attributes["NAME"]
         variable = attributes["VARIABLE"]
         time_range = attributes.get("time_range")
         pathname = f"//{name}/{variable}////"
         try:
-            df, unit, ptype = next(dss.get_matching_ts(dssfile, pathname))
+            df, unit, ptype = next(dss.get_matching_ts(self._source, pathname))
             df.attrs["unit"] = unit
             df.attrs["ptype"] = ptype
             if time_range is not None and len(time_range) == 2:
@@ -129,11 +167,11 @@ class DSM2DSSReader(DataReferenceReader):
                 df = df.loc[start:end]
             return df
         except StopIteration:
-            logger.warning("No matching DSS time series for %s in %s", pathname, dssfile)
+            logger.warning("No matching DSS time series for %s in %s", pathname, self._source)
             return pd.DataFrame()
 
     def __repr__(self) -> str:
-        return "DSM2DSSReader()"
+        return f"DSM2DSSReader(source={self._source!r})"
 
 
 def _smart_title(s: str) -> str:
@@ -213,7 +251,6 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
 
         # Build DataCatalog before super().__init__() because the parent
         # calls get_data_catalog() during initialisation.
-        _reader = DSM2DSSReader()
         geo_crs = (
             str(output_channels.crs)
             if hasattr(output_channels, "crs") and output_channels.crs is not None
@@ -227,7 +264,7 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         _oc["variable"] = _oc["VARIABLE"].str.lower()
         _oc["source"] = _oc["FILE"]
         self._dvue_catalog = build_catalog_from_dataframe(
-            _oc, _reader, self._ref_name, primary_key=["name"], crs=geo_crs,
+            _oc, None, self._ref_name, primary_key=["name"], crs=geo_crs,
             ref_class=DSM2DSSDataReference,
         )
 
@@ -1257,11 +1294,12 @@ class DSM2TidefileXsectUIManager(param.Parameterized):
 
 
 class TidefileReader(DataReferenceReader):
-    """Reads a single DSM2 tidefile time series given catalog-entry attributes.
+    """Reads a DSM2 HDF5 tidefile (HydroH5 or QualH5) time series.
 
-    A single ``TidefileReader`` instance is shared across all
-    :class:`~dvue.catalog.DataReference` objects that point to the same
-    set of open tidefile handles (flyweight pattern).
+    One instance per source file, cached by
+    :class:`~dvue.registry.ReaderRegistry` under key
+    ``("dsm2_hdf5", source)``.  The explicit flyweight ``tidefile_map``
+    pattern is replaced by the registry-level per-source instance cache.
 
     When ``time_range`` is present in the attributes passed by
     :meth:`~dvue.catalog.DataReference.getData`, it is converted to a DSM2
@@ -1271,12 +1309,42 @@ class TidefileReader(DataReferenceReader):
 
     Parameters
     ----------
-    tidefile_map : dict
-        ``{filepath: HydroH5 or QualH5}`` — open tidefile handles.
+    source : str
+        Absolute path to the HDF5 tidefile.
     """
 
-    def __init__(self, tidefile_map: dict) -> None:
-        self._tidefile_map = tidefile_map
+    def __init__(self, source: str) -> None:
+        self._source = source
+        # Forward reference to DSM2TidefileUIManager.read_tidefile — safe
+        # because __init__ is called at runtime, after that class is defined.
+        self._h5 = DSM2TidefileUIManager.read_tidefile(source)
+
+    @classmethod
+    def scan(cls, path: str) -> list:
+        """Open *path* and return one :class:`DSM2TidefileDataReference` per catalog entry.
+
+        Emits all file-available attributes (id, variable, unit, filename).
+        Manager-level enrichment (geoid, station_name, geometry) is applied
+        by ``add_source_files()`` via ``ref.set_attribute()`` after this call.
+        """
+        h5 = DSM2TidefileUIManager.read_tidefile(path)
+        try:
+            dfcat = h5.create_catalog()
+        except Exception as exc:
+            raise RuntimeError(
+                f"TidefileReader.scan: cannot read catalog of {path!r}"
+            ) from exc
+        refs = []
+        for _, row in dfcat.iterrows():
+            attrs = {k: v for k, v in row.items()}
+            ref = DSM2TidefileDataReference(
+                source=path,
+                name=f'{path}::{attrs["id"]}/{attrs["variable"]}',
+                cache=True,
+                **attrs,
+            )
+            refs.append(ref)
+        return refs
 
     @staticmethod
     def _to_time_window(time_range) -> str:
@@ -1288,20 +1356,18 @@ class TidefileReader(DataReferenceReader):
         return "-".join(x.strftime("%d%b%Y") for x in xtime_range)
 
     def load(self, **attributes) -> pd.DataFrame:
-        filename = attributes["filename"]
         variable = attributes["variable"]
         id_ = attributes["id"]
         time_range = attributes.get("time_range")
         time_window = self._to_time_window(time_range) if time_range is not None else None
-        entry = {"filename": filename, "variable": variable, "id": id_}
-        h5 = self._tidefile_map[filename]
-        df = h5.get_data_for_catalog_entry(entry, time_window)
+        entry = {"filename": self._source, "variable": variable, "id": id_}
+        df = self._h5.get_data_for_catalog_entry(entry, time_window)
         if df is not None and not df.empty:
             df.attrs["unit"] = attributes.get("unit", "")
         return df if df is not None else pd.DataFrame()
 
     def __repr__(self) -> str:
-        return f"TidefileReader(files={list(self._tidefile_map.keys())!r})"
+        return f"TidefileReader(source={self._source!r})"
 
 
 class DSM2TidefileDataReference(DataReference):
@@ -1414,15 +1480,14 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             _time_range = None
         self.dfcat = dfcat
         self.station_id_column = "geoid"
-        # Build DataCatalog backed by TidefileReader (flyweight)
-        self._reader = TidefileReader(self.tidefile_map)
+        # Build DataCatalog; reader resolved via ReaderRegistry at load time.
         geo_crs = (
             str(self.channels.crs)
             if self.channels is not None and hasattr(self.channels, "crs")
             else None
         )
         self._dvue_catalog = build_catalog_from_dataframe(
-            self.dfcat, self._reader, self._build_ref_key, primary_key=["name"],
+            self.dfcat, None, self._build_ref_key, primary_key=["name"],
             crs=geo_crs, ref_class=DSM2TidefileDataReference,
         )
         # Must be initialised before super().__init__() because the base class
@@ -1562,8 +1627,6 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
                 continue
 
             self.tidefile_map[path] = h5
-            # Update the shared reader so existing refs still work.
-            self._reader._tidefile_map[path] = h5
 
             try:
                 dfnew = h5.create_catalog()
@@ -1582,7 +1645,6 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
                 ref_name = self._build_ref_key(row)
                 try:
                     ref = DSM2TidefileDataReference(
-                        reader=self._reader,
                         name=ref_name,
                         source=path,
                         cache=True,
@@ -2566,3 +2628,12 @@ def show_dsm2_tidefile_xsect_ui(tidefile):
 
     # Show the panel
     panel.show()
+
+
+# ---------------------------------------------------------------------------
+# Reader registry — module-level registration
+# ---------------------------------------------------------------------------
+# Registered here (after class definitions) so the classes are fully defined
+# when register() is called and the registry is populated at import time.
+ReaderRegistry.register("dsm2_hdf5", TidefileReader, extensions=[".h5", ".hdf5"])
+ReaderRegistry.register("dsm2_dss", DSM2DSSReader, extensions=[".dss"])

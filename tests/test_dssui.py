@@ -185,11 +185,11 @@ class TestDSSDataUIManagerCacheClear:
 
 class TestDSM2DSSReaderStandalone:
     def test_reader_uses_file_attribute(self):
-        """DSM2DSSReader must forward FILE to locate the correct file."""
+        """DSM2DSSReader uses self._source (set at construction) to locate the file."""
         from dsm2ui.dsm2ui import DSM2DSSReader
         from unittest.mock import patch, MagicMock
 
-        reader = DSM2DSSReader()
+        reader = DSM2DSSReader("study_a.dss")
         mock_df = pd.DataFrame({"value": [1.0, 2.0]})
         mock_df.attrs["unit"] = "cfs"
         mock_df.attrs["ptype"] = "inst-val"
@@ -198,27 +198,29 @@ class TestDSM2DSSReaderStandalone:
         with patch("dsm2ui.dsm2ui.dss.get_matching_ts", return_value=iter([mock_ts])) as mock_get:
             result = reader.load(FILE="study_a.dss", NAME="STA001", VARIABLE="FLOW")
             mock_get.assert_called_once()
-            # Confirm FILE was forwarded (first positional arg)
+            # Confirm self._source is forwarded (first positional arg), not attributes["FILE"]
             call_args = mock_get.call_args
             assert call_args[0][0] == "study_a.dss"
 
     def test_two_files_different_refs_via_build_catalog(self):
         """Entries for same NAME/VARIABLE in two different FILE values
-        must both appear in the catalog (no silent deduplication)."""
-        from dsm2ui.dsm2ui import DSM2DSSReader
+        must both appear in the catalog (no silent deduplication).
+        Uses reader=None (registry-based loading) since each file gets its
+        own reader instance via ReaderRegistry at load time."""
         from dvue.catalog import build_catalog_from_dataframe, DataCatalog
 
-        reader = DSM2DSSReader()
         rows = [
             {"FILE": "study_a.dss", "NAME": "STA001", "VARIABLE": "FLOW",
-             "CHAN_NO": 1, "DISTANCE": 0.0, "INTERVAL": "15min", "PERIOD_OP": "INST"},
+             "CHAN_NO": 1, "DISTANCE": 0.0, "INTERVAL": "15min", "PERIOD_OP": "INST",
+             "source": "study_a.dss"},
             {"FILE": "study_b.dss", "NAME": "STA001", "VARIABLE": "FLOW",
-             "CHAN_NO": 1, "DISTANCE": 0.0, "INTERVAL": "15min", "PERIOD_OP": "INST"},
+             "CHAN_NO": 1, "DISTANCE": 0.0, "INTERVAL": "15min", "PERIOD_OP": "INST",
+             "source": "study_b.dss"},
         ]
         df = pd.DataFrame(rows)
 
         def ref_name(row):
             return f'{row["FILE"]}::{row["NAME"]}/{row["VARIABLE"]}/{row["CHAN_NO"]}/{row["DISTANCE"]}'
 
-        cat = build_catalog_from_dataframe(df, reader, ref_name)
+        cat = build_catalog_from_dataframe(df, None, ref_name)
         assert len(cat) == 2, "Both FILE variants must produce separate DataReferences"
