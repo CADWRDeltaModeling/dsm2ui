@@ -97,6 +97,7 @@ from vtools.functions.filter import cosine_lanczos
 from pydsm.analysis.dsm2study import *
 from dvue.catalog import DataReferenceReader, DataReference, DataCatalog, build_catalog_from_dataframe
 from dvue.registry import ReaderRegistry
+from dvue.registry_ui import RegistryUIManager, RegistryPlotAction
 from dvue.dataui import full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager, TimeSeriesPlotAction
 
@@ -2637,3 +2638,97 @@ def show_dsm2_tidefile_xsect_ui(tidefile):
 # when register() is called and the registry is populated at import time.
 ReaderRegistry.register("dsm2_hdf5", TidefileReader, extensions=[".h5", ".hdf5"])
 ReaderRegistry.register("dsm2_dss", DSM2DSSReader, extensions=[".dss"])
+
+
+# ---------------------------------------------------------------------------
+# DSM2CombinedUIManager — mixed HDF5 + DSS catalog via ReaderRegistry
+# ---------------------------------------------------------------------------
+
+class _CombinedPlotAction(RegistryPlotAction):
+    """DSM2-specific plot action: applies _smart_title to variable names."""
+
+    def format_variable(self, variable: str) -> str:
+        return _smart_title(variable)
+
+
+class DSM2CombinedUIManager(RegistryUIManager):
+    """Mixed DSM2 HDF5 tidefile + DSS output viewer.
+
+    Thin subclass of :class:`~dvue.registry_ui.RegistryUIManager` that adds:
+
+    * DSM2-specific ``normalize_ref`` — prefers ``geoid`` (human-readable
+      channel ID) over raw ``id`` when mapping to ``station``.
+    * ``on_file_added`` — expands ``time_range`` from HDF5 ``get_start_end_dates()``.
+    * DSM2 plot action with ``_smart_title`` variable formatting.
+
+    Any file type registered with :class:`~dvue.registry.ReaderRegistry` is
+    accepted; currently ``.h5`` / ``.hdf5`` and ``.dss`` are registered.
+    """
+
+    def normalize_ref(self, ref):
+        if not ref._attributes.get("station"):
+            station = (
+                ref._attributes.get("geoid")
+                or ref._attributes.get("id")
+                or ref._attributes.get("NAME")
+                or ref._attributes.get("name", "")
+            )
+            ref.set_attribute("station", str(station))
+        if not ref._attributes.get("variable"):
+            var = ref._attributes.get("VARIABLE", "")
+            ref.set_attribute("variable", str(var).lower())
+
+    def on_file_added(self, path, refs):
+        import os as _os
+        if _os.path.splitext(path)[1].lower() in (".h5", ".hdf5"):
+            try:
+                h5 = ReaderRegistry.get_reader("dsm2_hdf5", path)._h5
+                t0, t1 = h5.get_start_end_dates()
+                cur = self.time_range or (None, None)
+                new_start = min(pd.to_datetime(t0), cur[0]) if cur[0] else pd.to_datetime(t0)
+                new_end = max(pd.to_datetime(t1), cur[1]) if cur[1] else pd.to_datetime(t1)
+                self.time_range = (new_start, new_end)
+            except Exception:
+                pass
+
+    def _make_plot_action(self):
+        return _CombinedPlotAction()
+
+
+@click.command()
+@click.argument("files", nargs=-1, type=click.Path(dir_okay=False, readable=True))
+@click.option(
+    "--port",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Port for the web server (0 = random available port).",
+)
+@click.option(
+    "--desktop",
+    is_flag=True,
+    default=False,
+    help="Open in a native desktop window (requires pywebview).",
+)
+def show_dsm2_combined_ui(files, port=0, desktop=False):
+    """Mixed HDF5 tidefile + DSS output viewer with drag-and-drop support.
+
+    FILES may be any mix of ``.h5`` / ``.hdf5`` tidefiles and ``.dss`` output
+    files; all types are auto-detected via the reader registry.  Omit FILES
+    to start with an empty catalog and add files via drag-and-drop.
+
+    Examples::
+
+        dsm2ui ui combined run.h5
+        dsm2ui ui combined run.h5 hist_qual.dss hist_hydro.dss
+        dsm2ui ui combined           # empty start, drag-and-drop files in
+    """
+    from dsm2ui.session import serve_session_app, serve_desktop_app
+
+    file_list = list(files)
+
+    def build_manager():
+        return DSM2CombinedUIManager(files=file_list)
+
+    _serve = serve_desktop_app if desktop else serve_session_app
+    _serve(build_manager, title="DSM2 Combined UI", port=port)

@@ -96,8 +96,9 @@ main.add_command(calib)
     lazy_subcommands={
         "input":  ("dsm2ui.dsm2ui", "show_dsm2_input_ui",            "Interactive viewer for DSM2 input boundary condition time series"),
         "output": ("dsm2ui.dsm2ui", "show_dsm2_output_ui",         "Interactive map + time-series viewer for DSM2 output files"),
-        "tide":   ("dsm2ui.dsm2ui", "show_dsm2_tidefile_ui",        "Interactive map + time-series viewer for DSM2 HDF5 tidefiles"),
-        "xsect":  ("dsm2ui.dsm2ui", "show_dsm2_tidefile_xsect_ui",  "Cross-section viewer for a DSM2 tidefile"),
+        "tide":     ("dsm2ui.dsm2ui", "show_dsm2_tidefile_ui",       "Interactive map + time-series viewer for DSM2 HDF5 tidefiles"),
+        "xsect":    ("dsm2ui.dsm2ui", "show_dsm2_tidefile_xsect_ui", "Cross-section viewer for a DSM2 tidefile"),
+        "combined": ("dsm2ui.dsm2ui", "show_dsm2_combined_ui",       "Mixed HDF5 + DSS viewer with drag-and-drop support"),
     },
 )
 def ui_group():
