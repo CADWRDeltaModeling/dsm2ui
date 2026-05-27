@@ -294,8 +294,8 @@ class DSM2BCFlowLoader:
 # ---------------------------------------------------------------------------
 # Register readers with the global registry
 # ---------------------------------------------------------------------------
-ReaderRegistry.register(DSM2EchoFileReader, ref_type="dsm2_echo_inp", extensions=[".inp"])
-ReaderRegistry.register(DSM2BCFlowLoader, ref_type="dsm2_bc_flow")
+ReaderRegistry.register("dsm2_echo_inp", DSM2EchoFileReader, extensions=[".inp"])
+ReaderRegistry.register("dsm2_bc_flow", DSM2BCFlowLoader)
 
 
 # ---------------------------------------------------------------------------

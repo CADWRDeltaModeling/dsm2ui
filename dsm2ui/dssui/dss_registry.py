@@ -189,7 +189,7 @@ class DSSRegistryReader:
 
 
 # Register with NO extension entry — DSSRegistryUIManager calls scan() directly.
-ReaderRegistry.register(DSSRegistryReader, ref_type="dss")
+ReaderRegistry.register("dss", DSSRegistryReader)
 
 
 # ---------------------------------------------------------------------------
