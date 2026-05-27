@@ -56,6 +56,9 @@ Homepage = "https://github.com/CADWRDeltaModeling/dsm2ui"
 [project.scripts]
 dsm2ui = "dsm2ui.cli:main"
 
+[project.entry-points."dvue.plugins"]
+dsm2ui = "dsm2ui.readers:register_readers"
+
 [tool.setuptools]
 zip-safe = false
 include-package-data = true

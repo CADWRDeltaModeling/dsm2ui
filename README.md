@@ -38,6 +38,25 @@ pip install -e .
 - `vtools` – Time series utilities for California water resources
 - `pydsm` – Python interface to DSM2 tidefiles
 
+## DVue Plugin Registration
+
+When installed, **dsm2ui registers automatically as a dvue plugin** via setuptools entry points. This means:
+
+- All dsm2ui readers (HDF5 tidefiles, DSS output, echo files) are auto-discovered by `dvue ui`
+- No need to pass `--plugin dsm2ui.dsm2ui` on the command line
+- File extensions (`.h5`, `.dss`, `.inp`) are immediately available for drag-and-drop
+
+Example:
+```bash
+# Readers auto-discovered, no --plugin needed
+dvue ui run.h5 hist_qual.dss
+
+# List all available plugins and readers
+dvue list-plugins
+```
+
+See [dvue plugin entry points documentation](.github/plugin-entry-points.md) for details.
+
 ## Usage
 
 ### Python API
@@ -137,9 +156,13 @@ dsm2ui ui echo output/run_hydro_echo.inp --desktop
 dsm2ui ui echo output/run_hydro_echo.inp --channel-file my_channels.geojson
 ```
 
-You can also launch from the generic `dvue ui` entry point by passing the plugin module:
+You can also launch from the generic `dvue ui` entry point. Since dsm2ui registers as a dvue plugin, readers are auto-discovered:
 
 ```bash
+# With auto-discovery (no --plugin needed)
+dvue ui output/run_hydro_echo.inp --desktop
+
+# Or explicitly load the plugin (optional, for development)
 dvue ui --plugin dsm2ui.echo_plugin output/run_hydro_echo.inp --desktop
 ```
 
@@ -173,9 +196,13 @@ dsm2ui ui dss output.dss --geo-file stations.geojson --geo-id-column STATION_ID
 dsm2ui ui dss output.dss --desktop
 ```
 
-Alternatively, launch via the generic dvue entry point:
+Alternatively, launch via the generic `dvue ui` entry point. Since dsm2ui registers as a dvue plugin, the reader is auto-discovered:
 
 ```bash
+# With auto-discovery (no --plugin needed)
+dvue ui output.dss
+
+# Or explicitly load the plugin (optional, for development)
 dvue ui --plugin dsm2ui.dssui.dss_registry output.dss
 ```
 
