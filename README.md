@@ -51,11 +51,17 @@ Example:
 # Readers auto-discovered, no --plugin needed
 dvue ui run.h5 hist_qual.dss
 
+# Force per-file reader when multiple readers share .dss
+dvue ui dsm2_dss:hist_fc_mss_hydro.dss dss:other_generic.dss
+
 # List all available plugins and readers
 dvue list-plugins
+
+# Diagnose plugin/registry issues
+dvue diagnose
 ```
 
-See [dvue plugin entry points documentation](.github/plugin-entry-points.md) for details.
+See [dvue plugin entry points documentation](https://github.com/CADWRDeltaModeling/dvue/blob/main/.github/plugin-entry-points.md) for details.
 
 ## Usage
 
@@ -162,6 +168,9 @@ You can also launch from the generic `dvue ui` entry point. Since dsm2ui registe
 # With auto-discovery (no --plugin needed)
 dvue ui output/run_hydro_echo.inp --desktop
 
+# Force echo reader explicitly for this file (optional)
+dvue ui dsm2_echo_inp:output/run_hydro_echo.inp --desktop
+
 # Or explicitly load the plugin (optional, for development)
 dvue ui --plugin dsm2ui.echo_plugin output/run_hydro_echo.inp --desktop
 ```
@@ -201,6 +210,12 @@ Alternatively, launch via the generic `dvue ui` entry point. Since dsm2ui regist
 ```bash
 # With auto-discovery (no --plugin needed)
 dvue ui output.dss
+
+# Force generic DSS reader for this file
+dvue ui dss:output.dss
+
+# Force DSM2-filtered DSS reader for this file
+dvue ui dsm2_dss:output.dss
 
 # Or explicitly load the plugin (optional, for development)
 dvue ui --plugin dsm2ui.dssui.dss_registry output.dss
