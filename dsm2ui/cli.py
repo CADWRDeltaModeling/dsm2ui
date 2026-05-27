@@ -99,6 +99,8 @@ main.add_command(calib)
         "tide":     ("dsm2ui.dsm2ui", "show_dsm2_tidefile_ui",       "Interactive map + time-series viewer for DSM2 HDF5 tidefiles"),
         "xsect":    ("dsm2ui.dsm2ui", "show_dsm2_tidefile_xsect_ui", "Cross-section viewer for a DSM2 tidefile"),
         "combined": ("dsm2ui.dsm2ui", "show_dsm2_combined_ui",       "Mixed HDF5 + DSS viewer with drag-and-drop support"),
+        "echo":     ("dsm2ui.echo_plugin", "show_dsm2_echo_ui",      "Input+Output viewer from DSM2 echo .inp file"),
+        "dss":      ("dsm2ui.dssui.dss_cli", "show_dss_ui",          "Generic HEC-DSS file browser"),
     },
 )
 def ui_group():

@@ -274,6 +274,7 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         self.color_cycle_column = "NAME"
         self.dashed_line_cycle_column = "FILE"
         self.marker_cycle_column = "VARIABLE"
+        self.crs = ccrs.UTM(10)
 
     @staticmethod
     def _ref_name(row) -> str:
@@ -1501,6 +1502,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         self.color_cycle_column = "id"
         self.dashed_line_cycle_column = "filename"
         self.marker_cycle_column = "variable"
+        self.crs = ccrs.epsg("26910")
 
     # ------------------------------------------------------------------
     # Catalog / DataReference interface
@@ -2162,7 +2164,7 @@ def show_dsm2_output_ui(echo_files, channel_shapefile=None, clear_cache=False, p
         return plotter
 
     _serve = serve_desktop_app if desktop else serve_session_app
-    _serve(build_manager, title="DSM2 Output UI", port=port, crs=ccrs.UTM(10))
+    _serve(build_manager, title="DSM2 Output UI", port=port)
 
 
 # ---------------------------------------------------------------------------
@@ -2595,13 +2597,7 @@ def show_dsm2_tidefile_ui(tidefiles, channel_file=None, clear_cache=False, port=
         return mgr
 
     _serve = serve_desktop_app if desktop else serve_session_app
-    _serve(
-        build_manager,
-        title="DSM2 Tidefile UI",
-        port=port,
-        crs=ccrs.epsg("26910"),
-        station_id_column="geoid",
-    )
+    _serve(build_manager, title="DSM2 Tidefile UI", port=port)
 
 
 @click.command()
