@@ -7,7 +7,9 @@ Python user interface and analysis tools for DSM2 (Delta Simulation Model II).
 This package provides interactive UI components and analysis utilities for DSM2 hydro/water-quality modeling, including:
 
 - **`dsm2ui.dsm2ui`** – Interactive map and time-series viewer for DSM2 output channels and tidefiles
+- **`dsm2ui.echo_plugin`** – Combined input+output viewer from a DSM2 echo `.inp` file (registry-based)
 - **`dsm2ui.dssui`** – Generic HEC-DSS file browser and plotter
+- **`dsm2ui.dssui.dss_registry`** – Registry-based DSS browser (drag-and-drop, dvue plugin API)
 - **`dsm2ui.calib.postpro_dsm2`** – Calibration plot generation and post-processing
 - **`dsm2ui.deltacdui`** – DeltaCD (crop model) netCDF data UI
 - **`dsm2ui.dsm2gis`** – GIS utilities for DSM2 channel geometry
@@ -108,6 +110,77 @@ Show a cross-section viewer for a DSM2 HDF5 tidefile.
 dsm2ui ui xsect hydro.h5
 ```
 
+#### `ui echo`
+
+Combined **input + output viewer** loaded from one or more DSM2 echo `.inp` files.  Presents boundary-condition input rows (all `BOUNDARY_FLOW`, `BOUNDARY_STAGE`, `SOURCE_FLOW`, `INPUT_GATE`, … tables) and `OUTPUT_CHANNEL` rows in a **single unified catalog**.  Station locations are auto-loaded from the bundled DSM2 channel centre-line GeoJSON.
+
+Drop additional `.inp` files onto the running window to merge more runs into the same catalog.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `ECHO_INP...` | paths (zero or more) | — | DSM2 echo `.inp` file(s) |
+| `--channel-file FILE` | path | bundled centerlines GeoJSON | Override the default channel geometry |
+| `--port PORT` | int | `5006` | Port for the Panel server |
+| `--desktop` | flag | off | Open in a native OS window instead of a browser tab |
+
+```bash
+# Quickest start — auto-loads bundled geometry
+dsm2ui ui echo output/run_hydro_echo.inp
+
+# Load hydro + qual echoes together
+dsm2ui ui echo output/run_hydro_echo.inp output/run_qual_echo.inp
+
+# Open in a desktop window
+dsm2ui ui echo output/run_hydro_echo.inp --desktop
+
+# Use a custom channel geometry
+dsm2ui ui echo output/run_hydro_echo.inp --channel-file my_channels.geojson
+```
+
+You can also launch from the generic `dvue ui` entry point by passing the plugin module:
+
+```bash
+dvue ui --plugin dsm2ui.echo_plugin output/run_hydro_echo.inp --desktop
+```
+
+---
+
+#### `ui dss`
+
+Generic **HEC-DSS file browser** built on the dvue registry pattern.  Enumerates every DSS path in the file and presents them as a browseable catalog.  Optionally loads station geometry for map display.
+
+Drop additional `.dss` files onto the running window to merge them into the same catalog.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `DSS_FILE...` | paths (zero or more) | — | HEC-DSS file(s) to browse |
+| `--geo-file FILE` | path | — | GeoJSON / CSV / shapefile with station geometry |
+| `--geo-id-column COL` | string | `station_id` | Column in the geo file matching DSS B-part station names |
+| `--port PORT` | int | `5006` | Port for the Panel server |
+| `--desktop` | flag | off | Open in a native OS window |
+
+```bash
+# Browse a DSS file (table only, no map)
+dsm2ui ui dss output/hist_qual.dss
+
+# Multiple files merged into one catalog
+dsm2ui ui dss base.dss variation.dss
+
+# With station geometry for map display
+dsm2ui ui dss output.dss --geo-file stations.geojson --geo-id-column STATION_ID
+
+# Desktop window
+dsm2ui ui dss output.dss --desktop
+```
+
+Alternatively, launch via the generic dvue entry point:
+
+```bash
+dvue ui --plugin dsm2ui.dssui.dss_registry output.dss
+```
+
+---
+
 #### `ui map`
 
 Show an interactive DSM2 network map colored by Manning's n, dispersion, or length. One or more echo files may be supplied; multiple files each get their own map panel stacked vertically.
@@ -137,21 +210,9 @@ dsm2ui ui map hydro_echo.inp -b base_echo.inp -c ALL
 dsm2ui ui map hydro_echo.inp --node nodes.geojson
 ```
 
-#### `dss-ui`
-
-Generic HEC-DSS file browser and plotter. Optionally overlay station locations from a GeoJSON file.
-
-| Argument / Option | Type | Default | Description |
-|---|---|---|---|
-| `DSSFILES...` | paths (one or more) | — | HEC-DSS file(s) to browse |
-| `--location-file FILE` | path | — | GeoJSON with station locations (`lat`/`lon` columns) |
-| `--location-id-column COL` | string | `station_id` | Column in location file matching DSS station IDs |
-| `--station-id-column COL` | string | `B` | DSS pathname part used as station identifier |
-
-```bash
-dsm2ui dss-ui output.dss
-dsm2ui dss-ui output.dss --location-file stations.geojson
-```
+> **Note:** `dsm2ui dss-ui` has been superseded by [`dsm2ui ui dss`](#ui-dss), which uses the
+> dvue registry pattern and supports drag-and-drop file loading.  The old command is still
+> functional but may be removed in a future release.
 
 ---
 
