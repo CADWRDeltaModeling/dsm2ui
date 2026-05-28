@@ -22,9 +22,10 @@ pn.extension()
 import pyhecdss as dss
 from vtools.functions.filter import cosine_lanczos
 
-from dvue.catalog import DataReferenceReader, DataReference, DataCatalog, build_catalog_from_dataframe
+from dvue.catalog import DataReference, DataCatalog
 from dvue.dataui import DataUI, full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager, TimeSeriesPlotAction
+from dsm2ui.dssui.dss_registry import DSSRegistryReader
 
 logger = logging.getLogger(__name__)
 
@@ -127,77 +128,25 @@ class DSSTimeSeriesPlotAction(TimeSeriesPlotAction):
         return " ".join(parts) if parts else str(v)
 
 
-class DSSReader(DataReferenceReader):
-    """Reads a single DSS time series given DSS path-part attributes.
+class DSSReader(DSSRegistryReader):
+    """Deprecated alias for backward compatibility.
 
-    A single ``DSSReader`` instance is shared across all
-    :class:`~dvue.catalog.DataReference` objects that point to the same
-    set of open DSS file handles (flyweight pattern).
-
-    When ``time_range`` is present in the attributes passed by
-    :meth:`~dvue.catalog.DataReference.getData`, only that window is read
-    from disk.  The result is cached per ``(start, end)`` pair inside the
-    ``DataReference``, so repeated requests for the same window avoid
-    re-reading.
-
-    Parameters
-    ----------
-    dssfh_map : dict
-        ``{filepath: pyhecdss.DSSFile}`` — open DSS file handles.
-    dss_catalog_map : dict
-        ``{filepath: DataFrame}`` — per-file catalog DataFrames that include
-        a ``pathname`` column built from the A–F path parts.
+    Use :class:`dsm2ui.dssui.dss_registry.DSSRegistryReader` directly.
     """
 
-    def __init__(self, dssfh_map: dict, dss_catalog_map: dict) -> None:
-        self._dssfh_map = dssfh_map
-        self._dss_catalog_map = dss_catalog_map
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "DSSReader is deprecated; use dsm2ui.dssui.dss_registry.DSSRegistryReader.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
 
-    def load(self, **attributes) -> pd.DataFrame:
-        dssfile = attributes["filename"]
-        a = attributes["A"]
-        b = attributes["B"]
-        c = attributes["C"]
-        e = attributes["E"]
-        f = attributes["F"]
-        pathname = f"/{a}/{b}/{c}//{e}/{f}/"
 
-        dssfh = self._dssfh_map[dssfile]
-        dfcatp = self._dss_catalog_map[dssfile]
-        dfcatp_match = dfcatp[dfcatp["pathname"] == pathname]
-        pathnames = dssfh.get_pathnames(dfcatp_match)
-        if not pathnames:
-            logger.warning("No DSS pathname found for %s", pathname)
-            return pd.DataFrame()
-        actual_pathname = pathnames[0]
+class _RegistryDSSDataReference(DataReference):
+    """Registry-backed DSS reference used by DSSDataUIManager."""
 
-        is_irregular = e.startswith("IR-")
-        time_range = attributes.get("time_range")
-        if time_range is not None:
-            start_str = pd.Timestamp(time_range[0]).strftime("%Y-%m-%d")
-            end_str = pd.Timestamp(time_range[1]).strftime("%Y-%m-%d")
-        else:
-            start_str = "1753-01-01"
-            end_str = "2200-12-31"
-
-        try:
-            if is_irregular:
-                df, unit, ptype = dssfh.read_its(actual_pathname, start_str, end_str)
-            else:
-                df, unit, ptype = dssfh.read_rts(actual_pathname, start_str, end_str)
-            fvi = df.first_valid_index()
-            lvi = df.last_valid_index()
-            if fvi is not None and lvi is not None:
-                df = df[fvi:lvi]
-            df.attrs["unit"] = unit.lower() if unit else unit
-            df.attrs["ptype"] = ptype
-            return df
-        except Exception as exc:
-            logger.error("Error reading DSS pathname %s: %s", actual_pathname, exc)
-            return pd.DataFrame()
-
-    def __repr__(self) -> str:
-        return f"DSSReader(files={list(self._dssfh_map.keys())!r})"
+    ref_type = "dss"
 
 
 class DSSDataUIManager(TimeSeriesDataUIManager):
@@ -214,19 +163,18 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         self.station_id_column = kwargs.pop(
             "station_id_column", "B"
         )  # The column in the data catalog that contains the station id
-        self.dssfiles = dssfiles
         dfcats = []
-        dssfh = {}
-        dsscats = {}
+        self._loaded_paths = set()
         for dssfile in dssfiles:
-            dssfh[dssfile] = dss.DSSFile(dssfile)
-            dfcat = dssfh[dssfile].read_catalog()
-            dsscats[dssfile] = self._build_map_pathname_to_catalog(dfcat)
-            dfcat = dfcat.drop(columns=["T"])
+            fh = dss.DSSFile(dssfile)
+            dfcat = fh.read_catalog()
+            fh.close()
+            if "T" in dfcat.columns:
+                dfcat = dfcat.drop(columns=["T"])
             dfcat["filename"] = dssfile
+            dfcat["source"] = dssfile
             dfcats.append(dfcat)
-        self.dssfh = dssfh
-        self.dsscats = dsscats
+            self._loaded_paths.add(dssfile)
         if dfcats:
             self.dfcat = pd.concat(dfcats).drop_duplicates().reset_index(drop=True)
         else:
@@ -245,11 +193,8 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
                 left_on=self.geo_id_column,
                 right_on=self.station_id_column,
             )
-        self.dssfiles = dssfiles
         self.dfcatpath = self._build_map_pathname_to_catalog(self.dfcat)
 
-        # Build DataCatalog backed by DSSReader references
-        self._reader = DSSReader(self.dssfh, self.dsscats)
         geo_crs = (
             str(self.geo_locations.crs)
             if self.geo_locations is not None and hasattr(self.geo_locations, "crs")
@@ -270,12 +215,24 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         return f'{row["filename"]}::{self.build_pathname(row)}'
 
     def _build_dvue_catalog(self, crs=None) -> DataCatalog:
-        # source mirrors filename so DataCatalog can auto-compute source_num for multi-file display.
-        dfcat = self.dfcat.copy()
-        dfcat["source"] = dfcat["filename"]
-        return build_catalog_from_dataframe(
-            dfcat, self._reader, self.build_ref_key, primary_key=["name"], crs=crs,
-        )
+        catalog = DataCatalog(primary_key=["name"], crs=crs)
+        for _, row in self.dfcat.iterrows():
+            attrs = {k: v for k, v in row.items() if k != "geometry"}
+            if "source" not in attrs:
+                attrs["source"] = attrs.get("filename", "")
+            attrs["station"] = str(attrs.get("B", ""))
+            attrs["variable"] = str(attrs.get("C", "")).lower()
+            attrs["pathname"] = self.build_pathname(row)
+            ref_source = str(attrs.pop("source", ""))
+            ref = _RegistryDSSDataReference(
+                source=ref_source,
+                reader=None,
+                name=self.build_ref_key(row),
+                cache=True,
+                **attrs,
+            )
+            catalog.add(ref)
+        return catalog
 
     @property
     def data_catalog(self) -> DataCatalog:
@@ -300,11 +257,6 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
         if "name" in row.index:
             return self._dvue_catalog.get(row["name"])
         return self._dvue_catalog.get(self.build_ref_key(row))
-
-    def __del__(self):
-        if hasattr(self, "dssfiles"):
-            for dssfile in self.dssfiles:
-                self.dssfh[dssfile].close()
 
     def build_pathname(self, r):
         return f'/{r["A"]}/{r["B"]}/{r["C"]}//{r["E"]}/{r["F"]}/'
@@ -454,7 +406,7 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
             if not str(path).lower().endswith(".dss"):
                 logger.warning("add_source_files: unsupported file type, skipping %s", path)
                 continue
-            if path in self.dssfh:
+            if path in self._loaded_paths:
                 logger.info("add_source_files: already loaded, skipping %s", path)
                 continue
             try:
@@ -469,19 +421,12 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
                 fh.close()
                 continue
 
-            dsscat = self._build_map_pathname_to_catalog(dfcat)
-            dfcat = dfcat.drop(columns=["T"])
+            if "T" in dfcat.columns:
+                dfcat = dfcat.drop(columns=["T"])
             dfcat["filename"] = path
             dfcat["source"] = path
-
-            # Register with the shared reader so existing DataReference
-            # load machinery works without modification.
-            self._reader._dssfh_map[path] = fh
-            self._reader._dss_catalog_map[path] = dsscat
-
-            # Also update manager-level state for consistency.
-            self.dssfh[path] = fh
-            self.dsscats[path] = dsscat
+            self._loaded_paths.add(path)
+            fh.close()
 
             # Merge into the flat catalog DataFrame.
             self.dfcat = pd.concat(
@@ -493,13 +438,16 @@ class DSSDataUIManager(TimeSeriesDataUIManager):
             for _, row in dfcat.iterrows():
                 ref_name = self.build_ref_key(row)
                 try:
-                    from dvue.catalog import DataReference
-                    ref = DataReference(
-                        reader=self._reader,
+                    ref = _RegistryDSSDataReference(
                         name=ref_name,
                         source=path,
+                        reader=None,
                         cache=True,
-                        **{k: row[k] for k in ["filename", "A", "B", "C", "D", "E", "F"]},
+                        filename=row["filename"],
+                        station=str(row.get("B", "")),
+                        variable=str(row.get("C", "")).lower(),
+                        pathname=self.build_pathname(row),
+                        **{k: row[k] for k in ["A", "B", "C", "D", "E", "F"]},
                     )
                     self._dvue_catalog.add(ref)
                 except ValueError:

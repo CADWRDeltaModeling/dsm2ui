@@ -2,6 +2,7 @@
 import panel as pn
 import param
 import colorcet as cc
+import warnings
 
 import cartopy.crs as ccrs
 
@@ -100,79 +101,22 @@ from dvue.registry import ReaderRegistry
 from dvue.registry_ui import RegistryUIManager, RegistryPlotAction
 from dvue.dataui import full_stack
 from dvue.tsdataui import TimeSeriesDataUIManager, TimeSeriesPlotAction
+from dsm2ui.dssui.dss_registry import DSM2DSSReader as _UnifiedDSM2DSSReader
 
 import logging
 logger = logging.getLogger(__name__)
 
 
-class DSM2DSSReader(DataReferenceReader):
-    """Reads a DSM2 DSS output channel time series via pyhecdss.
-
-    One instance per DSS file, cached by :class:`~dvue.registry.ReaderRegistry`
-    under key ``("dsm2_dss", source)``.
-
-    Parameters
-    ----------
-    source : str
-        Absolute path to the DSS file.
-    """
-
-    #: C-part values treated as time-series output channels for scan().
-    _OUTPUT_CPARTS = {"FLOW", "STAGE", "EC", "VELOCITY", "SALINITY", "TEMP", "DO"}
+class DSM2DSSReader(_UnifiedDSM2DSSReader):
+    """Backward-compatible DSM2 reader wrapper over the unified DSS core."""
 
     def __init__(self, source: str) -> None:
-        self._source = source
-
-    @classmethod
-    def scan(cls, path: str) -> list:
-        """Open *path* and return one :class:`DSM2DSSDataReference` per output-channel path."""
-        import pandas as pd
-        refs = []
-        with dss.DSSFile(path) as f:
-            df_cat = f.read_catalog()
-        if df_cat is None or df_cat.empty:
-            return refs
-        if "C" in df_cat.columns:
-            df_cat = df_cat[df_cat["C"].str.upper().isin(cls._OUTPUT_CPARTS)]
-        for _, row in df_cat.iterrows():
-            b_part = str(row.get("B", ""))
-            c_part = str(row.get("C", ""))
-            interval = str(row.get("E", ""))
-            ref = DSM2DSSDataReference(
-                source=path,
-                name=f"{path}::{b_part}/{c_part}",
-                cache=True,
-                NAME=b_part,
-                VARIABLE=c_part,
-                FILE=path,
-                INTERVAL=interval,
-                station_name=b_part,
-                variable=c_part.lower(),
-            )
-            refs.append(ref)
-        return refs
-
-    def load(self, **attributes) -> "pd.DataFrame":
-        import pandas as pd
-        name = attributes["NAME"]
-        variable = attributes["VARIABLE"]
-        time_range = attributes.get("time_range")
-        pathname = f"//{name}/{variable}////"
-        try:
-            df, unit, ptype = next(dss.get_matching_ts(self._source, pathname))
-            df.attrs["unit"] = unit
-            df.attrs["ptype"] = ptype
-            if time_range is not None and len(time_range) == 2:
-                start = pd.Timestamp(time_range[0])
-                end = pd.Timestamp(time_range[1])
-                df = df.loc[start:end]
-            return df
-        except StopIteration:
-            logger.warning("No matching DSS time series for %s in %s", pathname, self._source)
-            return pd.DataFrame()
-
-    def __repr__(self) -> str:
-        return f"DSM2DSSReader(source={self._source!r})"
+        warnings.warn(
+            "dsm2ui.dsm2ui.DSM2DSSReader is a compatibility alias; use dsm2ui.dssui.dss_registry.UnifiedDSSReader-mode APIs.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(source)
 
 
 def _smart_title(s: str) -> str:
