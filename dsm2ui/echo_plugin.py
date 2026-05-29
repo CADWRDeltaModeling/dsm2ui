@@ -103,7 +103,7 @@ class DSM2EchoFileReader:
     def scan(cls, path: str) -> List[DataReference]:
         """Parse *path* as a DSM2 echo ``.inp`` file and return all refs."""
         try:
-            from pydsm.input.parser import parse_input
+            from pydsm.input.parser import read_input as parse_input
         except ImportError:
             logger.warning(
                 "DSM2EchoFileReader.scan: pydsm not available — cannot parse %s", path
@@ -202,6 +202,10 @@ class DSM2EchoFileReader:
                     )
                     name = str(row.get("NAME", ""))
                     variable = str(row.get("VARIABLE", "FLOW"))
+                    try:
+                        chan_no = int(row.get("CHAN_NO", 0))
+                    except (ValueError, TypeError):
+                        chan_no = 0
 
                     ref = _OutputChannelRef(
                         source=dss_file,  # DSS file → DSM2DSSReader cached per file
@@ -210,8 +214,10 @@ class DSM2EchoFileReader:
                         category="Output",
                         station=name.lower(),
                         variable=variable.lower(),
+                        chan_no=chan_no,
                         NAME=name,
                         VARIABLE=variable,
+                        CHAN_NO=chan_no,
                         FILE=dss_file,
                     )
                     refs.append(ref)
@@ -297,6 +303,14 @@ class DSM2BCFlowLoader:
 ReaderRegistry.register("dsm2_echo_inp", DSM2EchoFileReader, extensions=[".inp"])
 ReaderRegistry.register("dsm2_bc_flow", DSM2BCFlowLoader)
 
+# Register DSM2DSSReader for ref_type="dsm2_dss" so _OutputChannelRef can load data.
+# DSM2DSSReader lives in dssui to avoid circular imports (dssui does not import echo_plugin).
+try:
+    from dsm2ui.dssui.dss_registry import DSM2DSSReader as _DSM2DSSReader
+    ReaderRegistry.register("dsm2_dss", _DSM2DSSReader, extensions=[".dss"])
+except Exception as _e:  # pragma: no cover
+    logger.warning("echo_plugin: could not register dsm2_dss reader: %s", _e)
+
 
 # ---------------------------------------------------------------------------
 # EchoUIManager
@@ -311,6 +325,30 @@ _DEFAULT_CHANNEL_GEO = os.path.join(
 _DEFAULT_NODE_GEO = os.path.join(
     _PKG_DIR, "dsm2gis", "dsm2_nodes_8_2.geojson"
 )
+
+# Cached midpoint GeoDataFrame (computed once, reused across sessions)
+_CHANNEL_MIDPOINTS_CACHE: dict = {}
+
+
+def _load_channel_midpoints(geo_path: str):
+    """Load a channel centerline GeoJSON and return a midpoint GeoDataFrame.
+
+    The interpolated midpoint (normalised distance=0.5) of each linestring is
+    used instead of the full geometry so that:
+    - Output channel refs appear as point markers on the map (correct semantics
+      — a DSM2 OUTPUT_CHANNEL observation is at a point, not a line).
+    - Map rendering is much faster (Points vs Path).
+
+    The result is cached in-process so the file is only read once.
+    """
+    import geopandas as gpd
+    if geo_path in _CHANNEL_MIDPOINTS_CACHE:
+        return _CHANNEL_MIDPOINTS_CACHE[geo_path]
+    gdf = gpd.read_file(geo_path)
+    gdf = gdf[gdf.geometry.notna()].copy()
+    gdf["geometry"] = gdf.geometry.interpolate(0.5, normalized=True)
+    _CHANNEL_MIDPOINTS_CACHE[geo_path] = gdf
+    return gdf
 
 
 class EchoUIManager(RegistryUIManager):
@@ -358,9 +396,13 @@ class EchoUIManager(RegistryUIManager):
         for geo_path in (_DEFAULT_CHANNEL_GEO, _DEFAULT_NODE_GEO):
             if os.path.isfile(geo_path):
                 try:
-                    self.add_geo_source(
-                        geo_path, id_column="id", station_column="station"
-                    )
+                    midpoints = _load_channel_midpoints(geo_path)
+                    # Bypass add_geo_source (file-path-only API) and inject the
+                    # pre-computed midpoint GeoDataFrame directly.
+                    self._geo_source_df = midpoints
+                    self._geo_id_column = "id"
+                    self._geo_station_column = "chan_no"
+                    self._apply_geo_merge()
                     self._geo_loaded = True
                 except Exception as exc:
                     logger.warning(
@@ -423,13 +465,15 @@ def show_dsm2_echo_ui(inp_files, channel_file, port, desktop):
     def build_manager():
         mgr = EchoUIManager()
         if inp_files:
-            mgr.add_source_files(list(inp_files))
+            mgr.add_source_files(*inp_files)
         # Allow explicit --channel-file override even when no inp_files given.
         if channel_geo and not mgr._geo_loaded:
             try:
-                mgr.add_geo_source(
-                    channel_geo, id_column="id", station_column="station"
-                )
+                midpoints = _load_channel_midpoints(channel_geo)
+                mgr._geo_source_df = midpoints
+                mgr._geo_id_column = "id"
+                mgr._geo_station_column = "chan_no"
+                mgr._apply_geo_merge()
                 mgr._geo_loaded = True
             except Exception as exc:
                 logger.warning(

@@ -1407,6 +1407,11 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             dfcat["geoid"] = dfcat["id"].str.split("_", expand=True).iloc[:, 1]
             if self.channels is not None:
                 channels = self.channels.copy()
+                # Convert centerlines to midpoints: output locations are at a
+                # point on the channel, and point rendering is far faster than
+                # path rendering on large catalogs.
+                if hasattr(channels, "geometry") and not channels.geometry.iloc[0].geom_type.lower().startswith("point"):
+                    channels["geometry"] = channels.geometry.interpolate(0.5, normalized=True)
                 channels["id"] = channels["id"].astype("str")
                 channels = channels.rename(columns={"id": "geoid"})
                 dfcat = pd.merge(channels, dfcat, on="geoid", how="right")
