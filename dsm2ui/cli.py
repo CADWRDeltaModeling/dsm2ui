@@ -52,23 +52,49 @@ class _LazyGroup(click.Group):
                 formatter.write_dl(commands)
 
 
-@click.group(
-    cls=_LazyGroup,
-    context_settings=CONTEXT_SETTINGS,
-    lazy_subcommands={
-        "output-ui":   ("dsm2ui.dsm2ui",                 "show_dsm2_output_ui",            "Show DSM2 model output UI",              True),
-        "tide-ui":     ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_ui",           "Show DSM2 tidefile UI",                  True),
-        "xsect-ui":    ("dsm2ui.dsm2ui",                 "show_dsm2_tidefile_xsect_ui",     "Show DSM2 tidefile cross-section UI",    True),
-        "dss-ui":      ("dsm2ui.dssui.dssui",            "show_dss_ui",                     "Show DSS file browser UI"),
-        "geo-heatmap": ("dsm2ui.calib.geoheatmap",       "show_metrics_geo_heatmap",        "Show calibration metrics geo heatmap",        True),
-        "geolocate":   ("pydsm.viz.dsm2gis",             "geolocate_output_locations",      "Geolocate DSM2 output locations",     True),
-        "dcd-map":     ("dsm2ui.deltacdui.deltacdui",    "dcd_geomap",                      "Show Delta CD geographic map",           True),
-        "dcd-nodes":   ("dsm2ui.deltacdui.deltacdui",    "show_deltacd_nodes_ui",           "Show Delta CD nodes UI",                 True),
-        "calib-ui":    ("dsm2ui.calib.calibplotui",      "calib_plot_ui",                   "Launch interactive calibration plot viewer",  True),
-        "ptm-animate": ("dsm2ui.ptm.ptm_animator",       "ptm_animate",                     "Animate PTM particle tracks"),
-        "dcd-ui":      ("dsm2ui.deltacdui.deltacduimgr", "show_deltacd_ui",                 "Show Delta CD UI",                       True),
-    },
-)
+class _SmartUIGroup(_LazyGroup):
+    """_LazyGroup that routes DSM2 file-path arguments to _smart_ui.
+
+    When the first remaining argument looks like a DSM2 file path
+    (.inp, .h5, .hdf5, .dss), ``resolve_command`` returns a hidden
+    dispatch command that forwards all remaining args to ``_smart_ui``.
+    Known subcommand names (map, xsect, …) are still resolved normally.
+    """
+
+    _FILE_EXTS = frozenset([".inp", ".h5", ".hdf5", ".dss"])
+
+    def _is_file_arg(self, name: str) -> bool:
+        import os.path
+        _, ext = os.path.splitext(name.replace("\\", "/").split("/")[-1])
+        return ext.lower() in self._FILE_EXTS
+
+    def resolve_command(self, ctx, args):
+        """Route file-path args to a hidden dispatch command."""
+        if args and self._is_file_arg(args[0]):
+            return "_files_", self._make_file_dispatch_cmd(ctx), args
+        return super().resolve_command(ctx, args)
+
+    def _make_file_dispatch_cmd(self, ctx):
+        """Build a hidden Click command that forwards files to _smart_ui."""
+        # Capture group-level params now (before sub-context is created).
+        _port = ctx.params.get("port", 0)
+        _desktop = ctx.params.get("desktop", False)
+        _channel_shapefile = ctx.params.get("channel_shapefile", None)
+
+        @click.command("_files_", hidden=True)
+        @click.argument("files", nargs=-1, type=click.Path())
+        def _dispatch(files):
+            _smart_ui(
+                list(files),
+                port=_port,
+                desktop=_desktop,
+                channel_shapefile=_channel_shapefile,
+            )
+
+        return _dispatch
+
+
+@click.group(cls=_LazyGroup, context_settings=CONTEXT_SETTINGS)
 @click.version_option(
     __version__, "-v", "--version", message="%(prog)s, version %(version)s"
 )
@@ -86,26 +112,140 @@ main.add_command(calib)
 
 
 # ---------------------------------------------------------------------------
-# ui group (output / tide / xsect)
+# ui group — smart file-type dispatcher
 # ---------------------------------------------------------------------------
+
+def _smart_ui(files, port=0, desktop=False, channel_shapefile=None):
+    """Launch the right DSM2 viewer based on file extensions.
+
+    * Any ``.inp`` echo file  → :class:`~dsm2ui.echo_plugin.EchoUIManager`
+      (shows both input boundary conditions and output channel time series;
+      also accepts ``.h5`` / ``.dss`` alongside ``.inp``).
+    * ``.h5`` / ``.hdf5`` / ``.dss`` only  → :class:`~dsm2ui.dsm2ui.DSM2CombinedUIManager`
+      (HDF5 tidefile + DSS viewer with drag-and-drop support).
+    * No files  → empty :class:`~dsm2ui.dsm2ui.DSM2CombinedUIManager`
+      (drag-and-drop ``.h5`` or ``.dss`` files into the running UI).
+    """
+    import panel as pn
+    pn.extension()
+    from dsm2ui.session import serve_session_app, serve_desktop_app
+
+    inp_files = [f for f in files if f.lower().endswith(".inp")]
+    other_files = [f for f in files if not f.lower().endswith(".inp")]
+
+    _serve = serve_desktop_app if desktop else serve_session_app
+
+    if inp_files:
+        # Echo files present → EchoUIManager handles everything.
+        # EchoUIManager is a RegistryUIManager subclass, so it also accepts
+        # .h5 and .dss files via the reader registry.
+        from dsm2ui.echo_plugin import (
+            EchoUIManager,
+            _load_channel_midpoints,
+            _DEFAULT_CHANNEL_GEO,
+        )
+        import os as _os
+        channel_geo = channel_shapefile or (
+            _DEFAULT_CHANNEL_GEO if _os.path.isfile(_DEFAULT_CHANNEL_GEO) else None
+        )
+
+        def build_manager():
+            mgr = EchoUIManager()
+            all_files = inp_files + other_files
+            if all_files:
+                mgr.add_source_files(*all_files)
+            if channel_geo and not mgr._geo_loaded:
+                try:
+                    midpoints = _load_channel_midpoints(channel_geo)
+                    mgr._geo_source_df = midpoints
+                    mgr._geo_id_column = "id"
+                    mgr._geo_station_column = "chan_no"
+                    mgr._apply_geo_merge()
+                    mgr._geo_loaded = True
+                except Exception as exc:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "_smart_ui: could not load channel geo %s: %s", channel_geo, exc
+                    )
+            return mgr
+
+        _serve(build_manager, title="DSM2 UI", port=port)
+    else:
+        # Only .h5 / .dss files (or no files) → DSM2CombinedUIManager.
+        from dsm2ui.dsm2ui import DSM2CombinedUIManager
+
+        def build_manager():
+            return DSM2CombinedUIManager(files=other_files)
+
+        _serve(build_manager, title="DSM2 UI", port=port)
+
 
 @click.group(
     name="ui",
-    cls=_LazyGroup,
+    cls=_SmartUIGroup,
+    invoke_without_command=True,
     context_settings=CONTEXT_SETTINGS,
     lazy_subcommands={
-        "input":  ("dsm2ui.dsm2ui", "show_dsm2_input_ui",            "Interactive viewer for DSM2 input boundary condition time series"),
-        "output": ("dsm2ui.dsm2ui", "show_dsm2_output_ui",         "Interactive map + time-series viewer for DSM2 output files"),
-        "tide":     ("dsm2ui.dsm2ui", "show_dsm2_tidefile_ui",       "Interactive map + time-series viewer for DSM2 HDF5 tidefiles"),
-        "xsect":    ("dsm2ui.dsm2ui", "show_dsm2_tidefile_xsect_ui", "Cross-section viewer for a DSM2 tidefile"),
-        "combined": ("dsm2ui.dsm2ui", "show_dsm2_combined_ui",       "Mixed HDF5 + DSS viewer with drag-and-drop support"),
-        "echo":     ("dsm2ui.echo_plugin", "show_dsm2_echo_ui",      "Input+Output viewer from DSM2 echo .inp file"),
-        "dss":      ("dsm2ui.dssui.dss_cli", "show_dss_ui",          "Generic HEC-DSS file browser"),
+        # Hidden backward-compat aliases — functionality merged into 'dsm2ui ui [FILES]'.
+        "input":    ("dsm2ui.dsm2ui",        "show_dsm2_input_ui",            "Interactive viewer for DSM2 input boundary condition time series", True),
+        "output":   ("dsm2ui.dsm2ui",        "show_dsm2_output_ui",           "Interactive map + time-series viewer for DSM2 output files",        True),
+        "tide":     ("dsm2ui.dsm2ui",        "show_dsm2_tidefile_ui",         "Interactive map + time-series viewer for DSM2 HDF5 tidefiles",      True),
+        "combined": ("dsm2ui.dsm2ui",        "show_dsm2_combined_ui",         "Mixed HDF5 + DSS viewer with drag-and-drop support",                 True),
+        "echo":     ("dsm2ui.echo_plugin",   "show_dsm2_echo_ui",            "Input+Output viewer from DSM2 echo .inp file",                      True),
+        "dss":      ("dsm2ui.dssui.dss_cli", "show_dss_ui",                  "Generic HEC-DSS file browser",                                      True),
+        # Still-visible specialist sub-commands (different viewer type).
+        "xsect":    ("dsm2ui.dsm2ui",        "show_dsm2_tidefile_xsect_ui",  "Cross-section viewer for a DSM2 tidefile"),
     },
 )
-def ui_group():
-    """Launch DSM2 interactive viewers (output, tidefile, cross-sections)."""
-    pass
+@click.option(
+    "--port",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Port for the web server (0 = random available port).",
+)
+@click.option(
+    "--desktop",
+    is_flag=True,
+    default=False,
+    help="Open in a native desktop window (requires pywebview).",
+)
+@click.option(
+    "--channel-shapefile",
+    default=None,
+    help="Override the bundled channel centerline GeoJSON (used with .inp files).",
+)
+@click.pass_context
+def ui_group(ctx, port, desktop, channel_shapefile):
+    """Launch a DSM2 viewer for any DSM2 file type.
+
+    Pass one or more FILES and the right viewer is selected automatically:
+
+    \b
+      .inp  (echo file)          → input+output time-series viewer with channel map
+      .h5 / .hdf5  (tidefile)    → HDF5 tidefile viewer
+      .dss  (DSS output)         → DSS time-series browser
+      mixed .inp + .h5 / .dss   → unified echo viewer with all references
+      (no files)                 → empty HDF5+DSS viewer; drag-and-drop to add files
+
+    Examples::
+
+        dsm2ui ui run_hydro_echo.inp
+        dsm2ui ui hist_fc_mss.h5
+        dsm2ui ui hist_qual.dss hist_hydro.dss
+        dsm2ui ui run_hydro_echo.inp hist_fc_mss.h5
+        dsm2ui ui                              # empty, drop files in
+
+    Specialist sub-commands for other viewer types::
+
+        dsm2ui ui map  run_hydro_echo.inp      # Manning/dispersion/length map
+        dsm2ui ui xsect  run.h5               # cross-section viewer
+    """
+    # This callback is reached only when no subcommand / file args are given
+    # (invoke_without_command=True).  File-path args are intercepted by
+    # _SmartUIGroup.resolve_command and handled by a hidden _files_ command.
+    if ctx.invoked_subcommand is None:
+        _smart_ui([], port=port, desktop=desktop, channel_shapefile=channel_shapefile)
 
 
 main.add_command(ui_group)
