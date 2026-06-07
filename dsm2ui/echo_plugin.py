@@ -364,13 +364,14 @@ class EchoUIManager(RegistryUIManager):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Override default primary key so input and output refs can share
-        # the same station/variable without colliding.
+        # the same station/variable without colliding, and so that refs from
+        # different echo files (multiple studies) are distinguished by source_num.
         from dvue.catalog import DataCatalog
         self._dvue_catalog = DataCatalog(
-            primary_key=["category", "TABLE", "station", "variable"]
+            primary_key=["source_num", "category", "TABLE", "station", "variable"]
         )
         self._display_dfcat = pd.DataFrame(
-            columns=["name", "category", "TABLE", "station", "variable", "source"]
+            columns=["name", "source_num", "category", "TABLE", "station", "variable", "source"]
         )
         self.crs = ccrs.epsg("26910")
         self.station_id_column = "station"
@@ -412,6 +413,7 @@ class EchoUIManager(RegistryUIManager):
 
     def _get_table_column_width_map(self) -> dict:
         return {
+            "source_num": "6%",
             "category": "8%",
             "TABLE": "18%",
             "station": "16%",
