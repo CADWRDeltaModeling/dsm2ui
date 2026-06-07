@@ -382,6 +382,67 @@ class DSSRegistryUIManager(RegistryUIManager):
         if not ref._attributes.get("variable"):
             ref.set_attribute("variable", str(ref._attributes.get("C", "")).lower())
 
+    def on_file_added(self, path, refs):
+        """Auto-load bundled channel midpoints for map display (best-effort)."""
+        if getattr(self, "_geo_loaded", False):
+            return
+        _pkg = os.path.dirname(os.path.dirname(__file__))
+        _channel_geo = os.path.join(_pkg, "dsm2gis", "dsm2_channels_centerlines_8_2.geojson")
+        if not os.path.isfile(_channel_geo):
+            return
+        try:
+            import geopandas as gpd
+            import cartopy.crs as ccrs
+            gdf = gpd.read_file(_channel_geo)
+            gdf["id"] = gdf["id"].astype("str")
+            # Store the raw line GDF for use as a background layer.
+            self._channel_lines_gdf = gdf.copy()
+            # Use midpoints so DSS B-parts that are numeric channel IDs
+            # appear as points on the map; non-matching B-parts get NaN geometry.
+            gdf = gdf[gdf.geometry.notna()].copy()
+            gdf["geometry"] = gdf.geometry.interpolate(0.5, normalized=True)
+            self._geo_source_df = gdf
+            self._geo_id_column = "id"
+            self._geo_station_column = "station"
+            self._apply_geo_merge()
+            if self.crs is None and getattr(gdf, "crs", None) is not None:
+                try:
+                    epsg = gdf.crs.to_epsg()
+                    if epsg:
+                        self.crs = ccrs.epsg(str(epsg))
+                except Exception:
+                    pass
+            self._geo_loaded = True
+        except Exception as exc:
+            logger.warning("DSSRegistryUIManager: could not load channel geo: %s", exc)
+
+    def get_background_map_layer(self):
+        """Return the DSM2 channel network as a grey background layer.
+
+        Only shown when the catalog has no linked geometry (the common DSS
+        case where B-parts are station names that don't match channel IDs).
+        """
+        gdf = getattr(self, "_channel_lines_gdf", None)
+        if gdf is None:
+            return None
+        # Skip backdrop when the catalog already carries linked geometry.
+        dfcat = getattr(self, "_display_dfcat", None)
+        if dfcat is not None and hasattr(dfcat, "geometry"):
+            try:
+                import geopandas as gpd
+                if isinstance(dfcat, gpd.GeoDataFrame) and not dfcat.geometry.dropna().empty:
+                    return None
+            except Exception:
+                pass
+        try:
+            import geoviews as gv
+            import cartopy.crs as ccrs
+            return gv.Path(gdf, crs=ccrs.epsg("26910")).opts(
+                line_color="grey", alpha=0.5, line_width=1
+            )
+        except Exception:
+            return None
+
     def get_table_schema(self, df: pd.DataFrame | None = None) -> dict:
         if df is None:
             df = self.get_data_catalog()

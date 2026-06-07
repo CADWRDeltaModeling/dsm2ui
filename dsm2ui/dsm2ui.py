@@ -1,4 +1,5 @@
 # User interface components for DSM2 related information
+import os
 import panel as pn
 import param
 import colorcet as cc
@@ -105,6 +106,13 @@ from dsm2ui.dssui.dss_registry import DSM2DSSReader as _UnifiedDSM2DSSReader
 
 import logging
 logger = logging.getLogger(__name__)
+
+# Bundled GeoJSON files shipped with dsm2ui
+_PKG_DIR = os.path.dirname(__file__)
+_DEFAULT_CHANNEL_GEO = os.path.join(
+    _PKG_DIR, "dsm2gis", "dsm2_channels_centerlines_8_2.geojson"
+)
+_DEFAULT_NODE_GEO = os.path.join(_PKG_DIR, "dsm2gis", "dsm2_nodes_8_2.geojson")
 
 
 class DSM2DSSReader(_UnifiedDSM2DSSReader):
@@ -1395,6 +1403,14 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             values.
         """
         self.channels = kwargs.pop("channels", None)
+        # Auto-load bundled channel centerlines when not explicitly provided.
+        if self.channels is None and os.path.isfile(_DEFAULT_CHANNEL_GEO):
+            try:
+                self.channels = gpd.read_file(_DEFAULT_CHANNEL_GEO)
+            except Exception as exc:
+                logger.warning(
+                    "DSM2TidefileUIManager: could not load bundled channel geo: %s", exc
+                )
         self.tidefiles = tidefiles
         self.tidefile_map = {
             f: DSM2TidefileUIManager.read_tidefile(f) for f in tidefiles
@@ -1407,14 +1423,11 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             dfcat["geoid"] = dfcat["id"].str.split("_", expand=True).iloc[:, 1]
             if self.channels is not None:
                 channels = self.channels.copy()
-                # Convert centerlines to midpoints: output locations are at a
-                # point on the channel, and point rendering is far faster than
-                # path rendering on large catalogs.
-                if hasattr(channels, "geometry") and not channels.geometry.iloc[0].geom_type.lower().startswith("point"):
-                    channels["geometry"] = channels.geometry.interpolate(0.5, normalized=True)
                 channels["id"] = channels["id"].astype("str")
                 channels = channels.rename(columns={"id": "geoid"})
                 dfcat = pd.merge(channels, dfcat, on="geoid", how="right")
+                # Explicitly wrap as GeoDataFrame so geometry is preserved.
+                dfcat = gpd.GeoDataFrame(dfcat, geometry="geometry", crs=self.channels.crs)
             dfcat["station_name"] = dfcat["geoid"].fillna(dfcat["id"])
             dfcat["source"] = dfcat["filename"]
             time_ranges = [h5.get_start_end_dates() for h5 in self.tidefile_map.values()]
@@ -1443,7 +1456,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         )
         # Must be initialised before super().__init__() because the base class
         # calls get_time_range() → get_data_catalog() during __init__.
-        self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
+        self._display_dfcat = self._wrap_geo(self._dvue_catalog.to_dataframe().reset_index())
         super_kwargs = dict(**kwargs)
         if _time_range is not None:
             super_kwargs["time_range"] = _time_range
@@ -1466,8 +1479,14 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         inside :meth:`add_source_files`.
         """
         if len(self._dvue_catalog) != len(self._display_dfcat):
-            self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
+            self._display_dfcat = self._wrap_geo(self._dvue_catalog.to_dataframe().reset_index())
         return self._display_dfcat
+
+    def _wrap_geo(self, df):
+        """Wrap *df* as a GeoDataFrame if channel geometry is available."""
+        if self.channels is not None and "geometry" in df.columns:
+            return gpd.GeoDataFrame(df, geometry="geometry", crs=self.channels.crs)
+        return df
 
     @property
     def data_catalog(self) -> DataCatalog:
@@ -1591,6 +1610,15 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             dfnew["geoid"] = dfnew["id"].str.split("_", expand=True).iloc[:, 1]
             dfnew["station_name"] = dfnew["geoid"].fillna(dfnew["id"])
             dfnew["source"] = path
+            # Merge channel geometry so new refs carry geometry just as __init__ does.
+            if self.channels is not None:
+                try:
+                    _chs = self.channels.copy()
+                    _chs["id"] = _chs["id"].astype("str")
+                    _chs = _chs.rename(columns={"id": "geoid"})
+                    dfnew = pd.merge(_chs, dfnew, on="geoid", how="right")
+                except Exception as exc:
+                    logger.warning("add_source_files: channel geo merge failed: %s", exc)
 
             n_before = len(self._dvue_catalog)
             for _, row in dfnew.iterrows():
@@ -1615,7 +1643,7 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
                 # Rebuild display DataFrame from the catalog — same path as
                 # __init__.  Called from the background thread (_do_add in
                 # session_persistence) so it does not block the IOLoop.
-                self._display_dfcat = self._dvue_catalog.to_dataframe().reset_index()
+                self._display_dfcat = self._wrap_geo(self._dvue_catalog.to_dataframe().reset_index())
 
                 # Expand time range to cover new tidefile.
                 try:
@@ -2612,8 +2640,16 @@ class DSM2CombinedUIManager(RegistryUIManager):
 
     def normalize_ref(self, ref):
         if not ref._attributes.get("station"):
+            # For H5 refs, `id` looks like "CHANNEL_10_FLOW" — extract the channel
+            # number ("10") so it matches the GeoJSON `id` column for geo lookup.
+            geoid = ref._attributes.get("geoid")
+            if not geoid:
+                id_val = str(ref._attributes.get("id") or "")
+                parts = id_val.split("_")
+                if len(parts) >= 2 and parts[1].isdigit():
+                    geoid = parts[1]
             station = (
-                ref._attributes.get("geoid")
+                geoid
                 or ref._attributes.get("id")
                 or ref._attributes.get("NAME")
                 or ref._attributes.get("name", "")
@@ -2625,7 +2661,8 @@ class DSM2CombinedUIManager(RegistryUIManager):
 
     def on_file_added(self, path, refs):
         import os as _os
-        if _os.path.splitext(path)[1].lower() in (".h5", ".hdf5"):
+        ext = _os.path.splitext(path)[1].lower()
+        if ext in (".h5", ".hdf5"):
             try:
                 h5 = ReaderRegistry.get_reader("dsm2_hdf5", path)._h5
                 t0, t1 = h5.get_start_end_dates()
@@ -2635,6 +2672,58 @@ class DSM2CombinedUIManager(RegistryUIManager):
                 self.time_range = (new_start, new_end)
             except Exception:
                 pass
+        # Auto-load channel centerlines for map display (once), regardless of file type.
+        # H5 refs get full line geometry (station = numeric channel id).
+        # DSS refs get midpoint geometry (best-effort; matches when B-part is numeric).
+        if not getattr(self, "_geo_loaded", False) and os.path.isfile(_DEFAULT_CHANNEL_GEO):
+            try:
+                _gdf = gpd.read_file(_DEFAULT_CHANNEL_GEO)
+                _gdf["id"] = _gdf["id"].astype("str")
+                # Always store the raw line GDF for use as a background layer.
+                self._channel_lines_gdf = _gdf.copy()
+                if ext == ".dss":
+                    # Use midpoints for DSS so matched entries appear as points.
+                    _gdf = _gdf[_gdf.geometry.notna()].copy()
+                    _gdf["geometry"] = _gdf.geometry.interpolate(0.5, normalized=True)
+                self._geo_source_df = _gdf
+                self._geo_id_column = "id"
+                self._geo_station_column = "station"
+                self._apply_geo_merge()
+                if self.crs is None and getattr(_gdf, "crs", None) is not None:
+                    try:
+                        epsg = _gdf.crs.to_epsg()
+                        if epsg:
+                            self.crs = ccrs.epsg(str(epsg))
+                    except Exception:
+                        pass
+                self._geo_loaded = True
+            except Exception as exc:
+                logger.warning(
+                    "DSM2CombinedUIManager: could not load channel geo: %s", exc
+                )
+
+    def get_background_map_layer(self):
+        """Return the DSM2 channel network as a grey background layer.
+
+        Only shown when the catalog has no linked geometry (e.g. DSS-only
+        view where B-parts don't match channel IDs).  Returns ``None`` when
+        channel features are already present in the catalog.
+        """
+        gdf = getattr(self, "_channel_lines_gdf", None)
+        if gdf is None:
+            return None
+        # Skip backdrop when the catalog already carries linked geometry
+        # (H5 case: channel lines are interactive catalog features).
+        dfcat = getattr(self, "_display_dfcat", None)
+        if dfcat is not None and isinstance(dfcat, gpd.GeoDataFrame):
+            if not dfcat.geometry.dropna().empty:
+                return None
+        try:
+            return gv.Path(gdf, crs=ccrs.epsg("26910")).opts(
+                line_color="grey", alpha=0.5, line_width=1
+            )
+        except Exception:
+            return None
 
     def _make_plot_action(self):
         return _CombinedPlotAction()
