@@ -207,3 +207,133 @@ class TestDSM2TidefileUIManager:
         h5 = DSM2TidefileUIManager.read_tidefile(QUAL_H5)
         # QualH5 detected via fallback
         assert isinstance(h5, (HydroH5, QualH5))
+
+
+# ---------------------------------------------------------------------------
+# DSM2CombinedUIManager — regression tests for UP/DOWN catalog completeness
+#
+# Bug (fixed): normalize_ref() previously set station = geoid (e.g. "1") for
+# every channel entry.  Because the catalog primary key is
+# (source_num, station, variable), CHAN_1_UP and CHAN_1_DOWN produced the same
+# pk tuple (0, "1", "stage").  The second entry was silently discarded.  The
+# same collision also dropped all avg-area (CHAN_N, no UP/DOWN suffix) entries.
+#
+# Fix: station is now set to the full `id` string ("CHAN_1_UP", "CHAN_1_DOWN",
+# "CHAN_1") so every entry is uniquely keyed.  A separate `geoid` attribute
+# carries the numeric channel number for geo-matching.
+# ---------------------------------------------------------------------------
+
+
+class TestDSM2CombinedUIManager:
+    @pytest.fixture(scope="class")
+    def manager(self):
+        from dsm2ui.dsm2ui import DSM2CombinedUIManager
+        mgr = DSM2CombinedUIManager()
+        mgr.add_source_files(HYDRO_H5)
+        return mgr
+
+    @pytest.fixture(scope="class")
+    def raw_catalog(self):
+        """The catalog produced directly by HydroH5 — ground truth entry count."""
+        return HydroH5(HYDRO_H5).create_catalog()
+
+    # -- completeness --------------------------------------------------------
+
+    def test_catalog_total_matches_raw(self, manager, raw_catalog):
+        """No entries must be silently dropped during normalization."""
+        dfcat = manager.get_data_catalog()
+        assert len(dfcat) == len(raw_catalog), (
+            f"DSM2CombinedUIManager catalog has {len(dfcat)} entries but "
+            f"HydroH5.create_catalog() returns {len(raw_catalog)}. "
+            "Likely cause: primary-key collision in normalize_ref() is still dropping entries."
+        )
+
+    def test_channel_stage_has_both_up_and_down(self, manager):
+        """CHAN_N_UP and CHAN_N_DOWN entries must both be present for stage."""
+        dfcat = manager.get_data_catalog()
+        stage = dfcat[dfcat["variable"] == "stage"]
+        assert not stage.empty, "No stage entries found at all"
+        up_ids = stage[stage["station"].str.endswith("_UP")]
+        down_ids = stage[stage["station"].str.endswith("_DOWN")]
+        assert not up_ids.empty, "Upstream stage entries missing from combined catalog"
+        assert not down_ids.empty, (
+            "Downstream stage entries missing from combined catalog — "
+            "primary-key collision in normalize_ref() not fully fixed"
+        )
+        # UP and DOWN counts must match (one entry per channel per direction)
+        assert len(up_ids) == len(down_ids), (
+            f"UP stage count ({len(up_ids)}) != DOWN stage count ({len(down_ids)})"
+        )
+
+    def test_channel_flow_has_both_up_and_down(self, manager):
+        """CHAN_N_UP and CHAN_N_DOWN entries must both be present for flow."""
+        dfcat = manager.get_data_catalog()
+        flow = dfcat[dfcat["variable"] == "flow"]
+        assert not flow[flow["station"].str.endswith("_UP")].empty, "Upstream flow entries missing"
+        assert not flow[flow["station"].str.endswith("_DOWN")].empty, (
+            "Downstream flow entries missing from combined catalog"
+        )
+
+    def test_avg_area_entries_not_dropped(self, manager, raw_catalog):
+        """Avg-area entries (CHAN_N, no UP/DOWN suffix) must not be dropped."""
+        raw_avg = raw_catalog[
+            raw_catalog["id"].str.match(r"^CHAN_\d+$")
+        ]
+        if raw_avg.empty:
+            pytest.skip("No avg-area entries in raw catalog")
+        dfcat = manager.get_data_catalog()
+        mgr_avg = dfcat[dfcat["station"].str.match(r"^CHAN_\d+$")]
+        assert len(mgr_avg) == len(raw_avg), (
+            f"Expected {len(raw_avg)} avg-area entries, got {len(mgr_avg)}"
+        )
+
+    # -- data retrieval ------------------------------------------------------
+
+    def test_can_retrieve_data_for_downstream_stage(self, manager):
+        """Data retrieval must work for a downstream (CHAN_N_DOWN) stage entry."""
+        dfcat = manager.get_data_catalog()
+        down_stage = dfcat[
+            (dfcat["variable"] == "stage") & dfcat["station"].str.endswith("_DOWN")
+        ]
+        assert not down_stage.empty, "No downstream stage entries to test retrieval"
+        row = down_stage.iloc[0]
+        ref = manager.get_data_reference(row)
+        df = ref.getData(time_range=manager.time_range)
+        assert isinstance(df, pd.DataFrame)
+        assert not df.empty
+        assert isinstance(df.index, pd.DatetimeIndex)
+
+    def test_can_retrieve_data_for_upstream_stage(self, manager):
+        """Data retrieval must work for an upstream (CHAN_N_UP) stage entry."""
+        dfcat = manager.get_data_catalog()
+        up_stage = dfcat[
+            (dfcat["variable"] == "stage") & dfcat["station"].str.endswith("_UP")
+        ]
+        row = up_stage.iloc[0]
+        ref = manager.get_data_reference(row)
+        df = ref.getData(time_range=manager.time_range)
+        assert isinstance(df, pd.DataFrame)
+        assert not df.empty
+
+    # -- station format ------------------------------------------------------
+
+    def test_station_values_are_full_ids(self, manager):
+        """station column must contain full id strings (e.g. CHAN_1_UP), not bare channel numbers."""
+        dfcat = manager.get_data_catalog()
+        chan = dfcat[dfcat["station"].str.startswith("CHAN_")]
+        assert not chan.empty, "No CHAN_ entries in catalog"
+        # No station should be a bare integer (old buggy behaviour)
+        bare_int = chan["station"].str.match(r"^\d+$")
+        assert not bare_int.any(), (
+            "Some station values are bare channel numbers — normalize_ref fix not applied"
+        )
+
+    def test_geoid_column_contains_channel_numbers(self, manager):
+        """geoid column must contain the numeric channel number extracted from id."""
+        dfcat = manager.get_data_catalog()
+        chan = dfcat[dfcat["station"].str.startswith("CHAN_")]
+        assert "geoid" in dfcat.columns, "geoid attribute not stored on catalog entries"
+        # geoid should be digits-only for channel entries
+        assert chan["geoid"].dropna().str.match(r"^\d+$").all(), (
+            "geoid values for CHAN_ entries must be numeric strings"
+        )

@@ -2639,18 +2639,22 @@ class DSM2CombinedUIManager(RegistryUIManager):
     """
 
     def normalize_ref(self, ref):
+        # Extract geoid (numeric channel number) from 'id' for geo-matching.
+        # 'id' values look like "CHAN_1_UP", "CHAN_1_DOWN", "CHAN_1", "RES_bethel", …
+        id_val = str(ref._attributes.get("id") or "")
+        if not ref._attributes.get("geoid"):
+            parts = id_val.split("_")
+            if len(parts) >= 2 and parts[1].isdigit():
+                ref.set_attribute("geoid", parts[1])
+
         if not ref._attributes.get("station"):
-            # For H5 refs, `id` looks like "CHANNEL_10_FLOW" — extract the channel
-            # number ("10") so it matches the GeoJSON `id` column for geo lookup.
-            geoid = ref._attributes.get("geoid")
-            if not geoid:
-                id_val = str(ref._attributes.get("id") or "")
-                parts = id_val.split("_")
-                if len(parts) >= 2 and parts[1].isdigit():
-                    geoid = parts[1]
+            # Use the full 'id' (e.g. "CHAN_1_UP", "CHAN_1_DOWN", "CHAN_1") as the
+            # station so that upstream, downstream, and avg entries for the same
+            # channel all get distinct (source_num, station, variable) primary keys.
+            # Using only geoid ("1") here previously caused CHAN_1_UP and CHAN_1_DOWN
+            # to collide, silently dropping all downstream entries from the catalog.
             station = (
-                geoid
-                or ref._attributes.get("id")
+                id_val
                 or ref._attributes.get("NAME")
                 or ref._attributes.get("name", "")
             )
@@ -2687,7 +2691,10 @@ class DSM2CombinedUIManager(RegistryUIManager):
                     _gdf["geometry"] = _gdf.geometry.interpolate(0.5, normalized=True)
                 self._geo_source_df = _gdf
                 self._geo_id_column = "id"
-                self._geo_station_column = "station"
+                # H5 refs: station is now the full id (e.g. "CHAN_1_UP") so geo
+                # matching must use the numeric "geoid" attribute instead.
+                # DSS refs have no geoid → no match, same as before.
+                self._geo_station_column = "geoid"
                 self._apply_geo_merge()
                 if self.crs is None and getattr(_gdf, "crs", None) is not None:
                     try:
