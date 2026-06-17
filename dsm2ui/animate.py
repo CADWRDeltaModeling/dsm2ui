@@ -589,7 +589,28 @@ def load_dsm2_channel_gdf(
     if resolved_col != "geo_id":
         gdf = gdf.rename(columns={resolved_col: "geo_id"})
 
-    gdf["geo_id"] = gdf["geo_id"].astype(int)
+    # Coerce geo_id to int — handles both int32/int64 and string representations
+    # (e.g. GeoJSON may load integer-valued strings as object dtype on some
+    # fiona/pyogrio versions).
+    try:
+        gdf["geo_id"] = gdf["geo_id"].astype(int)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"Channel ID column {resolved_col!r} could not be coerced to integers: {exc}\n"
+            f"Sample values: {gdf['geo_id'].head(5).tolist()}"
+        ) from exc
+
+    # Ensure a valid CRS before any reprojection.  If the file has no CRS,
+    # issue a warning and assume EPSG:4326 only as a last resort (this is
+    # almost certainly wrong for shapefiles in a projected system, but lets
+    # the user get a partial result rather than a hard crash).
+    if gdf.crs is None:
+        log.warning(
+            "Shapefile/GeoJSON has no CRS; assuming EPSG:4326. "
+            "If the geometry looks wrong, set the CRS in your file or supply "
+            "a properly georeferenced shapefile with --shapefile."
+        )
+        gdf = gdf.set_crs("EPSG:4326")
 
     # Simplify geometry in EPSG:3857 (metres) then reproject to WGS84.
     # This removes redundant vertices from complex channel centrelines,
@@ -614,6 +635,16 @@ def load_dsm2_channel_gdf(
                 gdf.loc[~valid_mask, "geo_id"].tolist(),
             )
             gdf = gdf.loc[valid_mask].copy()
+        if gdf.empty:
+            raise ValueError(
+                f"All {n_dropped} row(s) in the shapefile/GeoJSON were dropped because "
+                "their geometry coordinates are non-finite (NaN / inf / zero).\n"
+                "This usually means the bundled channel centreline GeoJSON does not "
+                "match the DSM2 grid used by this HDF5 file (e.g. a planning study "
+                "uses a different grid from the historical base).\n"
+                "Fix: supply a shapefile that matches your grid with\n"
+                "  --shapefile path/to/channels.shp"
+            )
         gdf["geometry"] = gdf.geometry.simplify(
             tolerance=simplify_tolerance, preserve_topology=True
         )
