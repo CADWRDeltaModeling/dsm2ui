@@ -472,6 +472,7 @@ class QualH5ConcentrationReader(_DSM2BaseH5Reader):
 def load_dsm2_channel_gdf(
     shapefile: "str | Path | None" = None,
     simplify_tolerance: float = 50.0,
+    channel_id_column: "str | None" = None,
 ) -> "geopandas.GeoDataFrame":
     """Load DSM2 channel centreline geometry.
 
@@ -482,9 +483,12 @@ def load_dsm2_channel_gdf(
         the bundled ``dsm2_channels_centerlines_8_2.geojson`` is used.
     simplify_tolerance : float, optional
         Simplification tolerance in metres (applied in EPSG:3857).  Set to
-        ``0`` to disable.  Default ``50`` m — removes redundant vertices from
-        complex channel centrelines while preserving overall shape, giving a
-        significant rendering speed-up for multi-year animations.
+        ``0`` to disable.  Default ``50`` m.
+    channel_id_column : str or None, optional
+        Name of the column in *shapefile* that contains integer channel numbers.
+        When ``None`` (default) the function tries the standard auto-detected
+        names: ``'id'``, ``'channel_nu'``, ``'CHAN_NO'``.
+        Use this when your shapefile uses a non-standard column name.
 
     Returns
     -------
@@ -492,29 +496,73 @@ def load_dsm2_channel_gdf(
         Has column ``"geo_id"`` (int) matching DSM2 channel numbers, plus
         ``"geometry"`` (LineString, EPSG:4326).
     """
+    import logging
+    import os
     import geopandas as gpd
 
-    if shapefile is not None:
-        gdf = gpd.read_file(shapefile)
+    log = logging.getLogger(__name__)
+
+    # SHAPE_RESTORE_SHX=YES tells GDAL/pyogrio to auto-recreate the .shx
+    # index file if it is missing from an ESRI Shapefile.
+    _old_shx = os.environ.get("SHAPE_RESTORE_SHX")
+    os.environ["SHAPE_RESTORE_SHX"] = "YES"
+    try:
+        if shapefile is not None:
+            gdf = gpd.read_file(shapefile)
+            log.info(
+                "Loaded shapefile %s: %d features, CRS=%s, columns=%s",
+                shapefile, len(gdf),
+                getattr(gdf, 'crs', 'unknown'),
+                list(gdf.columns),
+            )
+        else:
+            pkg_path = Path(__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson"
+            gdf = gpd.read_file(str(pkg_path))
+    finally:
+        if _old_shx is None:
+            os.environ.pop("SHAPE_RESTORE_SHX", None)
+        else:
+            os.environ["SHAPE_RESTORE_SHX"] = _old_shx
+
+    # Resolve the channel-number column.
+    # Priority: (1) explicit channel_id_column arg, (2) auto-detect standard names.
+    _AUTO_NAMES = ["id", "channel_nu", "CHAN_NO"]
+    resolved_col: "str | None" = None
+
+    if channel_id_column is not None:
+        if channel_id_column in gdf.columns:
+            resolved_col = channel_id_column
+        else:
+            col_info = ", ".join(
+                f"{c} ({gdf[c].dtype})" for c in gdf.columns if c != "geometry"
+            ) or "<no non-geometry columns>"
+            raise ValueError(
+                f"--channel-id-column {channel_id_column!r} not found in shapefile.\n"
+                f"Available columns: {col_info}\n"
+                f"File: {shapefile}"
+            )
     else:
-        pkg_path = Path(__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson"
-        gdf = gpd.read_file(str(pkg_path))
+        for name in _AUTO_NAMES:
+            if name in gdf.columns:
+                resolved_col = name
+                break
 
-    # Normalise the channel number column to "geo_id" (int)
-    # The bundled GeoJSON uses "id"; shapefiles from pydsm use "channel_nu"
-    if "id" in gdf.columns:
-        gdf = gdf.rename(columns={"id": "geo_id"})
-    elif "channel_nu" in gdf.columns:
-        gdf = gdf.rename(columns={"channel_nu": "geo_id"})
-    elif "CHAN_NO" in gdf.columns:
-        gdf = gdf.rename(columns={"CHAN_NO": "geo_id"})
-
-    if "geo_id" not in gdf.columns:
+    if resolved_col is None:
+        non_geom = [c for c in gdf.columns if c != "geometry"]
+        col_info = ", ".join(
+            f"{c} ({gdf[c].dtype})" for c in non_geom
+        ) or "<no non-geometry columns>"
         raise ValueError(
-            "Cannot identify channel number column in shapefile. "
-            "Expected one of: 'id', 'channel_nu', 'CHAN_NO'. "
-            f"Available columns: {list(gdf.columns)}"
+            f"Cannot identify the channel number column in the shapefile.\n"
+            f"Tried auto-detect names: {_AUTO_NAMES!r}\n"
+            f"Available non-geometry columns: {col_info}\n"
+            f"File: {shapefile}\n"
+            f"Hint: re-run with --channel-id-column <name> to specify it explicitly."
         )
+
+    log.info("Using column %r as channel id (dtype=%s)", resolved_col, gdf[resolved_col].dtype)
+    if resolved_col != "geo_id":
+        gdf = gdf.rename(columns={resolved_col: "geo_id"})
 
     gdf["geo_id"] = gdf["geo_id"].astype(int)
 
@@ -542,12 +590,28 @@ def load_dsm2_channel_gdf(
 # Convenience factories
 # ---------------------------------------------------------------------------
 
+
+def _dsm2_transform_options() -> dict:
+    """Return the standard DSM2 transform options dict for GeoAnimatorManager.
+
+    Keys are display names; values are ``transform_fn`` callables accepted by
+    :class:`dvue.animator.TransformedSlicingReader`.
+    """
+    return {
+        "Daily mean":     make_resample_transform("D", "mean"),
+        "Rolling 24 h":   make_moving_average_transform("24h"),
+        "Rolling 48 h":   make_moving_average_transform("48h"),
+        "Godin filter":   make_godin_transform(),
+    }
+
+
 def animate_hydro(
     h5file: "str | Path",
     variable: str = "flow",
     location: str = "both",
     shapefile: "str | Path | None" = None,
     simplify_tolerance: float = 50.0,
+    channel_id_column: "str | None" = None,
     **mgr_kwargs,
 ) -> "dvue.animator.GeoAnimatorManager":
     """Create a :class:`~dvue.animator.GeoAnimatorManager` for HYDRO channel data.
@@ -555,23 +619,15 @@ def animate_hydro(
     Parameters
     ----------
     h5file : str or Path
-        HYDRO HDF5 tidefile.
-    variable : {"flow", "stage"}, optional
-        Which variable to animate.  Default ``"flow"``.
+    variable : {"flow", "stage", "velocity"}, optional
     location : {"both", "upstream", "downstream"}, optional
-        Location to use.  ``"both"`` averages upstream and downstream.
     shapefile : str or Path, optional
-        Custom channel geometry.  Defaults to bundled GeoJSON.
     simplify_tolerance : float, optional
-        Geometry simplification tolerance in metres.  Default 50 m.
-        Set to 0 to disable.
+    channel_id_column : str or None, optional
+        Column in *shapefile* holding integer channel IDs.  Auto-detected when
+        ``None`` (tries ``'id'``, ``'channel_nu'``, ``'CHAN_NO'``).
     **mgr_kwargs
-        Forwarded to :class:`~dvue.animator.GeoAnimatorManager`
-        (``vmin``, ``vmax``, ``colormap``, ``title``, etc.).
-
-    Returns
-    -------
-    dvue.animator.GeoAnimatorManager
+        Forwarded to :class:`~dvue.animator.GeoAnimatorManager`.
     """
     from dvue.animator import GeoAnimatorManager
 
@@ -585,9 +641,15 @@ def animate_hydro(
     else:
         raise ValueError(f"variable must be 'flow', 'stage', or 'velocity', got {variable!r}")
 
-    gdf = load_dsm2_channel_gdf(shapefile, simplify_tolerance=simplify_tolerance)
-    mgr_kwargs.setdefault("title", f"DSM2 Hydro — {variable.title()}")
+    gdf = load_dsm2_channel_gdf(
+        shapefile,
+        simplify_tolerance=simplify_tolerance,
+        channel_id_column=channel_id_column,
+    )
+    mgr_kwargs.setdefault("title", f"DSM2 Hydro \u2014 {variable.title()}")
     mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
+    mgr_kwargs.setdefault("buffer_chunk_size", 200)
     return GeoAnimatorManager(reader, gdf, geo_id_column="geo_id", **mgr_kwargs)
 
 
@@ -709,6 +771,7 @@ def animate_qual(
     shapefile: "str | Path | None" = None,
     simplify_tolerance: float = 50.0,
     x2_threshold: "float | None" = None,
+    channel_id_column: "str | None" = None,
     **mgr_kwargs,
 ) -> "dvue.animator.GeoAnimatorManager":
     """Create a :class:`~dvue.animator.GeoAnimatorManager` for QUAL/GTM concentrations.
@@ -723,17 +786,13 @@ def animate_qual(
         Custom channel geometry.  Defaults to bundled GeoJSON.
     simplify_tolerance : float, optional
         Geometry simplification tolerance in metres.  Default 50 m.
-        Set to 0 to disable.
     x2_threshold : float or None, optional
-        When provided, attaches a :class:`QualH5X2Callback` so the
-        X2 isohaline control appears in the UI.  Pass the initial EC
-        threshold value (e.g. ``2700.0`` µS/cm).  Default ``None``.
+        When provided, enables the X2 isohaline control in the UI.
+    channel_id_column : str or None, optional
+        Column in *shapefile* holding integer channel IDs.  Auto-detected when
+        ``None`` (tries ``'id'``, ``'channel_nu'``, ``'CHAN_NO'``).
     **mgr_kwargs
         Forwarded to :class:`~dvue.animator.GeoAnimatorManager`.
-
-    Returns
-    -------
-    dvue.animator.GeoAnimatorManager
     """
     from dvue.animator import GeoAnimatorManager
 
@@ -741,8 +800,9 @@ def animate_qual(
 
     x2_callback = None
     if x2_threshold is not None:
-        # Load *unsimplified* centerlines for accurate interpolation
-        x2_gdf = load_dsm2_channel_gdf(shapefile, simplify_tolerance=0)
+        x2_gdf = load_dsm2_channel_gdf(
+            shapefile, simplify_tolerance=0, channel_id_column=channel_id_column
+        )
         x2_callback = QualH5X2Callback(
             reader._h5,
             reader._ds,
@@ -751,9 +811,15 @@ def animate_qual(
             x2_gdf.to_crs("EPSG:3857"),
         )
 
-    gdf = load_dsm2_channel_gdf(shapefile, simplify_tolerance=simplify_tolerance)
+    gdf = load_dsm2_channel_gdf(
+        shapefile,
+        simplify_tolerance=simplify_tolerance,
+        channel_id_column=channel_id_column,
+    )
     mgr_kwargs.setdefault("title", f"DSM2 QUAL/GTM \u2014 {constituent.upper()}")
     mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
+    mgr_kwargs.setdefault("buffer_chunk_size", 200)
     mgr = GeoAnimatorManager(
         reader, gdf, geo_id_column="geo_id",
         x2_callback=x2_callback, **mgr_kwargs,
@@ -761,4 +827,205 @@ def animate_qual(
     if x2_threshold is not None:
         mgr._x2_threshold_input.value = float(x2_threshold)
     return mgr
+
+
+# ---------------------------------------------------------------------------
+# Transform factories for use with TransformedSlicingReader
+# ---------------------------------------------------------------------------
+
+# Godin filter warmup in minutes — the filter needs 33.5 h of data before the
+# first valid output.  At 15-min intervals that is 134 raw steps.
+_GODIN_WARMUP_MINUTES = int(33.5 * 60)
+
+
+def _freq_minutes(reader: "SlicingReader") -> float:
+    """Return the reader's time step in minutes."""
+    nanos = pd.tseries.frequencies.to_offset(reader.time_index.freq).nanos
+    return nanos / 60e9
+
+
+def make_resample_transform(freq: str = "D", agg: str = "mean"):
+    """Return a transform that resamples to a coarser time step.
+
+    The resulting :class:`~dvue.animator.TransformedSlicingReader` will have a
+    coarser (fewer timesteps) regular ``DatetimeIndex``.
+
+    Parameters
+    ----------
+    freq : str, optional
+        Target pandas frequency string.  Examples: ``"D"`` (daily),
+        ``"h"`` (hourly), ``"6h"`` (6-hourly).  Default ``"D"``.
+    agg : {"mean", "sum", "max", "min"}, optional
+        Aggregation to apply within each resampled bin.  Default ``"mean"``.
+
+    Returns
+    -------
+    callable
+        A function ``(df: pd.DataFrame) -> pd.DataFrame`` suitable as
+        ``transform_fn`` for :class:`~dvue.animator.TransformedSlicingReader`.
+
+    Examples
+    --------
+    >>> from dsm2ui.animate import HydroH5FlowReader, make_resample_transform
+    >>> from dvue.animator import TransformedSlicingReader, BufferedSlicingReader
+    >>> raw = HydroH5FlowReader("tidefile.h5")
+    >>> daily = TransformedSlicingReader(raw, make_resample_transform("D"))
+    >>> buffered = BufferedSlicingReader(daily)
+    """
+    def _transform(df: pd.DataFrame) -> pd.DataFrame:
+        resampled = getattr(df.resample(freq), agg)()
+        # Enforce that the output has a freq attribute (resample can drop it)
+        if resampled.index.freq is None:
+            resampled.index.freq = pd.tseries.frequencies.to_offset(freq)
+        return resampled
+    _transform.__name__ = f"resample_{freq}_{agg}"
+    return _transform
+
+
+def make_moving_average_transform(window: str = "24h", min_periods: int = 1):
+    """Return a transform that applies a centred rolling mean.
+
+    The time index and frequency are **unchanged** — the same number of
+    timesteps are returned.  Values at the edges of the series (where the
+    full window is not available) are computed from ``min_periods`` samples.
+
+    Parameters
+    ----------
+    window : str, optional
+        Rolling window size as a pandas offset string (e.g. ``"24h"``,
+        ``"48h"``, ``"7D"``).  Default ``"24h"``.
+    min_periods : int, optional
+        Minimum observations required to produce a non-NaN output.
+        Default ``1`` (use what is available at the edges).
+
+    Returns
+    -------
+    callable
+        ``(df: pd.DataFrame) -> pd.DataFrame``
+
+    Examples
+    --------
+    >>> raw = HydroH5FlowReader("tidefile.h5")
+    >>> smooth = TransformedSlicingReader(
+    ...     raw, make_moving_average_transform("24h")
+    ... )
+    """
+    def _transform(df: pd.DataFrame) -> pd.DataFrame:
+        rolled = df.rolling(window, center=True, min_periods=min_periods).mean()
+        rolled.index.freq = df.index.freq   # preserve freq (rolling may drop it)
+        return rolled
+    _transform.__name__ = f"rolling_{window}_mean"
+    return _transform
+
+
+def make_godin_transform():
+    """Return a transform that applies the Godin tidal filter via vtools3.
+
+    The Godin filter is a cascaded cosine-Lanczos low-pass filter that removes
+    tidal variability (periods < ~25 h) while preserving subtidal signals.  It
+    requires **vtools3** which is a DSM2-specific dependency not bundled with
+    dvue.
+
+    The output has the **same time index** as the input but with NaN for the
+    ~33.5 h warmup period at each end.  To remove the NaN edges, pass
+    ``warmup_steps`` to :class:`~dvue.animator.TransformedSlicingReader`.
+
+    The convenience helper :func:`apply_godin` constructs a
+    ``TransformedSlicingReader`` with the correct warmup automatically.
+
+    Returns
+    -------
+    callable
+        ``(df: pd.DataFrame) -> pd.DataFrame``
+
+    Raises
+    ------
+    ImportError
+        If vtools3 is not installed.
+
+    Examples
+    --------
+    >>> raw = HydroH5FlowReader("tidefile.h5")
+    >>> tidally_filtered = TransformedSlicingReader(
+    ...     raw, make_godin_transform(),
+    ...     warmup_steps=134,          # 33.5 h at 15-min intervals
+    ... )
+    """
+    def _transform(df: pd.DataFrame) -> pd.DataFrame:
+        try:
+            from vtools.functions.filter import godin
+        except ImportError as exc:
+            raise ImportError(
+                "The Godin tidal filter requires vtools3.  "
+                "Install it with: conda install -c cadwr-dms vtools3"
+            ) from exc
+
+        # godin() returns a Series; apply column-by-column then reassemble.
+        # Some vtools3 builds return a 2-D object (shape N×1) when the input
+        # is derived from a DataFrame column — squeeze to 1-D first.
+        out_cols = {}
+        for col in df.columns:
+            series = df[col].copy()
+            try:
+                filtered = godin(series)
+                # Ensure result is 1-D (squeeze any trailing dimensions)
+                if hasattr(filtered, "squeeze"):
+                    filtered = filtered.squeeze()
+                if not isinstance(filtered, pd.Series):
+                    filtered = pd.Series(np.asarray(filtered).ravel(),
+                                         index=series.index)
+            except Exception:
+                filtered = pd.Series(np.nan, index=series.index)
+            out_cols[col] = filtered
+
+        result = pd.DataFrame(out_cols, index=df.index)
+        result.index.freq = df.index.freq
+        return result
+
+    _transform.__name__ = "godin_filter"
+    return _transform
+
+
+def apply_godin(
+    inner: "SlicingReader",
+) -> "dvue.animator.TransformedSlicingReader":
+    """Wrap *inner* with a Godin tidal filter, discarding the warmup edges.
+
+    This is a convenience helper that:
+    1. Computes the correct ``warmup_steps`` from the reader's time step.
+    2. Constructs a :class:`~dvue.animator.TransformedSlicingReader` with the
+       Godin transform and that warmup.
+
+    Parameters
+    ----------
+    inner : SlicingReader
+        Raw reader (e.g. :class:`HydroH5FlowReader`).
+
+    Returns
+    -------
+    TransformedSlicingReader
+        Ready to wrap with :class:`~dvue.animator.BufferedSlicingReader`.
+
+    Raises
+    ------
+    ImportError
+        If vtools3 is not installed.
+
+    Examples
+    --------
+    >>> from dsm2ui.animate import HydroH5FlowReader, apply_godin
+    >>> from dvue.animator import BufferedSlicingReader
+    >>> raw = HydroH5FlowReader("hist_fc_mss.h5")
+    >>> godin_reader = apply_godin(raw)
+    >>> buffered = BufferedSlicingReader(godin_reader, chunk_size=100)
+    """
+    from dvue.animator import TransformedSlicingReader
+
+    step_minutes = _freq_minutes(inner)
+    warmup_steps = max(1, int(_GODIN_WARMUP_MINUTES / step_minutes))
+    return TransformedSlicingReader(
+        inner,
+        transform_fn=make_godin_transform(),
+        warmup_steps=warmup_steps,
+    )
 

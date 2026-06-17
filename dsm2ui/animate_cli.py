@@ -39,6 +39,15 @@ def _title_to_slug(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "animate"
 
 
+_CLI_TRANSFORM_MAP = {
+    "none":        "none",
+    "daily":       "Daily mean",
+    "rolling-24h": "Rolling 24 h",
+    "rolling-48h": "Rolling 48 h",
+    "godin":       "Godin filter",
+}
+
+
 def _serve_viewer(build_fn, slug: str, title: str, port: int, desktop: bool) -> None:
     """Serve a factory that returns a ``pn.viewable.Viewer`` per-session.
 
@@ -94,6 +103,9 @@ _COMMON_OPTIONS = [
                  help="Line width in pixels (channels are LineStrings)."),
     click.option("--simplify", default=50.0, show_default=True, type=float,
                  help="Geometry simplification tolerance in metres (0 = off)."),
+    click.option("--channel-id-column", default=None,
+                 help="Column in the shapefile holding integer channel numbers. "
+                      "Auto-detected when omitted (tries 'id', 'channel_nu', 'CHAN_NO')."),
     click.option("--log-level", default="warning", show_default=True,
                  type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
                  help="Logging verbosity."),
@@ -130,10 +142,20 @@ def animate():
 @click.option("--location", default="both", show_default=True,
               type=click.Choice(["both", "upstream", "downstream"], case_sensitive=False),
               help="Channel location ('both' averages upstream and downstream).")
+@click.option("--transform", default="none", show_default=True,
+              type=click.Choice(["none", "daily", "rolling-24h", "rolling-48h", "godin"],
+                                case_sensitive=False),
+              help="Time-domain transform to apply before animation.\n"
+                   "none: raw data (default).\n"
+                   "daily: daily mean (resamples to 1-day steps).\n"
+                   "rolling-24h: 24 h centred rolling mean (same timestep).\n"
+                   "rolling-48h: 48 h centred rolling mean (same timestep).\n"
+                   "godin: Godin tidal filter (requires vtools3).")
 @_add_common_options
 def hydro_cmd(
-    h5file, variable, location,
-    port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify, log_level,
+    h5file, variable, location, transform,
+    port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
+    channel_id_column, log_level,
 ):
     """Animate a HYDRO tidefile (flow or stage) on the channel network map."""
     import logging
@@ -143,8 +165,8 @@ def hydro_cmd(
 
     effective_title = title or f"DSM2 Hydro {variable.title()}"
     slug = _title_to_slug(effective_title)
-    log.info("Building HYDRO reader from %s (variable=%s, location=%s)",
-             h5file, variable, location)
+    log.info("Building HYDRO reader from %s (variable=%s, location=%s, transform=%s)",
+             h5file, variable, location, transform)
 
     def build():
         import holoviews as hv
@@ -152,7 +174,6 @@ def hydro_cmd(
         hv.extension("bokeh")
         pn.extension(throttled=True)
         from dsm2ui.animate import animate_hydro
-        from dvue.animator import BufferedSlicingReader
         log.info("Constructing GeoAnimatorManager for new session")
         mgr = animate_hydro(
             h5file,
@@ -160,14 +181,14 @@ def hydro_cmd(
             location=location,
             shapefile=shapefile,
             simplify_tolerance=simplify,
+            channel_id_column=channel_id_column,
             vmin=vmin,
             vmax=vmax,
             colormap=colormap,
             title=effective_title,
             size=size,
+            initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
         )
-        # Wrap reader with buffer: reads 200-step chunks from HDF5
-        mgr._reader = BufferedSlicingReader(mgr._reader, chunk_size=200)
         log.info("Reader time_index: %d steps from %s to %s",
                  len(mgr._reader.time_index),
                  mgr._reader.time_index[0],
@@ -185,10 +206,15 @@ def hydro_cmd(
 @click.option("--x2-threshold", default=None, type=float,
               help="Enable X2 isohaline overlay at this EC threshold (µS/cm). "
                    "Example: --x2-threshold 2700")
+@click.option("--transform", default="none", show_default=True,
+              type=click.Choice(["none", "daily", "rolling-24h", "rolling-48h", "godin"],
+                                case_sensitive=False),
+              help="Time-domain transform (none/daily/rolling-24h/rolling-48h/godin).")
 @_add_common_options
 def qual_cmd(
-    h5file, constituent, x2_threshold,
-    port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify, log_level,
+    h5file, constituent, x2_threshold, transform,
+    port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
+    channel_id_column, log_level,
 ):
     """Animate a QUAL or GTM tidefile (concentration) on the channel network map."""
     import logging
@@ -206,22 +232,21 @@ def qual_cmd(
         hv.extension("bokeh")
         pn.extension(throttled=True)
         from dsm2ui.animate import animate_qual
-        from dvue.animator import BufferedSlicingReader
         log.info("Constructing GeoAnimatorManager for new session")
         mgr = animate_qual(
             h5file,
             constituent=constituent,
             shapefile=shapefile,
             simplify_tolerance=simplify,
+            channel_id_column=channel_id_column,
             x2_threshold=x2_threshold,
             vmin=vmin,
             vmax=vmax,
             colormap=colormap,
             title=effective_title,
             size=size,
+            initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
         )
-        # Wrap reader with buffer: reads 200-step chunks from HDF5
-        mgr._reader = BufferedSlicingReader(mgr._reader, chunk_size=200)
         log.info("Reader time_index: %d steps from %s to %s",
                  len(mgr._reader.time_index),
                  mgr._reader.time_index[0],

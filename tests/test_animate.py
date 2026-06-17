@@ -344,6 +344,7 @@ def test_animate_hydro_subcommand_help():
     result = runner.invoke(animate, ["hydro", "--help"])
     assert result.exit_code == 0
     assert "--variable" in result.output
+    assert "--transform" in result.output
 
 
 def test_animate_qual_subcommand_help():
@@ -353,3 +354,66 @@ def test_animate_qual_subcommand_help():
     result = runner.invoke(animate, ["qual", "--help"])
     assert result.exit_code == 0
     assert "--constituent" in result.output
+    assert "--transform" in result.output
+
+
+# ===========================================================================
+# Transform factory tests (synthetic data, no HDF5 needed)
+# ===========================================================================
+
+
+class TestTransformFactories:
+    """Tests for DSM2 transform factory functions using synthetic readers."""
+
+    @pytest.fixture
+    def reader_15min(self):
+        """96 steps × 4 channels at 15-min intervals (24 hours of data)."""
+        from dvue.animator import InMemorySlicingReader
+        idx = pd.date_range("2020-01-01", periods=96, freq="15min")
+        rng = np.random.default_rng(99)
+        data = rng.uniform(100.0, 1000.0, size=(96, 4))
+        df = pd.DataFrame(data, index=idx, columns=[1, 2, 3, 4])
+        return InMemorySlicingReader(df)
+
+    def test_resample_transform_daily(self, reader_15min):
+        from dsm2ui.animate import make_resample_transform
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(reader_15min, make_resample_transform("D"))
+        # 96 × 15-min = 24 h = 1 day → 1 daily step
+        assert len(tr.time_index) == 1
+        assert tr.time_index.freq == pd.tseries.frequencies.to_offset("D")
+
+    def test_resample_transform_hourly(self, reader_15min):
+        from dsm2ui.animate import make_resample_transform
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(reader_15min, make_resample_transform("h"))
+        assert len(tr.time_index) == 24
+        assert tr.time_index.freq == pd.tseries.frequencies.to_offset("h")
+
+    def test_moving_average_keeps_steps(self, reader_15min):
+        from dsm2ui.animate import make_moving_average_transform
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(reader_15min, make_moving_average_transform("2h"))
+        assert len(tr.time_index) == 96
+
+    def test_moving_average_returns_finite_values(self, reader_15min):
+        from dsm2ui.animate import make_moving_average_transform
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(reader_15min, make_moving_average_transform("2h"))
+        s = tr.get_slice(tr.time_index[48])
+        assert s.notna().all()
+
+    def test_make_resample_with_buffered(self, reader_15min):
+        from dsm2ui.animate import make_resample_transform
+        from dvue.animator import TransformedSlicingReader, BufferedSlicingReader
+        tr = TransformedSlicingReader(reader_15min, make_resample_transform("h"))
+        buf = BufferedSlicingReader(tr, chunk_size=10)
+        s = buf.get_slice(tr.time_index[0])
+        assert isinstance(s, pd.Series)
+
+    def test_transform_vmin_vmax_in_raw_range(self, reader_15min):
+        from dsm2ui.animate import make_resample_transform
+        from dvue.animator import TransformedSlicingReader
+        tr = TransformedSlicingReader(reader_15min, make_resample_transform("h"))
+        assert tr.vmin >= reader_15min.vmin - 1e-6
+        assert tr.vmax <= reader_15min.vmax + 1e-6
