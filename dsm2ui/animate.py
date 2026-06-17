@@ -1029,3 +1029,152 @@ def apply_godin(
         warmup_steps=warmup_steps,
     )
 
+
+# ---------------------------------------------------------------------------
+# Multi-file factories (side-by-side + diff)
+# ---------------------------------------------------------------------------
+
+def animate_hydro_multi(
+    h5file_a: "str | Path",
+    h5file_b: "str | Path",
+    variable: str = "flow",
+    location: str = "both",
+    shapefiles: "list[str | Path | None] | None" = None,
+    simplify_tolerance: float = 50.0,
+    channel_id_column: "str | None" = None,
+    show_diff: bool = False,
+    title_a: "str | None" = None,
+    title_b: "str | None" = None,
+    **mgr_kwargs,
+) -> "dvue.animator.MultiGeoAnimatorManager":
+    """Create a :class:`~dvue.animator.MultiGeoAnimatorManager` for two HYDRO files.
+
+    Parameters
+    ----------
+    h5file_a, h5file_b : str or Path
+        Two HYDRO HDF5 tidefiles (Study A and Study B).
+    variable : {"flow", "stage", "velocity"}, optional
+    location : {"both", "upstream", "downstream"}, optional
+    shapefiles : list of 1 or 2 paths, optional
+        If one path (or ``None``), the same shapefile is used for both maps.
+        If two paths, the first is used for A, the second for B.
+    simplify_tolerance : float, optional
+    channel_id_column : str or None, optional
+    show_diff : bool, optional
+        Start in diff (A − B) mode.  Default ``False``.
+    title_a, title_b : str or None, optional
+        Map titles.  Default to the H5 file basenames.
+    **mgr_kwargs
+        Forwarded to :class:`~dvue.animator.MultiGeoAnimatorManager`.
+    """
+    from dvue.animator import MultiGeoAnimatorManager
+    from pathlib import Path as _Path
+
+    variable = variable.lower()
+
+    def _make_reader(h5):
+        if variable == "flow":
+            return HydroH5FlowReader(h5, location=location)
+        if variable == "stage":
+            return HydroH5StageReader(h5, location=location)
+        if variable == "velocity":
+            return HydroH5VelocityReader(h5, location=location)
+        raise ValueError(f"variable must be flow/stage/velocity, got {variable!r}")
+
+    reader_a = _make_reader(h5file_a)
+    reader_b = _make_reader(h5file_b)
+
+    sf_a, sf_b = _resolve_shapefiles(shapefiles)
+    gdf_a = load_dsm2_channel_gdf(sf_a, simplify_tolerance=simplify_tolerance,
+                                   channel_id_column=channel_id_column)
+    gdf_b = load_dsm2_channel_gdf(sf_b, simplify_tolerance=simplify_tolerance,
+                                   channel_id_column=channel_id_column) if sf_b != sf_a else gdf_a
+
+    ta = title_a or _Path(h5file_a).stem
+    tb = title_b or _Path(h5file_b).stem
+
+    mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
+    mgr_kwargs.setdefault("buffer_chunk_size", 200)
+    return MultiGeoAnimatorManager(
+        reader_a, reader_b,
+        gdf_a=gdf_a, gdf_b=gdf_b,
+        title_a=ta, title_b=tb,
+        geo_id_column="geo_id",
+        show_diff=show_diff,
+        **mgr_kwargs,
+    )
+
+
+def animate_qual_multi(
+    h5file_a: "str | Path",
+    h5file_b: "str | Path",
+    constituent: str = "ec",
+    shapefiles: "list[str | Path | None] | None" = None,
+    simplify_tolerance: float = 50.0,
+    channel_id_column: "str | None" = None,
+    show_diff: bool = False,
+    title_a: "str | None" = None,
+    title_b: "str | None" = None,
+    **mgr_kwargs,
+) -> "dvue.animator.MultiGeoAnimatorManager":
+    """Create a :class:`~dvue.animator.MultiGeoAnimatorManager` for two QUAL files.
+
+    Parameters
+    ----------
+    h5file_a, h5file_b : str or Path
+        Two QUAL/GTM HDF5 tidefiles.
+    constituent : str, optional
+    shapefiles : list of 1 or 2 paths, optional
+    simplify_tolerance : float, optional
+    channel_id_column : str or None, optional
+    show_diff : bool, optional
+        Start in diff (A − B) mode.  Default ``False``.
+    title_a, title_b : str or None, optional
+    **mgr_kwargs
+        Forwarded to :class:`~dvue.animator.MultiGeoAnimatorManager`.
+    """
+    from dvue.animator import MultiGeoAnimatorManager
+    from pathlib import Path as _Path
+
+    reader_a = QualH5ConcentrationReader(h5file_a, constituent=constituent)
+    reader_b = QualH5ConcentrationReader(h5file_b, constituent=constituent)
+
+    sf_a, sf_b = _resolve_shapefiles(shapefiles)
+    gdf_a = load_dsm2_channel_gdf(sf_a, simplify_tolerance=simplify_tolerance,
+                                   channel_id_column=channel_id_column)
+    gdf_b = load_dsm2_channel_gdf(sf_b, simplify_tolerance=simplify_tolerance,
+                                   channel_id_column=channel_id_column) if sf_b != sf_a else gdf_a
+
+    ta = title_a or _Path(h5file_a).stem
+    tb = title_b or _Path(h5file_b).stem
+
+    mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
+    mgr_kwargs.setdefault("buffer_chunk_size", 200)
+    return MultiGeoAnimatorManager(
+        reader_a, reader_b,
+        gdf_a=gdf_a, gdf_b=gdf_b,
+        title_a=ta, title_b=tb,
+        geo_id_column="geo_id",
+        show_diff=show_diff,
+        **mgr_kwargs,
+    )
+
+
+def _resolve_shapefiles(
+    shapefiles: "list | None",
+) -> "tuple[str | None, str | None]":
+    """Return (sf_a, sf_b) from a list of 0–2 shapefile paths.
+
+    Rules:
+    - None or []     → both None  (use bundled GeoJSON)
+    - [sf1]          → sf_a = sf1, sf_b = sf1
+    - [sf1, sf2]     → sf_a = sf1, sf_b = sf2
+    """
+    if not shapefiles:
+        return None, None
+    if len(shapefiles) == 1:
+        return shapefiles[0], shapefiles[0]
+    return shapefiles[0], shapefiles[1]
+

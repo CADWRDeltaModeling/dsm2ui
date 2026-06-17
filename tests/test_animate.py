@@ -345,6 +345,7 @@ def test_animate_hydro_subcommand_help():
     assert result.exit_code == 0
     assert "--variable" in result.output
     assert "--transform" in result.output
+    assert "--diff" in result.output
 
 
 def test_animate_qual_subcommand_help():

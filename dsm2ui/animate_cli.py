@@ -131,17 +131,22 @@ def animate():
         dsm2ui animate hydro path/to/tidefile.h5
         dsm2ui animate hydro path/to/tidefile.h5 --variable stage
         dsm2ui animate qual  path/to/qual_ec.h5 --constituent ec
+        dsm2ui animate hydro study_a.h5 study_b.h5          # side-by-side
+        dsm2ui animate hydro study_a.h5 study_b.h5 --diff   # diff map
     """
 
 
 @animate.command(name="hydro", context_settings=CONTEXT_SETTINGS)
-@click.argument("h5file", type=click.Path(exists=True, dir_okay=False, readable=True))
+@click.argument("h5files", nargs=-1, required=True,
+                type=click.Path(exists=True, dir_okay=False, readable=True))
 @click.option("--variable", default="flow", show_default=True,
               type=click.Choice(["flow", "stage", "velocity"], case_sensitive=False),
               help="Tidefile variable to animate.")
 @click.option("--location", default="both", show_default=True,
               type=click.Choice(["both", "upstream", "downstream"], case_sensitive=False),
               help="Channel location ('both' averages upstream and downstream).")
+@click.option("--diff", "show_diff", is_flag=True, default=False,
+              help="Show diff map (A − B) instead of side-by-side (only with 2 files).")
 @click.option("--transform", default="none", show_default=True,
               type=click.Choice(["none", "daily", "rolling-24h", "rolling-14d", "godin"],
                                 case_sensitive=False),
@@ -153,105 +158,126 @@ def animate():
                    "godin: Godin tidal filter (requires vtools3).")
 @_add_common_options
 def hydro_cmd(
-    h5file, variable, location, transform,
+    h5files, variable, location, show_diff, transform,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
-    """Animate a HYDRO tidefile (flow or stage) on the channel network map."""
+    """Animate 1 or 2 HYDRO tidefiles.  With 2 files: side-by-side or --diff."""
+    if len(h5files) > 2:
+        raise click.UsageError("At most 2 H5FILE arguments are supported.")
     import logging
     logging.basicConfig(level=getattr(logging, log_level.upper()),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     log = logging.getLogger("dsm2ui.animate")
 
-    effective_title = title or f"DSM2 Hydro {variable.title()}"
+    multi = len(h5files) == 2
+    effective_title = title or (f"DSM2 Hydro {variable.title()} (Δ)" if (multi and show_diff)
+                                else f"DSM2 Hydro {variable.title()}")
     slug = _title_to_slug(effective_title)
-    log.info("Building HYDRO reader from %s (variable=%s, location=%s, transform=%s)",
-             h5file, variable, location, transform)
+
+    shapefiles = [shapefile] if shapefile else None
 
     def build():
         import holoviews as hv
         import panel as pn
         hv.extension("bokeh")
         pn.extension(throttled=True)
-        from dsm2ui.animate import animate_hydro
-        log.info("Constructing GeoAnimatorManager for new session")
-        mgr = animate_hydro(
-            h5file,
-            variable=variable,
-            location=location,
-            shapefile=shapefile,
-            simplify_tolerance=simplify,
-            channel_id_column=channel_id_column,
-            vmin=vmin,
-            vmax=vmax,
-            colormap=colormap,
-            title=effective_title,
-            size=size,
-            initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
-        )
-        log.info("Reader time_index: %d steps from %s to %s",
-                 len(mgr._reader.time_index),
-                 mgr._reader.time_index[0],
-                 mgr._reader.time_index[-1])
-        log.info("vmin=%.4g  vmax=%.4g", mgr._reader.vmin, mgr._reader.vmax)
+        if multi:
+            from dsm2ui.animate import animate_hydro_multi
+            mgr = animate_hydro_multi(
+                h5files[0], h5files[1],
+                variable=variable, location=location,
+                shapefiles=shapefiles,
+                simplify_tolerance=simplify,
+                channel_id_column=channel_id_column,
+                show_diff=show_diff,
+                vmin=vmin, vmax=vmax, colormap=colormap, size=size,
+                initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
+            )
+        else:
+            from dsm2ui.animate import animate_hydro
+            mgr = animate_hydro(
+                h5files[0],
+                variable=variable, location=location,
+                shapefile=shapefile,
+                simplify_tolerance=simplify,
+                channel_id_column=channel_id_column,
+                vmin=vmin, vmax=vmax, colormap=colormap,
+                title=effective_title, size=size,
+                initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
+            )
+        log.info("Reader time_index: %d steps", len(mgr._reader_a.time_index if multi else mgr._reader.time_index))
         return mgr
 
     _serve_viewer(build, slug=slug, title=effective_title, port=port, desktop=desktop)
 
 
 @animate.command(name="qual", context_settings=CONTEXT_SETTINGS)
-@click.argument("h5file", type=click.Path(exists=True, dir_okay=False, readable=True))
+@click.argument("h5files", nargs=-1, required=True,
+                type=click.Path(exists=True, dir_okay=False, readable=True))
 @click.option("--constituent", default="ec", show_default=True,
               help="Constituent name (case-insensitive, e.g. ec, cl, do).")
 @click.option("--x2-threshold", default=None, type=float,
               help="Enable X2 isohaline overlay at this EC threshold (µS/cm). "
-                   "Example: --x2-threshold 2700")
+                   "Only used with a single file.")
+@click.option("--diff", "show_diff", is_flag=True, default=False,
+              help="Show diff map (A \u2212 B) instead of side-by-side (only with 2 files).")
 @click.option("--transform", default="none", show_default=True,
               type=click.Choice(["none", "daily", "rolling-24h", "rolling-14d", "godin"],
                                 case_sensitive=False),
               help="Time-domain transform (none/daily/rolling-24h/rolling-14d/godin).")
 @_add_common_options
 def qual_cmd(
-    h5file, constituent, x2_threshold, transform,
+    h5files, constituent, x2_threshold, show_diff, transform,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
-    """Animate a QUAL or GTM tidefile (concentration) on the channel network map."""
+    """Animate 1 or 2 QUAL/GTM tidefiles.  With 2 files: side-by-side or --diff."""
+    if len(h5files) > 2:
+        raise click.UsageError("At most 2 H5FILE arguments are supported.")
     import logging
     logging.basicConfig(level=getattr(logging, log_level.upper()),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     log = logging.getLogger("dsm2ui.animate")
 
-    effective_title = title or f"DSM2 QUAL {constituent.upper()}"
+    multi = len(h5files) == 2
+    effective_title = title or (f"DSM2 QUAL {constituent.upper()} (\u0394)" if (multi and show_diff)
+                                else f"DSM2 QUAL {constituent.upper()}")
     slug = _title_to_slug(effective_title)
-    log.info("Building QUAL/GTM reader from %s (constituent=%s)", h5file, constituent)
+
+    shapefiles = [shapefile] if shapefile else None
 
     def build():
         import holoviews as hv
         import panel as pn
         hv.extension("bokeh")
         pn.extension(throttled=True)
-        from dsm2ui.animate import animate_qual
-        log.info("Constructing GeoAnimatorManager for new session")
-        mgr = animate_qual(
-            h5file,
-            constituent=constituent,
-            shapefile=shapefile,
-            simplify_tolerance=simplify,
-            channel_id_column=channel_id_column,
-            x2_threshold=x2_threshold,
-            vmin=vmin,
-            vmax=vmax,
-            colormap=colormap,
-            title=effective_title,
-            size=size,
-            initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
-        )
-        log.info("Reader time_index: %d steps from %s to %s",
-                 len(mgr._reader.time_index),
-                 mgr._reader.time_index[0],
-                 mgr._reader.time_index[-1])
-        log.info("vmin=%.4g  vmax=%.4g", mgr._reader.vmin, mgr._reader.vmax)
+        if multi:
+            from dsm2ui.animate import animate_qual_multi
+            mgr = animate_qual_multi(
+                h5files[0], h5files[1],
+                constituent=constituent,
+                shapefiles=shapefiles,
+                simplify_tolerance=simplify,
+                channel_id_column=channel_id_column,
+                show_diff=show_diff,
+                vmin=vmin, vmax=vmax, colormap=colormap, size=size,
+                initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
+            )
+        else:
+            from dsm2ui.animate import animate_qual
+            mgr = animate_qual(
+                h5files[0],
+                constituent=constituent,
+                shapefile=shapefile,
+                simplify_tolerance=simplify,
+                channel_id_column=channel_id_column,
+                x2_threshold=x2_threshold,
+                vmin=vmin, vmax=vmax, colormap=colormap,
+                title=effective_title, size=size,
+                initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
+            )
+        log.info("Ready")
         return mgr
 
     _serve_viewer(build, slug=slug, title=effective_title, port=port, desktop=desktop)
