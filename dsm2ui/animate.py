@@ -148,6 +148,31 @@ class _DSM2BaseH5Reader(SlicingReader):
 
         self._filepath = Path(filepath)
         self._h5 = h5py.File(self._filepath, "r")
+        if dataset_path not in self._h5:
+            # Diagnose the mismatch — tell the user which top-level groups the
+            # file actually contains so they can pick the right sub-command.
+            top_keys = list(self._h5.keys())
+            expected_root = dataset_path.split("/")[1]  # e.g. "hydro" or "output"
+            if expected_root not in self._h5:
+                alt_roots = [k for k in top_keys if k in ("hydro", "qual", "gtm", "output")]
+                hint = (
+                    "The file appears to be a QUAL/GTM tidefile — try 'dsm2ui animate qual'."
+                    if "output" in top_keys or "qual" in top_keys
+                    else (
+                        "The file appears to be a HYDRO tidefile — try 'dsm2ui animate hydro'."
+                        if "hydro" in top_keys
+                        else f"Top-level groups found: {top_keys}"
+                    )
+                )
+            else:
+                hint = f"Dataset '{dataset_path}' not found; top-level groups: {top_keys}"
+            self._h5.close()
+            raise ValueError(
+                f"Wrong HDF5 file type for this command.\n"
+                f"File   : {self._filepath}\n"
+                f"Wanted : {dataset_path}\n"
+                f"Hint   : {hint}"
+            )
         self._ds = self._h5[dataset_path]
 
         # Build DatetimeIndex from dataset attributes
@@ -571,6 +596,24 @@ def load_dsm2_channel_gdf(
     # giving a significant rendering speed-up for large tidefiles.
     if simplify_tolerance and simplify_tolerance > 0:
         gdf = gdf.to_crs("EPSG:3857")
+        # Drop rows whose geometry has non-finite coordinates (NaN / inf).
+        # Such geometries cause a GEOS IllegalArgumentException during
+        # simplification and typically come from NULL / corrupt shapefile rows.
+        import shapely
+        valid_mask = gdf.geometry.apply(
+            lambda g: g is not None
+            and not g.is_empty
+            and np.all(np.isfinite(shapely.get_coordinates(g)))
+        )
+        n_dropped = (~valid_mask).sum()
+        if n_dropped:
+            log.warning(
+                "Dropping %d shapefile row(s) with non-finite geometry coordinates "
+                "before simplification (channel ids: %s).",
+                n_dropped,
+                gdf.loc[~valid_mask, "geo_id"].tolist(),
+            )
+            gdf = gdf.loc[valid_mask].copy()
         gdf["geometry"] = gdf.geometry.simplify(
             tolerance=simplify_tolerance, preserve_topology=True
         )
