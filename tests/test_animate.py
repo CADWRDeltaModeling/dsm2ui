@@ -418,3 +418,233 @@ class TestTransformFactories:
         tr = TransformedSlicingReader(reader_15min, make_resample_transform("h"))
         assert tr.vmin >= reader_15min.vmin - 1e-6
         assert tr.vmax <= reader_15min.vmax + 1e-6
+
+
+# ===========================================================================
+# Config save / load tests — no HDF5 required
+# ===========================================================================
+
+def _make_synthetic_manager():
+    """Return a GeoAnimatorManager built from synthetic data (no HDF5 needed)."""
+    import panel as pn
+    import geopandas as gpd
+    from shapely.geometry import LineString
+    pn.extension()
+
+    from dvue.animator import InMemorySlicingReader, GeoAnimatorManager
+
+    idx = pd.date_range("2020-01-01", periods=48, freq="15min")
+    rng = np.random.default_rng(42)
+    data = pd.DataFrame(
+        rng.uniform(0, 5000, size=(48, 4)),
+        index=idx,
+        columns=[1, 2, 3, 4],
+    )
+    reader = InMemorySlicingReader(data)
+
+    # Minimal LineString GDF (mimics DSM2 channel centrelines)
+    gdf = gpd.GeoDataFrame(
+        {"geo_id": [1, 2, 3, 4],
+         "geometry": [
+             LineString([(-122.0, 38.0), (-121.9, 38.0)]),
+             LineString([(-121.9, 38.0), (-121.8, 38.0)]),
+             LineString([(-121.8, 38.0), (-121.7, 38.0)]),
+             LineString([(-121.7, 38.0), (-121.6, 38.0)]),
+         ]},
+        crs="EPSG:4326",
+    )
+
+    mgr = GeoAnimatorManager(reader, gdf, geo_id_column="geo_id",
+                             colormap="rainbow", vmin=100.0, vmax=4000.0,
+                             size=3.0)
+    # Simulate what animate_hydro() sets
+    mgr._animate_meta = {
+        "mode": "single",
+        "file_type": "hydro",
+        "files": [{"path": "/fake/tidefile.h5", "title": ""}],
+        "variable": "flow",
+        "location": "both",
+        "shapefile": None,
+        "channel_id_column": None,
+        "_transform_cli_keys": {
+            "Daily mean": "daily",
+            "Rolling 24 h": "rolling-24h",
+            "Rolling 14 D": "rolling-14d",
+            "Godin filter": "godin",
+        },
+    }
+    mgr._config_path_input.value = "/fake/tidefile_animate.yml"
+    return mgr
+
+
+class TestConfigSaveLoad:
+    """Round-trip tests for the YAML save/load feature.
+
+    All tests use synthetic in-memory data — no HDF5 files required.
+    """
+
+    def test_collect_state_returns_required_keys(self):
+        mgr = _make_synthetic_manager()
+        state = mgr.collect_state()
+        for key in ("version", "mode", "files", "file_type", "variable",
+                    "transform", "colormap", "vmin", "vmax", "size",
+                    "show_channels", "show_basemap", "contours", "diff", "x2"):
+            assert key in state, f"missing key: {key!r}"
+
+    def test_collect_state_version_is_1(self):
+        mgr = _make_synthetic_manager()
+        assert mgr.collect_state()["version"] == 1
+
+    def test_collect_state_colormap_matches_widget(self):
+        mgr = _make_synthetic_manager()
+        state = mgr.collect_state()
+        assert state["colormap"] == mgr.colormap
+
+    def test_collect_state_vmin_vmax(self):
+        mgr = _make_synthetic_manager()
+        state = mgr.collect_state()
+        assert state["vmin"] == 100.0
+        assert state["vmax"] == 4000.0
+
+    def test_collect_state_contours_default_disabled(self):
+        mgr = _make_synthetic_manager()
+        assert mgr.collect_state()["contours"]["enabled"] is False
+
+    def test_collect_state_contours_enabled_after_toggle(self):
+        mgr = _make_synthetic_manager()
+        mgr._contours_check.value = True
+        assert mgr.collect_state()["contours"]["enabled"] is True
+
+    def test_collect_state_custom_levels_round_trip(self):
+        mgr = _make_synthetic_manager()
+        mgr._contour_custom_input.value = "500, 1000, 2000"
+        state = mgr.collect_state()
+        assert state["contours"]["custom_levels"] == "500, 1000, 2000"
+
+    def test_collect_state_transform_none_by_default(self):
+        mgr = _make_synthetic_manager()
+        state = mgr.collect_state()
+        assert state["transform"] == "none"
+
+    def test_save_writes_valid_yaml(self, tmp_path):
+        import yaml
+        mgr = _make_synthetic_manager()
+        out = tmp_path / "test_config.yml"
+        mgr._config_path_input.value = str(out)
+        mgr._on_save_config(None)
+        assert "Saved" in mgr._save_config_status.object
+        assert out.exists()
+        loaded = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert loaded["version"] == 1
+        assert loaded["file_type"] == "hydro"
+        assert loaded["colormap"] == "rainbow"
+
+    def test_save_creates_parent_dirs(self, tmp_path):
+        import yaml
+        mgr = _make_synthetic_manager()
+        nested = tmp_path / "sub" / "dir" / "config.yml"
+        mgr._config_path_input.value = str(nested)
+        mgr._on_save_config(None)
+        assert nested.exists()
+
+    def test_save_empty_path_shows_warning(self):
+        mgr = _make_synthetic_manager()
+        mgr._config_path_input.value = ""
+        mgr._on_save_config(None)
+        assert "Enter" in mgr._save_config_status.object
+
+    def test_full_round_trip(self, tmp_path):
+        """Save all non-default UI values, reload, verify every field."""
+        import yaml
+        mgr = _make_synthetic_manager()
+
+        # Set non-default values
+        mgr.colormap = "viridis"
+        mgr.vmin = 200.0
+        mgr.vmax = 3000.0
+        mgr.size = 5.0
+        mgr._show_channels_check.value = False
+        mgr._show_basemap_check.value = False
+        mgr._contours_check.value = True
+        mgr._n_contours_slider.value = 12
+        mgr._contour_smooth_slider.value = 5.0
+        mgr._contour_levels_select.value = "linear"
+        mgr._contour_custom_input.value = "100, 500, 900"
+        mgr._contour_color_check.value = False
+        mgr._contour_labels_check.value = True
+
+        out = tmp_path / "round_trip.yml"
+        mgr._config_path_input.value = str(out)
+        mgr._on_save_config(None)
+        assert out.exists()
+
+        saved = yaml.safe_load(out.read_text(encoding="utf-8"))
+
+        assert saved["colormap"] == "viridis"
+        assert saved["vmin"] == 200.0
+        assert saved["vmax"] == 3000.0
+        assert saved["size"] == 5.0
+        assert saved["show_channels"] is False
+        assert saved["show_basemap"] is False
+        c = saved["contours"]
+        assert c["enabled"] is True
+        assert c["n_levels"] == 12
+        assert c["smoothing"] == 5.0
+        assert c["level_mode"] == "linear"
+        assert c["custom_levels"] == "100, 500, 900"
+        assert c["color"] is False
+        assert c["labels"] is True
+
+    def test_apply_config_restores_contours(self, tmp_path):
+        """_apply_config_to_manager restores contour widget values."""
+        import yaml
+        from dsm2ui.animate_cli import _apply_config_to_manager
+
+        mgr = _make_synthetic_manager()
+
+        cfg = {
+            "contours": {
+                "enabled": True,
+                "n_levels": 15,
+                "smoothing": 7.0,
+                "level_mode": "eq_hist",
+                "custom_levels": "250, 750",
+                "color": False,
+                "labels": True,
+            },
+            "show_channels": False,
+            "show_basemap": False,
+        }
+        _apply_config_to_manager(mgr, cfg)
+
+        assert mgr._contours_check.value is True
+        assert mgr._n_contours_slider.value == 15
+        assert mgr._contour_smooth_slider.value == 7.0
+        assert mgr._contour_levels_select.value == "eq_hist"
+        assert mgr._contour_custom_input.value == "250, 750"
+        assert mgr._contour_color_check.value is False
+        assert mgr._contour_labels_check.value is True
+        assert mgr._show_channels_check.value is False
+        assert mgr._show_basemap_check.value is False
+
+    def test_cli_help_shows_config_option(self):
+        """--config appears in both subcommand help texts."""
+        from click.testing import CliRunner
+        from dsm2ui.animate_cli import animate
+
+        runner = CliRunner()
+        for subcmd in ("hydro", "qual"):
+            result = runner.invoke(animate, [subcmd, "--help"])
+            assert result.exit_code == 0, result.output
+            assert "--config" in result.output, \
+                f"--config missing from '{subcmd} --help'"
+
+    def test_cli_no_args_no_config_shows_error(self):
+        """Invoking 'hydro' without files or --config shows a useful error."""
+        from click.testing import CliRunner
+        from dsm2ui.animate_cli import animate
+
+        runner = CliRunner()
+        result = runner.invoke(animate, ["hydro"])
+        # exit code non-zero or error message present
+        assert result.exit_code != 0 or "H5FILE" in result.output

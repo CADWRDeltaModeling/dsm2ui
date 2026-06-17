@@ -119,6 +119,37 @@ def _add_common_options(fn):
     return fn
 
 
+def _apply_config_to_manager(mgr, cfg: dict) -> None:
+    """Apply saved UI state from a config dict to a live manager.
+
+    Called inside ``build()`` after the manager is constructed so that
+    visual settings (contours, show-channels, etc.) saved with the UI are
+    restored on load.  Data-level settings (transform, colormap, vmin/vmax)
+    are already applied before construction via CLI arg overrides.
+    """
+    contours = cfg.get("contours", {})
+    if contours.get("enabled"):
+        mgr._contours_check.value = True          # triggers _on_contours_toggle
+    mgr._n_contours_slider.value = int(contours.get("n_levels", 8))
+    mgr._contour_smooth_slider.value = float(contours.get("smoothing", 3.0))
+    mgr._contour_levels_select.value = contours.get("level_mode", "nice")
+    mgr._contour_custom_input.value = contours.get("custom_levels", "")
+    mgr._contour_color_check.value = bool(contours.get("color", True))
+    mgr._contour_labels_check.value = bool(contours.get("labels", False))
+    mgr._show_channels_check.value = bool(cfg.get("show_channels", True))
+    mgr._show_basemap_check.value = bool(cfg.get("show_basemap", True))
+    # X2 (GeoAnimatorManager only)
+    x2 = cfg.get("x2", {})
+    if hasattr(mgr, "_x2_check") and x2.get("enabled"):
+        mgr._x2_check.value = True
+        if x2.get("threshold") is not None:
+            mgr._x2_threshold_input.value = float(x2["threshold"])
+    # Diff (MultiGeoAnimatorManager only)
+    diff = cfg.get("diff", {})
+    if hasattr(mgr, "_show_diff_check") and diff.get("show"):
+        mgr._show_diff_check.value = True
+
+
 @click.group(name="animate", context_settings=CONTEXT_SETTINGS)
 def animate():
     """Animate DSM2 HDF5 tidefile data on a map.
@@ -137,7 +168,7 @@ def animate():
 
 
 @animate.command(name="hydro", context_settings=CONTEXT_SETTINGS)
-@click.argument("h5files", nargs=-1, required=True,
+@click.argument("h5files", nargs=-1, required=False,
                 type=click.Path(exists=True, dir_okay=False, readable=True))
 @click.option("--variable", default="flow", show_default=True,
               type=click.Choice(["flow", "stage", "velocity"], case_sensitive=False),
@@ -146,7 +177,7 @@ def animate():
               type=click.Choice(["both", "upstream", "downstream"], case_sensitive=False),
               help="Channel location ('both' averages upstream and downstream).")
 @click.option("--diff", "show_diff", is_flag=True, default=False,
-              help="Show diff map (A − B) instead of side-by-side (only with 2 files).")
+              help="Show diff map (A \u2212 B) instead of side-by-side (only with 2 files).")
 @click.option("--transform", default="none", show_default=True,
               type=click.Choice(["none", "daily", "rolling-24h", "rolling-14d", "godin"],
                                 case_sensitive=False),
@@ -156,25 +187,57 @@ def animate():
                    "rolling-24h: 24 h centred rolling mean (same timestep).\n"
                    "rolling-14d: 14-day centred rolling mean (same timestep).\n"
                    "godin: Godin tidal filter (requires vtools3).")
+@click.option("--config", "config_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Load all settings from a YAML config file saved by the UI. "
+                   "H5FILES and other options are not required when --config is used.")
 @_add_common_options
 def hydro_cmd(
-    h5files, variable, location, show_diff, transform,
+    h5files, variable, location, show_diff, transform, config_file,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
     """Animate 1 or 2 HYDRO tidefiles.  With 2 files: side-by-side or --diff."""
-    if len(h5files) > 2:
-        raise click.UsageError("At most 2 H5FILE arguments are supported.")
     import logging
     logging.basicConfig(level=getattr(logging, log_level.upper()),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     log = logging.getLogger("dsm2ui.animate")
 
-    multi = len(h5files) == 2
-    effective_title = title or (f"DSM2 Hydro {variable.title()} (Δ)" if (multi and show_diff)
-                                else f"DSM2 Hydro {variable.title()}")
-    slug = _title_to_slug(effective_title)
+    cfg = {}
+    if config_file:
+        import yaml
+        with open(config_file, encoding="utf-8") as _f:
+            cfg = yaml.safe_load(_f) or {}
+        _files = [entry["path"] for entry in cfg.get("files", [])]
+        if not _files:
+            raise click.UsageError(f"Config '{config_file}' contains no 'files' entries.")
+        h5files   = tuple(_files)
+        variable  = cfg.get("variable", variable)
+        location  = cfg.get("location", location)
+        show_diff = cfg.get("diff", {}).get("show", show_diff)
+        transform = cfg.get("transform", transform)
+        shapefile = cfg.get("shapefile") or shapefile
+        channel_id_column = cfg.get("channel_id_column") or channel_id_column
+        simplify  = cfg.get("simplify", simplify)
+        colormap  = cfg.get("colormap", colormap)
+        vmin      = cfg.get("vmin")
+        vmax      = cfg.get("vmax")
+        size      = cfg.get("size", size)
+        title     = cfg.get("title") or title
+        log.info("Loaded config from %s (%d file(s))", config_file, len(h5files))
+    elif not h5files:
+        raise click.UsageError(
+            "Provide at least one H5FILE argument, or use --config to load a YAML config."
+        )
 
+    if len(h5files) > 2:
+        raise click.UsageError("At most 2 H5FILE arguments are supported.")
+    multi = len(h5files) == 2
+    effective_title = title or (
+        f"DSM2 Hydro {variable.title()} (\u0394)" if (multi and show_diff)
+        else f"DSM2 Hydro {variable.title()}"
+    )
+    slug = _title_to_slug(effective_title)
     shapefiles = [shapefile] if shapefile else None
 
     def build():
@@ -206,19 +269,21 @@ def hydro_cmd(
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
-        log.info("Reader time_index: %d steps", len(mgr._reader_a.time_index if multi else mgr._reader.time_index))
+        if cfg:
+            _apply_config_to_manager(mgr, cfg)
+        log.info("Reader time_index: %d steps",
+                 len(mgr._reader_a.time_index if multi else mgr._reader.time_index))
         return mgr
 
     _serve_viewer(build, slug=slug, title=effective_title, port=port, desktop=desktop)
 
-
 @animate.command(name="qual", context_settings=CONTEXT_SETTINGS)
-@click.argument("h5files", nargs=-1, required=True,
+@click.argument("h5files", nargs=-1, required=False,
                 type=click.Path(exists=True, dir_okay=False, readable=True))
 @click.option("--constituent", default="ec", show_default=True,
               help="Constituent name (case-insensitive, e.g. ec, cl, do).")
 @click.option("--x2-threshold", default=None, type=float,
-              help="Enable X2 isohaline overlay at this EC threshold (µS/cm). "
+              help="Enable X2 isohaline overlay at this EC threshold (\u00b5S/cm). "
                    "Only used with a single file.")
 @click.option("--diff", "show_diff", is_flag=True, default=False,
               help="Show diff map (A \u2212 B) instead of side-by-side (only with 2 files).")
@@ -226,25 +291,58 @@ def hydro_cmd(
               type=click.Choice(["none", "daily", "rolling-24h", "rolling-14d", "godin"],
                                 case_sensitive=False),
               help="Time-domain transform (none/daily/rolling-24h/rolling-14d/godin).")
+@click.option("--config", "config_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Load all settings from a YAML config file saved by the UI.")
 @_add_common_options
 def qual_cmd(
-    h5files, constituent, x2_threshold, show_diff, transform,
+    h5files, constituent, x2_threshold, show_diff, transform, config_file,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
     """Animate 1 or 2 QUAL/GTM tidefiles.  With 2 files: side-by-side or --diff."""
-    if len(h5files) > 2:
-        raise click.UsageError("At most 2 H5FILE arguments are supported.")
     import logging
     logging.basicConfig(level=getattr(logging, log_level.upper()),
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     log = logging.getLogger("dsm2ui.animate")
 
-    multi = len(h5files) == 2
-    effective_title = title or (f"DSM2 QUAL {constituent.upper()} (\u0394)" if (multi and show_diff)
-                                else f"DSM2 QUAL {constituent.upper()}")
-    slug = _title_to_slug(effective_title)
+    cfg = {}
+    if config_file:
+        import yaml
+        with open(config_file, encoding="utf-8") as _f:
+            cfg = yaml.safe_load(_f) or {}
+        _files = [entry["path"] for entry in cfg.get("files", [])]
+        if not _files:
+            raise click.UsageError(f"Config '{config_file}' contains no 'files' entries.")
+        h5files     = tuple(_files)
+        constituent = cfg.get("variable", constituent)
+        show_diff   = cfg.get("diff", {}).get("show", show_diff)
+        transform   = cfg.get("transform", transform)
+        shapefile   = cfg.get("shapefile") or shapefile
+        channel_id_column = cfg.get("channel_id_column") or channel_id_column
+        simplify    = cfg.get("simplify", simplify)
+        colormap    = cfg.get("colormap", colormap)
+        vmin        = cfg.get("vmin")
+        vmax        = cfg.get("vmax")
+        size        = cfg.get("size", size)
+        x2cfg       = cfg.get("x2", {})
+        if x2cfg.get("enabled") and x2_threshold is None:
+            x2_threshold = x2cfg.get("threshold", 2700.0)
+        title = cfg.get("title") or title
+        log.info("Loaded config from %s (%d file(s))", config_file, len(h5files))
+    elif not h5files:
+        raise click.UsageError(
+            "Provide at least one H5FILE argument, or use --config to load a YAML config."
+        )
 
+    if len(h5files) > 2:
+        raise click.UsageError("At most 2 H5FILE arguments are supported.")
+    multi = len(h5files) == 2
+    effective_title = title or (
+        f"DSM2 QUAL {constituent.upper()} (\u0394)" if (multi and show_diff)
+        else f"DSM2 QUAL {constituent.upper()}"
+    )
+    slug = _title_to_slug(effective_title)
     shapefiles = [shapefile] if shapefile else None
 
     def build():
@@ -277,6 +375,8 @@ def qual_cmd(
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
+        if cfg:
+            _apply_config_to_manager(mgr, cfg)
         log.info("Ready")
         return mgr
 

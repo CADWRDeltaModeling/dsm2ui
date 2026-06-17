@@ -693,7 +693,28 @@ def animate_hydro(
     mgr_kwargs.setdefault("colormap", "rainbow")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
-    return GeoAnimatorManager(reader, gdf, geo_id_column="geo_id", **mgr_kwargs)
+    mgr = GeoAnimatorManager(reader, gdf, geo_id_column="geo_id", **mgr_kwargs)
+    # Attach metadata so the Save config card can write a complete YAML.
+    h5abs = str(Path(h5file).absolute())
+    mgr._animate_meta = {
+        "mode": "single",
+        "file_type": "hydro",
+        "files": [{"path": h5abs, "title": ""}],
+        "variable": variable,
+        "location": location,
+        "shapefile": str(Path(shapefile).absolute()) if shapefile else None,
+        "channel_id_column": channel_id_column,
+        "_transform_cli_keys": {
+            "Daily mean": "daily",
+            "Rolling 24 h": "rolling-24h",
+            "Rolling 14 D": "rolling-14d",
+            "Godin filter": "godin",
+        },
+    }
+    mgr._config_path_input.value = str(
+        Path(h5abs).with_name(Path(h5abs).stem + "_animate.yml")
+    )
+    return mgr
 
 
 class QualH5X2Callback:
@@ -869,6 +890,26 @@ def animate_qual(
     )
     if x2_threshold is not None:
         mgr._x2_threshold_input.value = float(x2_threshold)
+    # Attach metadata so the Save config card can write a complete YAML.
+    h5abs = str(Path(h5file).absolute())
+    mgr._animate_meta = {
+        "mode": "single",
+        "file_type": "qual",
+        "files": [{"path": h5abs, "title": ""}],
+        "variable": constituent,
+        "location": "both",
+        "shapefile": str(Path(shapefile).absolute()) if shapefile else None,
+        "channel_id_column": channel_id_column,
+        "_transform_cli_keys": {
+            "Daily mean": "daily",
+            "Rolling 24 h": "rolling-24h",
+            "Rolling 14 D": "rolling-14d",
+            "Godin filter": "godin",
+        },
+    }
+    mgr._config_path_input.value = str(
+        Path(h5abs).with_name(Path(h5abs).stem + "_animate.yml")
+    )
     return mgr
 
 
@@ -1139,7 +1180,7 @@ def animate_hydro_multi(
     mgr_kwargs.setdefault("colormap", "rainbow")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
-    return MultiGeoAnimatorManager(
+    mgr = MultiGeoAnimatorManager(
         reader_a, reader_b,
         gdf_a=gdf_a, gdf_b=gdf_b,
         title_a=ta, title_b=tb,
@@ -1147,6 +1188,34 @@ def animate_hydro_multi(
         show_diff=show_diff,
         **mgr_kwargs,
     )
+    # Attach metadata for the Save config card.
+    sf_a_abs = str(_Path(sf_a).absolute()) if sf_a else None
+    sf_b_abs = str(_Path(sf_b).absolute()) if sf_b and sf_b != sf_a else None
+    mgr._animate_meta = {
+        "mode": "multi",
+        "file_type": "hydro",
+        "files": [
+            {"path": str(_Path(h5file_a).absolute()), "title": ta},
+            {"path": str(_Path(h5file_b).absolute()), "title": tb},
+        ],
+        "variable": variable,
+        "location": location,
+        "shapefile": sf_a_abs,
+        "shapefile_b": sf_b_abs,
+        "channel_id_column": channel_id_column,
+        "_transform_cli_keys": {
+            "Daily mean": "daily",
+            "Rolling 24 h": "rolling-24h",
+            "Rolling 14 D": "rolling-14d",
+            "Godin filter": "godin",
+        },
+    }
+    mgr._config_path_input.value = str(
+        _Path(h5file_a).absolute().with_name(
+            _Path(h5file_a).stem + "_animate.yml"
+        )
+    )
+    return mgr
 
 
 def animate_qual_multi(
@@ -1195,7 +1264,7 @@ def animate_qual_multi(
     mgr_kwargs.setdefault("colormap", "rainbow")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
-    return MultiGeoAnimatorManager(
+    mgr = MultiGeoAnimatorManager(
         reader_a, reader_b,
         gdf_a=gdf_a, gdf_b=gdf_b,
         title_a=ta, title_b=tb,
@@ -1203,6 +1272,34 @@ def animate_qual_multi(
         show_diff=show_diff,
         **mgr_kwargs,
     )
+    # Attach metadata for the Save config card.
+    sf_a_abs = str(_Path(sf_a).absolute()) if sf_a else None
+    sf_b_abs = str(_Path(sf_b).absolute()) if sf_b and sf_b != sf_a else None
+    mgr._animate_meta = {
+        "mode": "multi",
+        "file_type": "qual",
+        "files": [
+            {"path": str(_Path(h5file_a).absolute()), "title": ta},
+            {"path": str(_Path(h5file_b).absolute()), "title": tb},
+        ],
+        "variable": constituent,
+        "location": "both",
+        "shapefile": sf_a_abs,
+        "shapefile_b": sf_b_abs,
+        "channel_id_column": channel_id_column,
+        "_transform_cli_keys": {
+            "Daily mean": "daily",
+            "Rolling 24 h": "rolling-24h",
+            "Rolling 14 D": "rolling-14d",
+            "Godin filter": "godin",
+        },
+    }
+    mgr._config_path_input.value = str(
+        _Path(h5file_a).absolute().with_name(
+            _Path(h5file_a).stem + "_animate.yml"
+        )
+    )
+    return mgr
 
 
 def _resolve_shapefiles(
