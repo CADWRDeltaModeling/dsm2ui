@@ -600,7 +600,7 @@ def _dsm2_transform_options() -> dict:
     return {
         "Daily mean":     make_resample_transform("D", "mean"),
         "Rolling 24 h":   make_moving_average_transform("24h"),
-        "Rolling 48 h":   make_moving_average_transform("48h"),
+        "Rolling 14 D":   make_moving_average_transform("14D"),
         "Godin filter":   make_godin_transform(),
     }
 

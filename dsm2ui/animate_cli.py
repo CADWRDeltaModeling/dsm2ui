@@ -43,7 +43,7 @@ _CLI_TRANSFORM_MAP = {
     "none":        "none",
     "daily":       "Daily mean",
     "rolling-24h": "Rolling 24 h",
-    "rolling-48h": "Rolling 48 h",
+    "rolling-14d": "Rolling 14 D",
     "godin":       "Godin filter",
 }
 
@@ -143,13 +143,13 @@ def animate():
               type=click.Choice(["both", "upstream", "downstream"], case_sensitive=False),
               help="Channel location ('both' averages upstream and downstream).")
 @click.option("--transform", default="none", show_default=True,
-              type=click.Choice(["none", "daily", "rolling-24h", "rolling-48h", "godin"],
+              type=click.Choice(["none", "daily", "rolling-24h", "rolling-14d", "godin"],
                                 case_sensitive=False),
               help="Time-domain transform to apply before animation.\n"
                    "none: raw data (default).\n"
                    "daily: daily mean (resamples to 1-day steps).\n"
                    "rolling-24h: 24 h centred rolling mean (same timestep).\n"
-                   "rolling-48h: 48 h centred rolling mean (same timestep).\n"
+                   "rolling-14d: 14-day centred rolling mean (same timestep).\n"
                    "godin: Godin tidal filter (requires vtools3).")
 @_add_common_options
 def hydro_cmd(
@@ -207,9 +207,9 @@ def hydro_cmd(
               help="Enable X2 isohaline overlay at this EC threshold (µS/cm). "
                    "Example: --x2-threshold 2700")
 @click.option("--transform", default="none", show_default=True,
-              type=click.Choice(["none", "daily", "rolling-24h", "rolling-48h", "godin"],
+              type=click.Choice(["none", "daily", "rolling-24h", "rolling-14d", "godin"],
                                 case_sensitive=False),
-              help="Time-domain transform (none/daily/rolling-24h/rolling-48h/godin).")
+              help="Time-domain transform (none/daily/rolling-24h/rolling-14d/godin).")
 @_add_common_options
 def qual_cmd(
     h5file, constituent, x2_threshold, transform,
