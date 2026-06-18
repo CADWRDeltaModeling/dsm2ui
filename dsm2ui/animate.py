@@ -960,41 +960,34 @@ def _freq_minutes(reader: "SlicingReader") -> float:
 
 
 def make_resample_transform(freq: str = "D", agg: str = "mean"):
-    """Return a transform that resamples to a coarser time step.
-
-    The resulting :class:`~dvue.animator.TransformedSlicingReader` will have a
-    coarser (fewer timesteps) regular ``DatetimeIndex``.
+    """Return a :class:`~dvue.animator.TransformSpec` for resampling to a coarser step.
 
     Parameters
     ----------
     freq : str, optional
-        Target pandas frequency string.  Examples: ``"D"`` (daily),
-        ``"h"`` (hourly), ``"6h"`` (6-hourly).  Default ``"D"``.
+        Target pandas frequency string.  Default ``"D"``.
     agg : {"mean", "sum", "max", "min"}, optional
-        Aggregation to apply within each resampled bin.  Default ``"mean"``.
+        Default ``"mean"``.
 
     Returns
     -------
-    callable
-        A function ``(df: pd.DataFrame) -> pd.DataFrame`` suitable as
-        ``transform_fn`` for :class:`~dvue.animator.TransformedSlicingReader`.
-
-    Examples
-    --------
-    >>> from dsm2ui.animate import HydroH5FlowReader, make_resample_transform
-    >>> from dvue.animator import TransformedSlicingReader, BufferedSlicingReader
-    >>> raw = HydroH5FlowReader("tidefile.h5")
-    >>> daily = TransformedSlicingReader(raw, make_resample_transform("D"))
-    >>> buffered = BufferedSlicingReader(daily)
+    TransformSpec
     """
+    from dvue.animator.reader import TransformSpec
+
     def _transform(df: pd.DataFrame) -> pd.DataFrame:
         resampled = getattr(df.resample(freq), agg)()
-        # Enforce that the output has a freq attribute (resample can drop it)
         if resampled.index.freq is None:
             resampled.index.freq = pd.tseries.frequencies.to_offset(freq)
         return resampled
     _transform.__name__ = f"resample_{freq}_{agg}"
-    return _transform
+
+    return TransformSpec(
+        transform_fn=_transform,
+        kind="aggregate",
+        get_overlap=lambda _freq_nanos: 0,
+        output_freq=freq,
+    )
 
 
 def make_moving_average_transform(window: str = "24h", min_periods: int = 1):
@@ -1015,21 +1008,25 @@ def make_moving_average_transform(window: str = "24h", min_periods: int = 1):
 
     Returns
     -------
-    callable
-        ``(df: pd.DataFrame) -> pd.DataFrame``
-
-    Examples
-    --------
-    >>> raw = HydroH5FlowReader("tidefile.h5")
-    >>> smooth = TransformedSlicingReader(
-    ...     raw, make_moving_average_transform("24h")
-    ... )
+    TransformSpec
     """
+    import math as _math
+    from dvue.animator.reader import TransformSpec
+
+    window_nanos = int(pd.to_timedelta(window).total_seconds() * 1e9)
+
     def _transform(df: pd.DataFrame) -> pd.DataFrame:
         rolled = df.rolling(window, center=True, min_periods=min_periods).mean()
-        rolled.index.freq = df.index.freq   # preserve freq (rolling may drop it)
+        rolled.index.freq = df.index.freq
         return rolled
     _transform.__name__ = f"rolling_{window}_mean"
+
+    return TransformSpec(
+        transform_fn=_transform,
+        kind="convolution",
+        get_overlap=lambda freq_nanos: _math.ceil(window_nanos / 2 / freq_nanos),
+        output_freq=None,
+    )
     return _transform
 
 
@@ -1050,22 +1047,13 @@ def make_godin_transform():
 
     Returns
     -------
-    callable
-        ``(df: pd.DataFrame) -> pd.DataFrame``
-
-    Raises
-    ------
-    ImportError
-        If vtools3 is not installed.
-
-    Examples
-    --------
-    >>> raw = HydroH5FlowReader("tidefile.h5")
-    >>> tidally_filtered = TransformedSlicingReader(
-    ...     raw, make_godin_transform(),
-    ...     warmup_steps=134,          # 33.5 h at 15-min intervals
-    ... )
+    TransformSpec
     """
+    import math as _math
+    from dvue.animator.reader import TransformSpec
+
+    _WARMUP_NANOS = int(33.5 * 3600 * 1e9)  # 33.5 h per side
+
     def _transform(df: pd.DataFrame) -> pd.DataFrame:
         try:
             from vtools.functions.filter import godin
@@ -1075,15 +1063,11 @@ def make_godin_transform():
                 "Install it with: conda install -c cadwr-dms vtools3"
             ) from exc
 
-        # godin() returns a Series; apply column-by-column then reassemble.
-        # Some vtools3 builds return a 2-D object (shape N×1) when the input
-        # is derived from a DataFrame column — squeeze to 1-D first.
         out_cols = {}
         for col in df.columns:
             series = df[col].copy()
             try:
                 filtered = godin(series)
-                # Ensure result is 1-D (squeeze any trailing dimensions)
                 if hasattr(filtered, "squeeze"):
                     filtered = filtered.squeeze()
                 if not isinstance(filtered, pd.Series):
@@ -1098,51 +1082,29 @@ def make_godin_transform():
         return result
 
     _transform.__name__ = "godin_filter"
-    return _transform
+
+    return TransformSpec(
+        transform_fn=_transform,
+        kind="convolution",
+        get_overlap=lambda freq_nanos: _math.ceil(_WARMUP_NANOS / freq_nanos),
+        output_freq=None,
+    )
 
 
 def apply_godin(
     inner: "SlicingReader",
-) -> "dvue.animator.TransformedSlicingReader":
-    """Wrap *inner* with a Godin tidal filter, discarding the warmup edges.
+) -> "dvue.animator.StreamingTransformedSlicingReader":
+    """Wrap *inner* with a Godin tidal filter using streaming chunk-by-chunk mode.
 
-    This is a convenience helper that:
-    1. Computes the correct ``warmup_steps`` from the reader's time step.
-    2. Constructs a :class:`~dvue.animator.TransformedSlicingReader` with the
-       Godin transform and that warmup.
-
-    Parameters
-    ----------
-    inner : SlicingReader
-        Raw reader (e.g. :class:`HydroH5FlowReader`).
+    The overlap (warm-up window) is computed automatically from the reader's
+    time step, so no full-file load occurs at startup.
 
     Returns
     -------
-    TransformedSlicingReader
-        Ready to wrap with :class:`~dvue.animator.BufferedSlicingReader`.
-
-    Raises
-    ------
-    ImportError
-        If vtools3 is not installed.
-
-    Examples
-    --------
-    >>> from dsm2ui.animate import HydroH5FlowReader, apply_godin
-    >>> from dvue.animator import BufferedSlicingReader
-    >>> raw = HydroH5FlowReader("hist_fc_mss.h5")
-    >>> godin_reader = apply_godin(raw)
-    >>> buffered = BufferedSlicingReader(godin_reader, chunk_size=100)
+    StreamingTransformedSlicingReader
     """
-    from dvue.animator import TransformedSlicingReader
-
-    step_minutes = _freq_minutes(inner)
-    warmup_steps = max(1, int(_GODIN_WARMUP_MINUTES / step_minutes))
-    return TransformedSlicingReader(
-        inner,
-        transform_fn=make_godin_transform(),
-        warmup_steps=warmup_steps,
-    )
+    from dvue.animator import StreamingTransformedSlicingReader
+    return StreamingTransformedSlicingReader(inner, make_godin_transform())
 
 
 # ---------------------------------------------------------------------------

@@ -378,44 +378,44 @@ class TestTransformFactories:
 
     def test_resample_transform_daily(self, reader_15min):
         from dsm2ui.animate import make_resample_transform
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(reader_15min, make_resample_transform("D"))
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(reader_15min, make_resample_transform("D"), sample_steps=2)
         # 96 × 15-min = 24 h = 1 day → 1 daily step
         assert len(tr.time_index) == 1
         assert tr.time_index.freq == pd.tseries.frequencies.to_offset("D")
 
     def test_resample_transform_hourly(self, reader_15min):
         from dsm2ui.animate import make_resample_transform
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(reader_15min, make_resample_transform("h"))
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(reader_15min, make_resample_transform("h"), sample_steps=4)
         assert len(tr.time_index) == 24
         assert tr.time_index.freq == pd.tseries.frequencies.to_offset("h")
 
     def test_moving_average_keeps_steps(self, reader_15min):
         from dsm2ui.animate import make_moving_average_transform
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(reader_15min, make_moving_average_transform("2h"))
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(reader_15min, make_moving_average_transform("2h"), sample_steps=4)
         assert len(tr.time_index) == 96
 
     def test_moving_average_returns_finite_values(self, reader_15min):
         from dsm2ui.animate import make_moving_average_transform
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(reader_15min, make_moving_average_transform("2h"))
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(reader_15min, make_moving_average_transform("2h"), sample_steps=4)
         s = tr.get_slice(tr.time_index[48])
         assert s.notna().all()
 
     def test_make_resample_with_buffered(self, reader_15min):
         from dsm2ui.animate import make_resample_transform
-        from dvue.animator import TransformedSlicingReader, BufferedSlicingReader
-        tr = TransformedSlicingReader(reader_15min, make_resample_transform("h"))
+        from dvue.animator import StreamingTransformedSlicingReader, BufferedSlicingReader
+        tr = StreamingTransformedSlicingReader(reader_15min, make_resample_transform("h"), sample_steps=4)
         buf = BufferedSlicingReader(tr, chunk_size=10)
         s = buf.get_slice(tr.time_index[0])
         assert isinstance(s, pd.Series)
 
     def test_transform_vmin_vmax_in_raw_range(self, reader_15min):
         from dsm2ui.animate import make_resample_transform
-        from dvue.animator import TransformedSlicingReader
-        tr = TransformedSlicingReader(reader_15min, make_resample_transform("h"))
+        from dvue.animator import StreamingTransformedSlicingReader
+        tr = StreamingTransformedSlicingReader(reader_15min, make_resample_transform("h"), sample_steps=4)
         assert tr.vmin >= reader_15min.vmin - 1e-6
         assert tr.vmax <= reader_15min.vmax + 1e-6
 
