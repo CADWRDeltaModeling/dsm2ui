@@ -145,6 +145,8 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
         mgr._contour_label_spacing_slider.value = int(
             contours.get("label_spacing", 30)
         )
+    if hasattr(mgr, "_contour_clip_slider") and "clip_radius_km" in contours:
+        mgr._contour_clip_slider.value = float(contours["clip_radius_km"])
     # Channel/basemap opacity — new format is 0-100 int; old format was bool.
     def _to_alpha(val, default=100):
         if isinstance(val, bool):
