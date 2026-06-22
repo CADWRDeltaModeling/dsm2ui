@@ -1499,6 +1499,183 @@ def _add_resample_card_to_manager(mgr) -> None:
     mgr.collect_state = _patched_with_resample
 
 
+def _add_obs_station_overlay(
+    mgr,
+    obs_aligned: "pd.DataFrame",
+    stations_csv: "str | Path",
+) -> None:
+    """Add observation station markers with dynamic EC coloring to the map.
+
+    Circles are placed at each station's location and colored by the current
+    observed EC value using the same colormap and colour scale as the channel
+    lines.  Stations with no observation at the current timestep are shown in
+    grey.  An **Observations** card in the sidebar contains an opacity slider.
+
+    Parameters
+    ----------
+    mgr :
+        A :class:`~dvue.animator.GeoAnimatorManager` or
+        :class:`~dvue.animator.MultiGeoAnimatorManager` instance.
+    obs_aligned : pd.DataFrame
+        Pre-aligned observations (index = model timestamps, columns = station IDs).
+        Typically ``reader._obs_aligned`` from a
+        :class:`CorrectedQualH5ConcentrationReader`.
+    stations_csv : str or Path
+        CSV with ``station_id`` and ``lat``/``lon`` (WGS-84) or ``x``/``y``
+        (UTM Zone 10N) columns.
+    """
+    import panel as pn
+    from bokeh.models import ColumnDataSource, HoverTool
+    from bokeh.transform import linear_cmap as _lc
+    from dvue.animator.ui import _cmap_to_palette
+
+    # ------------------------------------------------------------------ #
+    # 1. Load and reproject station locations to EPSG:3857 (Bokeh web map) #
+    # ------------------------------------------------------------------ #
+    try:
+        from pyproj import Transformer
+        sta_df = pd.read_csv(stations_csv)
+        if "lat" in sta_df.columns and "lon" in sta_df.columns:
+            t = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+            mx, my = t.transform(sta_df["lon"].values, sta_df["lat"].values)
+        elif "x" in sta_df.columns and "y" in sta_df.columns:
+            t = Transformer.from_crs("EPSG:26910", "EPSG:3857", always_xy=True)
+            mx, my = t.transform(sta_df["x"].values, sta_df["y"].values)
+        else:
+            return
+        station_ids = list(sta_df["station_id"].astype(str).values)
+    except Exception as _exc:
+        print(f"  Obs overlay: could not load stations — {_exc}")
+        return
+
+    obs_cols = list(obs_aligned.columns) if not obs_aligned.empty else []
+    n_sta = len(station_ids)
+
+    # ------------------------------------------------------------------ #
+    # 2. Shared ColumnDataSource                                           #
+    # ------------------------------------------------------------------ #
+    src = ColumnDataSource({
+        "x":          list(mx),
+        "y":          list(my),
+        "station_id": station_ids,
+        "value":      [float("nan")] * n_sta,
+        "label":      ["N/A"] * n_sta,
+    })
+
+    # ------------------------------------------------------------------ #
+    # 3. Colormap matching the channel display                             #
+    # ------------------------------------------------------------------ #
+    vmin = (mgr.vmin if mgr.vmin is not None else 0.0)
+    vmax = (mgr.vmax if mgr.vmax is not None else 5000.0)
+    pal = _cmap_to_palette(getattr(mgr, "colormap", "rainbow"))
+    fill_cmap = _lc("value", pal, low=vmin, high=vmax, nan_color="grey")
+
+    # ------------------------------------------------------------------ #
+    # 4. Add circle markers to all relevant figures                        #
+    # ------------------------------------------------------------------ #
+    is_multi = hasattr(mgr, "_fig_a")
+    # For side-by-side correction view show stations only on the corrected panel
+    # (panel B) so the raw model panel remains uncluttered.
+    figs = ([mgr._fig_b] if is_multi else [mgr._bk_figure])
+
+    renderers = []
+    for fig in figs:
+        r = fig.circle(
+            x="x", y="y", size=12,
+            fill_color=fill_cmap, line_color="black",
+            line_width=1.2, fill_alpha=0.9, line_alpha=0.0,
+            source=src,
+        )
+        fig.add_tools(HoverTool(
+            renderers=[r],
+            tooltips=[
+                ("Station", "@station_id"),
+                ("Obs. EC (µS/cm)", "@label"),
+            ],
+        ))
+        renderers.append(r)
+
+    # ------------------------------------------------------------------ #
+    # 5. Opacity slider → Observations card                                #
+    # ------------------------------------------------------------------ #
+    alpha_slider = pn.widgets.IntSlider(
+        name="Obs. stations opacity", start=0, end=100, value=90, step=5,
+        sizing_mode="stretch_width",
+    )
+
+    def _on_alpha(event):
+        a = event.new / 100.0
+
+        def _apply():
+            for r in renderers:
+                r.glyph.fill_alpha = a
+                # line_alpha stays 0 — circles are fill-only
+
+        if is_multi:
+            doc = mgr._active_doc()
+        else:
+            doc = mgr._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
+        else:
+            _apply()
+
+    alpha_slider.param.watch(_on_alpha, "value")
+
+    # Store on mgr so config save/load can access it
+    mgr._obs_alpha_slider = alpha_slider
+
+    mgr._controls.insert(-1, pn.Card(
+        alpha_slider,
+        title="Observations",
+        collapsed=False,
+        sizing_mode="stretch_width",
+    ))
+
+    # Patch collect_state to persist the obs opacity in the YAML
+    _orig_cs = mgr.collect_state
+
+    def _patched_cs_obs():
+        state = _orig_cs()
+        state["observations"] = {"opacity": mgr._obs_alpha_slider.value}
+        return state
+
+    mgr.collect_state = _patched_cs_obs
+
+    # ------------------------------------------------------------------ #
+    # 6. Dynamic update — patch _apply_frame to update marker colours      #
+    # ------------------------------------------------------------------ #
+    def _update_obs(timestamp: pd.Timestamp) -> None:
+        if obs_aligned.empty or not obs_cols:
+            return
+        try:
+            row = obs_aligned.loc[timestamp]
+        except KeyError:
+            idx = obs_aligned.index.get_indexer([timestamp], method="nearest")[0]
+            if idx < 0:
+                return
+            row = obs_aligned.iloc[idx]
+
+        vals, labels = [], []
+        for sid in station_ids:
+            v = float(row[sid]) if sid in obs_cols and not pd.isna(row.get(sid, float("nan"))) else float("nan")
+            vals.append(v)
+            labels.append(f"{v:.0f}" if not np.isnan(v) else "N/A")
+        src.data = dict(src.data, value=vals, label=labels)
+
+    _orig_apply = mgr._apply_frame
+
+    def _patched_apply(idx: int, ts_str: str) -> None:
+        _orig_apply(idx, ts_str)
+        if is_multi:
+            ts = mgr._reader_a.time_index[idx]
+        else:
+            ts = mgr._reader.time_index[idx]
+        _update_obs(ts)
+
+    mgr._apply_frame = _patched_apply
+
+
 def animate_hydro(
     h5file: "str | Path",
     variable: str = "flow",
@@ -1945,6 +2122,7 @@ def animate_qual_corrected(
     # Ensure _transform_cli_keys is present so config save round-trips correctly.
     mgr._animate_meta.setdefault("_transform_cli_keys", _dsm2_transform_cli_keys())
     _add_resample_card_to_manager(mgr)
+    _add_obs_station_overlay(mgr, reader._obs_aligned, stations_csv)
     return mgr
 
 
@@ -2140,6 +2318,7 @@ def animate_qual_corrected_multi(
 
     mgr.collect_state = _patched_collect_multi
     _add_resample_card_to_manager(mgr)
+    _add_obs_station_overlay(mgr, reader_corrected._obs_aligned, stations_csv)
     return mgr
 
 # Godin filter warmup in minutes — the filter needs 33.5 h of data before the

@@ -139,10 +139,29 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
     mgr._contour_smooth_slider.value = float(contours.get("smoothing", 3.0))
     mgr._contour_levels_select.value = contours.get("level_mode", "nice")
     mgr._contour_custom_input.value = contours.get("custom_levels", "")
-    mgr._contour_color_check.value = bool(contours.get("color", True))
+    mgr._contour_color_check.value  = bool(contours.get("color", True))
     mgr._contour_labels_check.value = bool(contours.get("labels", False))
-    mgr._show_channels_check.value = bool(cfg.get("show_channels", True))
-    mgr._show_basemap_check.value = bool(cfg.get("show_basemap", True))
+    if hasattr(mgr, "_contour_label_spacing_slider"):
+        mgr._contour_label_spacing_slider.value = int(
+            contours.get("label_spacing", 30)
+        )
+    # Channel/basemap opacity — new format is 0-100 int; old format was bool.
+    def _to_alpha(val, default=100):
+        if isinstance(val, bool):
+            return 100 if val else 0
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return default
+
+    if hasattr(mgr, "_channels_alpha_slider"):
+        mgr._channels_alpha_slider.value = _to_alpha(cfg.get("show_channels", 100))
+    if hasattr(mgr, "_basemap_alpha_slider"):
+        mgr._basemap_alpha_slider.value  = _to_alpha(cfg.get("show_basemap", 100))
+    # Observation station opacity (added after construction by _add_obs_station_overlay)
+    obs_cfg = cfg.get("observations", {})
+    if hasattr(mgr, "_obs_alpha_slider") and "opacity" in obs_cfg:
+        mgr._obs_alpha_slider.value = int(obs_cfg["opacity"])
     # X2 (GeoAnimatorManager only)
     x2 = cfg.get("x2", {})
     if hasattr(mgr, "_x2_check") and x2.get("enabled"):
