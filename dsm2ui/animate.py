@@ -980,7 +980,7 @@ def _make_correction_card(
 
     # OI parameters kept in the widget tree but hidden (OI disabled in UI)
     idw_col    = pn.Column(power_sl, visible=True)
-    oi_col     = pn.Column(sigma_in, kernel_sel, resist_row, visible=False)
+    oi_col     = pn.Column(sigma_in, kernel_sel, resist_sl, visible=False)
 
     # --- apply callback ---
     def _on_apply(_event):
