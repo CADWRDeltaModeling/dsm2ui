@@ -951,8 +951,8 @@ def _make_correction_card(
         placeholder="/path/to/stations.csv", sizing_mode="stretch_width",
     )
     method_sel  = pn.widgets.Select(
-        name="Correction method", options=["IDW", "OI"],
-        value=initial_method, sizing_mode="stretch_width",
+        name="Correction method", options=["IDW"],
+        value="IDW", sizing_mode="stretch_width",
     )
     power_sl    = pn.widgets.FloatSlider(
         name="IDW power", value=initial_power,
@@ -978,20 +978,9 @@ def _make_correction_card(
     )
     status_md   = pn.pane.Markdown("", sizing_mode="stretch_width")
 
-    # --- dynamic visibility helpers ---
-    resist_row = pn.Column(resist_sl, visible=(initial_kernel == "channel_direction"))
-    idw_col    = pn.Column(power_sl, visible=(initial_method == "IDW"))
-    oi_col     = pn.Column(sigma_in, kernel_sel, resist_row, visible=(initial_method == "OI"))
-
-    def _on_kernel(event):
-        resist_row.visible = (event.new == "channel_direction")
-
-    def _on_method(event):
-        idw_col.visible = (event.new == "IDW")
-        oi_col.visible  = (event.new == "OI")
-
-    kernel_sel.param.watch(_on_kernel, "value")
-    method_sel.param.watch(_on_method, "value")
+    # OI parameters kept in the widget tree but hidden (OI disabled in UI)
+    idw_col    = pn.Column(power_sl, visible=True)
+    oi_col     = pn.Column(sigma_in, kernel_sel, resist_row, visible=False)
 
     # --- apply callback ---
     def _on_apply(_event):
