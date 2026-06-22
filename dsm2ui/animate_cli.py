@@ -146,7 +146,25 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
             contours.get("label_spacing", 30)
         )
     if hasattr(mgr, "_contour_clip_slider") and "clip_radius_km" in contours:
-        mgr._contour_clip_slider.value = float(contours["clip_radius_km"])
+        new_val = float(contours["clip_radius_km"])
+        mgr._contour_clip_slider.value = new_val
+        # Unconditionally rebuild clip zones — the watcher may not fire if
+        # the loaded value equals the current slider value (no param change).
+        _buf = new_val * 1000.0
+        try:
+            from shapely.ops import unary_union
+            if hasattr(mgr, "_gdf_proj"):       # single-panel manager
+                mgr._contour_clip_zone = unary_union(
+                    mgr._gdf_proj.geometry
+                ).buffer(_buf)
+            elif hasattr(mgr, "_gdf_a_proj"):   # multi-panel manager
+                cz_a = unary_union(mgr._gdf_a_proj.geometry).buffer(_buf)
+                cz_b = unary_union(mgr._gdf_b_proj.geometry).buffer(_buf)
+                mgr._ctour_a.clip_zone    = cz_a
+                mgr._ctour_b.clip_zone    = cz_b
+                mgr._ctour_diff.clip_zone = cz_a
+        except Exception:
+            pass
     # Channel/basemap opacity — new format is 0-100 int; old format was bool.
     def _to_alpha(val, default=100):
         if isinstance(val, bool):
