@@ -40,11 +40,16 @@ def _title_to_slug(title: str) -> str:
 
 
 _CLI_TRANSFORM_MAP = {
-    "none":        "none",
-    "daily":       "Daily mean",
-    "rolling-24h": "Rolling 24 h",
-    "rolling-14d": "Rolling 14 D",
-    "godin":       "Godin filter",
+    "none":             "none",
+    "daily":            "Daily mean",
+    "daily-min":        "Daily min",
+    "daily-max":        "Daily max",
+    "rolling-24h":      "Rolling 24 h",
+    "rolling-14d":      "Rolling 14 D",
+    "godin":            "Godin filter",
+    "godin-daily":      "Godin \u2192 Daily mean",
+    "godin-daily-min":  "Godin \u2192 Daily min",
+    "godin-daily-max":  "Godin \u2192 Daily max",
 }
 
 
@@ -179,14 +184,18 @@ def animate():
 @click.option("--diff", "show_diff", is_flag=True, default=False,
               help="Show diff map (A \u2212 B) instead of side-by-side (only with 2 files).")
 @click.option("--transform", default="none", show_default=True,
-              type=click.Choice(["none", "daily", "rolling-24h", "rolling-14d", "godin"],
-                                case_sensitive=False),
+              type=click.Choice(
+                  ["none", "daily", "daily-min", "daily-max",
+                   "rolling-24h", "rolling-14d",
+                   "godin", "godin-daily", "godin-daily-min", "godin-daily-max"],
+                  case_sensitive=False),
               help="Time-domain transform to apply before animation.\n"
                    "none: raw data (default).\n"
-                   "daily: daily mean (resamples to 1-day steps).\n"
-                   "rolling-24h: 24 h centred rolling mean (same timestep).\n"
-                   "rolling-14d: 14-day centred rolling mean (same timestep).\n"
-                   "godin: Godin tidal filter (requires vtools3).")
+                   "daily / daily-min / daily-max: daily resample (mean / min / max).\n"
+                   "rolling-24h: 24 h centred rolling mean.\n"
+                   "rolling-14d: 14-day centred rolling mean.\n"
+                   "godin: Godin tidal filter.\n"
+                   "godin-daily / godin-daily-min / godin-daily-max: Godin then daily.")   
 @click.option("--config", "config_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
               help="Load all settings from a YAML config file saved by the UI. "
@@ -288,15 +297,70 @@ def hydro_cmd(
 @click.option("--diff", "show_diff", is_flag=True, default=False,
               help="Show diff map (A \u2212 B) instead of side-by-side (only with 2 files).")
 @click.option("--transform", default="none", show_default=True,
-              type=click.Choice(["none", "daily", "rolling-24h", "rolling-14d", "godin"],
-                                case_sensitive=False),
-              help="Time-domain transform (none/daily/rolling-24h/rolling-14d/godin).")
+              type=click.Choice(
+                  ["none", "daily", "daily-min", "daily-max",
+                   "rolling-24h", "rolling-14d",
+                   "godin", "godin-daily", "godin-daily-min", "godin-daily-max"],
+                  case_sensitive=False),
+              help="Time-domain transform (see hydro --help for details).")
+@click.option("--resample-freq",
+              type=str, default=None,
+              help="Apply an additional resample on top of --transform "
+                   "(e.g. 1D, 6h, 12h). Stacks with the primary transform.")
+@click.option("--resample-agg",
+              type=click.Choice(["mean", "min", "max"], case_sensitive=False),
+              default="mean", show_default=True,
+              help="Aggregation for --resample-freq.")
+@click.option("--observations-csv", default=None,
+              type=click.Path(dir_okay=False),
+              help="Time-indexed CSV of sparse observations (station IDs as columns). "
+                   "When supplied the model output is bias-corrected via network IDW "
+                   "before any transform is applied.")
+@click.option("--stations-csv", default=None,
+              type=click.Path(dir_okay=False),
+              help="CSV with station_id and lat/lon or x/y columns. "
+                   "Required when --observations-csv is given.")
+@click.option("--centerlines-file", default=None,
+              type=click.Path(dir_okay=False),
+              help="GeoJSON/shapefile of DSM2 channel centrelines for station snapping. "
+                   "Defaults to the bundled centrelines when --observations-csv is given.")
+@click.option("--echo-inp", default=None,
+              type=click.Path(dir_okay=False),
+              help="DSM2 echo .inp file as fallback CHANNEL table source "
+                   "(only needed when the H5 file has no /input/channel table).")
+@click.option("--idw-power", default=2.0, show_default=True, type=float,
+              help="IDW distance exponent for the network correction.")
+@click.option("--max-obs-age", default="2h", show_default=True,
+              help="Maximum age of observations relative to a model timestep "
+                   '(e.g. "2h", "30min"). Older matches are treated as missing.')
+@click.option("--correction-method", default="idw", show_default=True,
+              type=click.Choice(["idw", "oi"], case_sensitive=False),
+              help="Correction algorithm: idw (inverse-distance weighting, default) or "
+                   "oi (optimal interpolation). Only used when --observations-csv is given.")
+@click.option("--oi-sigma-obs", default=10.0, show_default=True, type=float,
+              help="OI observation error standard deviation (\u00b5S/cm). "
+                   "Controls how much the OI trusts observations vs the background.")
+@click.option("--oi-kernel", default="exponential", show_default=True,
+              type=click.Choice(["exponential", "channel_direction"], case_sensitive=False),
+              help="OI correlation kernel. 'exponential' is symmetric; "
+                   "'channel_direction' penalises against-flow path segments.")
+@click.option("--oi-resistance", default=3.0, show_default=True, type=float,
+              help="Against-flow cost multiplier for the channel_direction kernel (>= 1).")
+@click.option("--compare-correction", "compare_correction", is_flag=True, default=False,
+              help="Show model-only and model+correction maps side by side.  "
+                   "Only used when --observations-csv is given.")
 @click.option("--config", "config_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
               help="Load all settings from a YAML config file saved by the UI.")
 @_add_common_options
 def qual_cmd(
-    h5files, constituent, x2_threshold, show_diff, transform, config_file,
+    h5files, constituent, x2_threshold, show_diff, transform,
+    observations_csv, stations_csv, centerlines_file, echo_inp,
+    idw_power, max_obs_age,
+    correction_method, oi_sigma_obs, oi_kernel, oi_resistance,
+    compare_correction,
+    resample_freq, resample_agg,
+    config_file,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
@@ -329,6 +393,27 @@ def qual_cmd(
         if x2cfg.get("enabled") and x2_threshold is None:
             x2_threshold = x2cfg.get("threshold", 2700.0)
         title = cfg.get("title") or title
+        # --- correction section ---
+        corr_cfg = cfg.get("correction", {})
+        if corr_cfg.get("enabled"):
+            observations_csv  = corr_cfg.get("observations_csv")  or observations_csv
+            stations_csv      = corr_cfg.get("stations_csv")       or stations_csv
+            centerlines_file  = corr_cfg.get("centerlines_file")   or centerlines_file
+            echo_inp          = corr_cfg.get("echo_inp_file")       or echo_inp
+            max_obs_age       = corr_cfg.get("max_obs_age", max_obs_age)
+            correction_method = corr_cfg.get("method", correction_method).lower()
+            idw_power         = corr_cfg.get("idw", {}).get("power",    idw_power)
+            oi_sigma_obs      = corr_cfg.get("oi",  {}).get("sigma_obs", oi_sigma_obs)
+            oi_kernel         = corr_cfg.get("oi",  {}).get("kernel",   oi_kernel)
+            oi_resistance     = corr_cfg.get("oi",  {}).get("resistance", oi_resistance)
+        # Restore compare-correction mode when config was saved from it
+        if cfg.get("mode") == "corrected_multi":
+            compare_correction = True
+        # Restore custom resample from config
+        resample_cfg = cfg.get("resample", {})
+        if resample_cfg.get("enabled"):
+            resample_freq = resample_cfg.get("freq") or resample_freq
+            resample_agg  = resample_cfg.get("agg",  resample_agg)
         log.info("Loaded config from %s (%d file(s))", config_file, len(h5files))
     elif not h5files:
         raise click.UsageError(
@@ -338,9 +423,33 @@ def qual_cmd(
     if len(h5files) > 2:
         raise click.UsageError("At most 2 H5FILE arguments are supported.")
     multi = len(h5files) == 2
+
+    # ------------------------------------------------------------------
+    # IDW correction validation (eager, before building the reader)
+    # ------------------------------------------------------------------
+    use_correction = observations_csv is not None
+    if use_correction:
+        if multi:
+            raise click.UsageError(
+                "IDW observation correction (--observations-csv) is not supported "
+                "with two H5 files.  Use a single file."
+            )
+        if stations_csv is None:
+            raise click.UsageError(
+                "--stations-csv is required when --observations-csv is given."
+            )
+
     effective_title = title or (
         f"DSM2 QUAL {constituent.upper()} (\u0394)" if (multi and show_diff)
-        else f"DSM2 QUAL {constituent.upper()}"
+        else (
+            f"DSM2 QUAL/GTM \u2014 {constituent.upper()} (Model vs {correction_method.upper()} Corrected)"
+            if (use_correction and compare_correction)
+            else (
+                f"DSM2 QUAL/GTM \u2014 {constituent.upper()} ({correction_method.upper()} corrected)"
+                if use_correction
+                else f"DSM2 QUAL {constituent.upper()}"
+            )
+        )
     )
     slug = _title_to_slug(effective_title)
     shapefiles = [shapefile] if shapefile else None
@@ -350,7 +459,80 @@ def qual_cmd(
         import panel as pn
         hv.extension("bokeh")
         pn.extension(throttled=True)
-        if multi:
+        if use_correction:
+            # --- build corrector (shared for both single and comparison modes)
+            if correction_method.lower() == "oi":
+                from pydsm.analysis.network_correction import (
+                    NetworkOICorrector,
+                    snap_stations_to_channel_ends,
+                    exponential_kernel,
+                    channel_direction_kernel,
+                )
+                from pydsm.viz.dsm2gis import read_stations
+                import geopandas as gpd
+                from dsm2ui.animate import CorrectedQualH5ConcentrationReader
+                _chan_df = CorrectedQualH5ConcentrationReader._load_channels(
+                    h5files[0], echo_inp
+                )
+                _cl = (
+                    centerlines_file
+                    or str(
+                        __import__("pathlib").Path(
+                            __import__("dsm2ui.animate", fromlist=["animate"]).__file__
+                        ).parent / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson"
+                    )
+                )
+                import warnings as _w
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore")
+                    _snapped = snap_stations_to_channel_ends(
+                        read_stations(stations_csv),
+                        gpd.read_file(_cl),
+                        _chan_df,
+                    )
+                _kfn = (
+                    exponential_kernel()
+                    if oi_kernel.lower() == "exponential"
+                    else channel_direction_kernel(resistance=oi_resistance)
+                )
+                corrector = NetworkOICorrector(
+                    _chan_df, _snapped,
+                    sigma_obs=oi_sigma_obs, corr_fn=_kfn,
+                )
+            else:
+                corrector = None  # IDW built inside the reader
+
+            _correction_kwargs = dict(
+                observations_csv=observations_csv,
+                stations_csv=stations_csv,
+                centerlines_file=centerlines_file,
+                constituent=constituent,
+                power=idw_power,
+                max_obs_age=max_obs_age,
+                echo_inp_file=echo_inp,
+                corrector=corrector,
+                shapefile=shapefile,
+                simplify_tolerance=simplify,
+                channel_id_column=channel_id_column,
+                vmin=vmin, vmax=vmax, colormap=colormap,
+                size=size,
+                initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
+            )
+
+            if compare_correction:
+                from dsm2ui.animate import animate_qual_corrected_multi
+                mgr = animate_qual_corrected_multi(
+                    h5files[0],
+                    **_correction_kwargs,
+                )
+            else:
+                from dsm2ui.animate import animate_qual_corrected
+                mgr = animate_qual_corrected(
+                    h5files[0],
+                    title=effective_title,
+                    **_correction_kwargs,
+                )
+        elif multi:
             from dsm2ui.animate import animate_qual_multi
             mgr = animate_qual_multi(
                 h5files[0], h5files[1],
@@ -375,9 +557,116 @@ def qual_cmd(
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
+        # Apply custom resample on top of the primary transform if requested.
+        if resample_freq:
+            from dsm2ui.animate import (
+                make_resample_transform, make_composed_transform,
+                _dsm2_transform_options,
+            )
+            r_spec = make_resample_transform(resample_freq, resample_agg)
+            base_disp = _CLI_TRANSFORM_MAP.get(transform.lower(), "none")
+            opts = _dsm2_transform_options()
+            if base_disp != "none" and base_disp in opts:
+                composed = make_composed_transform(opts[base_disp], r_spec)
+                display_name = f"{base_disp} \u2192 {resample_agg}({resample_freq})"
+            else:
+                composed = r_spec
+                display_name = f"{resample_agg}({resample_freq})"
+            mgr._transform_options[display_name] = composed
+            if display_name not in mgr._transform_select.options:
+                mgr._transform_select.options = (
+                    mgr._transform_select.options + [display_name]
+                )
+            mgr._transform_select.value = display_name
+            mgr._animate_meta["resample"] = {
+                "enabled": True, "freq": resample_freq, "agg": resample_agg,
+            }
         if cfg:
             _apply_config_to_manager(mgr, cfg)
         log.info("Ready")
         return mgr
 
     _serve_viewer(build, slug=slug, title=effective_title, port=port, desktop=desktop)
+
+
+# ---------------------------------------------------------------------------
+# Export corrected QUAL HDF5
+# ---------------------------------------------------------------------------
+
+@animate.command(name="export-corrected", context_settings=CONTEXT_SETTINGS)
+@click.argument("h5file", type=click.Path(exists=True, dir_okay=False, readable=True))
+@click.option("--output", "output_h5", required=True,
+              type=click.Path(dir_okay=False),
+              help="Output HDF5 path for the corrected concentrations.")
+@click.option("--constituent", default="ec", show_default=True,
+              help="Constituent to correct and write (e.g. ec, cl, do).")
+@click.option("--observations-csv", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Time-indexed CSV of observations (station IDs as columns).")
+@click.option("--stations-csv", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="CSV with station_id and lat/lon or x/y columns.")
+@click.option("--echo-inp", default=None,
+              type=click.Path(dir_okay=False),
+              help="DSM2 echo .inp fallback for CHANNEL table "
+                   "(needed when the H5 has no /input/channel dataset).")
+@click.option("--centerlines-file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="GeoJSON or shapefile of DSM2 channel centrelines used for "
+                   "station snapping.  Defaults to the bundled DSM2 8.2 "
+                   "centrelines when omitted.")
+@click.option("--start", type=str, default=None,
+              help="Start date: ISO (2014-10-01) or DSM2 military (01OCT2014).")
+@click.option("--end", type=str, default=None,
+              help="End date: ISO or DSM2 military.")
+@click.option("--idw-power", default=2.0, show_default=True, type=float,
+              help="IDW distance exponent.")
+@click.option("--max-obs-age", default="2h", show_default=True,
+              help='Max observation age relative to model timestep (e.g. "2h").')
+@click.option("--chunk-size", default=1000, show_default=True, type=int,
+              help="Timesteps per write chunk (controls memory usage).")
+def export_corrected_cmd(
+    h5file, output_h5, constituent, observations_csv, stations_csv,
+    echo_inp, centerlines_file, start, end, idw_power, max_obs_age, chunk_size,
+):
+    """Pre-compute IDW-corrected concentrations and write a new QUAL HDF5.
+
+    The output file is a drop-in replacement for the raw QUAL HDF5 \u2014 same
+    dataset paths and time attributes \u2014 so it can be compared with the raw
+    model using the standard two-file comparison animation with no extra setup:
+
+    \b
+        dsm2ui animate qual RAW.h5 CORRECTED.h5 --constituent ec
+        dsm2ui animate qual RAW.h5 CORRECTED.h5 --transform godin-daily --diff
+
+    Because corrections are pre-computed, animation is pure HDF5 reads:
+    Godin filter, daily resample, and diff mode all work at full speed.
+    A /correction group in the output records provenance (obs file, power,
+    creation time).
+    """
+    from pydsm.analysis.dsm2study import parse_military_date
+    import pandas as _pd
+
+    def _parse(s):
+        if s is None:
+            return None
+        try:
+            return parse_military_date(s)
+        except Exception:
+            return _pd.Timestamp(s)
+
+    from dsm2ui.animate import export_corrected_qual_h5
+    export_corrected_qual_h5(
+        input_h5=h5file,
+        output_h5=output_h5,
+        observations_csv=observations_csv,
+        stations_csv=stations_csv,
+        constituent=constituent,
+        centerlines_file=centerlines_file,
+        power=idw_power,
+        max_obs_age=max_obs_age,
+        echo_inp_file=echo_inp,
+        start=_parse(start),
+        end=_parse(end),
+        chunk_size=chunk_size,
+    )

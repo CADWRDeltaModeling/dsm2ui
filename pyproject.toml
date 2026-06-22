@@ -73,3 +73,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py", "ex_*.py"]
 collect_ignore = ["setup.py"]
 addopts = "--doctest-modules"
+markers = [
+    "performance: benchmarks that measure runtime (run with -m performance)",
+    "integration: tests that require real data files on disk (run with -m integration)",
+]

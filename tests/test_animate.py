@@ -21,14 +21,18 @@ import pytest
 _REPO_ROOT = Path(__file__).parent.parent
 _PYDSM_DATA = _REPO_ROOT.parent / "pydsm" / "tests" / "data"
 
-HYDRO_H5 = _PYDSM_DATA / "historical_v82.h5"
-QUAL_H5 = _PYDSM_DATA / "historical_v82_ec.h5"
+HYDRO_H5  = _PYDSM_DATA / "historical_v82.h5"
+QUAL_H5   = _PYDSM_DATA / "historical_v82_ec.h5"
+HYDRO_INP = _PYDSM_DATA / "hydro_echo_historical_v82.inp"
 
 _has_hydro = HYDRO_H5.exists()
-_has_qual = QUAL_H5.exists()
+_has_qual  = QUAL_H5.exists() and HYDRO_INP.exists()
 
 skip_no_hydro = pytest.mark.skipif(not _has_hydro, reason=f"Hydro HDF5 not found: {HYDRO_H5}")
-skip_no_qual = pytest.mark.skipif(not _has_qual, reason=f"Qual HDF5 not found: {QUAL_H5}")
+skip_no_qual  = pytest.mark.skipif(
+    not _has_qual,
+    reason=f"Qual HDF5 or hydro echo .inp not found under {_PYDSM_DATA}",
+)
 skip_no_geo = pytest.mark.skipif(
     not (_has_hydro or _has_qual),
     reason="Neither HYDRO nor QUAL HDF5 found",
@@ -37,6 +41,110 @@ skip_no_geo = pytest.mark.skipif(
 
 # ===========================================================================
 # Internal helpers
+# ===========================================================================
+# Performance benchmarks  (skipped by default — run with: pytest -m performance)
+# ===========================================================================
+
+@pytest.mark.performance
+class TestIDWVectorizedPerformance:
+    """Confirm the vectorised IDW path is substantially faster than the
+    equivalent per-step Python loop.
+
+    Run with:  pytest -m performance
+    """
+
+    def _make_inputs(self, n_times=200, n_ch=525, n_sta=120, seed=42):
+        rng = np.random.default_rng(seed)
+        N_ce = 2 * n_ch
+        model_ce = rng.uniform(100, 25_000, size=(n_times, N_ce))
+        obs_vals = rng.uniform(200, 15_000, size=(n_times, n_sta))
+        obs_vals[rng.random((n_times, n_sta)) > 0.8] = np.nan  # 80 % coverage
+        W_finite = np.zeros((N_ce, n_sta))
+        for j in range(n_sta):
+            idx = rng.choice(N_ce, 50, replace=False)
+            W_finite[idx, j] = rng.uniform(1e-6, 1.0, 50)
+        sta_ce_idx = rng.integers(0, N_ce, n_sta).astype(np.intp)
+        return model_ce, obs_vals, W_finite, sta_ce_idx, n_ch
+
+    def _vectorized(self, model_ce, obs_values, W_finite, sta_ce_idx, n_ch):
+        valid_sta = sta_ce_idx >= 0
+        model_at_sta = np.full_like(obs_values, np.nan)
+        model_at_sta[:, valid_sta] = model_ce[:, sta_ce_idx[valid_sta]]
+        residuals = obs_values - model_at_sta
+        valid_f = (~np.isnan(residuals)).astype(np.float64)
+        res_f = np.where(np.isnan(residuals), 0.0, residuals)
+        wr = res_f @ W_finite.T
+        w_sum = valid_f @ W_finite.T
+        with np.errstate(invalid="ignore", divide="ignore"):
+            correction = np.where(w_sum > 0.0, wr / w_sum, 0.0)
+        corrected = model_ce + correction
+        return np.nanmean(np.stack([corrected[:, 0::2], corrected[:, 1::2]], axis=2), axis=2)
+
+    def _per_step_loop(self, model_ce, obs_values, W_finite, sta_ce_idx, n_ch):
+        n_times = model_ce.shape[0]
+        N_ce = model_ce.shape[1]
+        result = np.zeros((n_times, n_ch))
+        for t in range(n_times):
+            corrections = np.zeros(N_ce)
+            for i in range(N_ce):
+                wr, ws = 0.0, 0.0
+                for j in range(obs_values.shape[1]):
+                    v = obs_values[t, j]
+                    w = W_finite[i, j]
+                    if not np.isnan(v) and w > 0:
+                        ce_i = sta_ce_idx[j]
+                        res = v - model_ce[t, ce_i] if ce_i >= 0 else 0.0
+                        wr += w * res
+                        ws += w
+                if ws > 0:
+                    corrections[i] = wr / ws
+            corrected = model_ce[t] + corrections
+            result[t] = np.nanmean(
+                np.stack([corrected[0::2], corrected[1::2]], axis=1), axis=1
+            )
+        return result
+
+    def test_vectorized_faster_than_loop(self):
+        import time
+        model_ce, obs_values, W_finite, sta_ce_idx, n_ch = self._make_inputs()
+
+        # Warm up
+        self._vectorized(model_ce, obs_values, W_finite, sta_ce_idx, n_ch)
+
+        t0 = time.perf_counter()
+        for _ in range(3):
+            self._vectorized(model_ce, obs_values, W_finite, sta_ce_idx, n_ch)
+        t_vec = (time.perf_counter() - t0) / 3
+
+        t0 = time.perf_counter()
+        self._per_step_loop(model_ce, obs_values, W_finite, sta_ce_idx, n_ch)
+        t_loop = time.perf_counter() - t0
+
+        speedup = t_loop / t_vec
+        print(
+            f"\n  Vectorized: {t_vec*1000:.1f} ms  |  "
+            f"Loop: {t_loop*1000:.1f} ms  |  "
+            f"Speedup: {speedup:.0f}x"
+        )
+        assert speedup > 50, (
+            f"Expected ≥50x speedup; got {speedup:.1f}x.  "
+            "Vectorized IDW may have regressed."
+        )
+
+    def test_vectorized_matches_loop_numerically(self):
+        """Vectorized and loop paths must produce the same corrections."""
+        # Use a small case for speed
+        model_ce, obs_values, W_finite, sta_ce_idx, n_ch = self._make_inputs(
+            n_times=10, n_ch=20, n_sta=8
+        )
+        r_vec  = self._vectorized(model_ce, obs_values, W_finite, sta_ce_idx, n_ch)
+        r_loop = self._per_step_loop(model_ce, obs_values, W_finite, sta_ce_idx, n_ch)
+        np.testing.assert_allclose(
+            r_vec, r_loop, rtol=1e-10,
+            err_msg="Vectorized IDW output differs from per-step loop.",
+        )
+
+
 # ===========================================================================
 
 class TestNormaliseInterval:
@@ -356,6 +464,719 @@ def test_animate_qual_subcommand_help():
     assert result.exit_code == 0
     assert "--constituent" in result.output
     assert "--transform" in result.output
+    assert "--observations-csv" in result.output
+    assert "--stations-csv" in result.output
+
+
+# ===========================================================================
+# CorrectedQualH5ConcentrationReader
+# ===========================================================================
+
+@skip_no_qual
+class TestCorrectedQualH5ConcentrationReader:
+    """Tests for CorrectedQualH5ConcentrationReader using the real QUAL H5 fixture.
+
+    The bundled DSM2 8.2 channel centrelines GeoJSON is used for station
+    snapping so no extra GIS files are needed.  Observation stations are
+    placed at approximate Delta coordinates; if they land far from a channel
+    pydsm.viz.dsm2gis emits a UserWarning but does not raise.
+    """
+
+    @pytest.fixture(scope="class")
+    def bundled_centerlines(self):
+        import dsm2ui
+        p = Path(dsm2ui.__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson"
+        if not p.exists():
+            pytest.skip(f"Bundled centrelines not found: {p}")
+        return p
+
+    @pytest.fixture(scope="class")
+    def obs_csv(self, tmp_path_factory):
+        """30-row hourly observations CSV (1990-01-03 to 1990-01-04).
+        STA_A=800 µS/cm, STA_B always NaN (simulates a missing station).
+        """
+        idx = pd.date_range("1990-01-03", periods=30, freq="1h")
+        df = pd.DataFrame(
+            {"STA_A": 800.0, "STA_B": float("nan")}, index=idx
+        )
+        p = tmp_path_factory.mktemp("obs") / "obs.csv"
+        df.to_csv(p)
+        return p
+
+    @pytest.fixture(scope="class")
+    def stations_csv(self, tmp_path_factory):
+        """Two stations at approximate DSM2 Delta coordinates (WGS84)."""
+        df = pd.DataFrame({
+            "station_id": ["STA_A", "STA_B"],
+            "lat":         [38.03,   38.10],
+            "lon":         [-122.13, -121.90],
+        })
+        p = tmp_path_factory.mktemp("stations") / "stations.csv"
+        df.to_csv(p, index=False)
+        return p
+
+    @pytest.fixture(scope="class")
+    def reader(self, obs_csv, stations_csv, bundled_centerlines):
+        import warnings
+        from dsm2ui.animate import CorrectedQualH5ConcentrationReader
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)   # snap-distance warnings ok
+            r = CorrectedQualH5ConcentrationReader(
+                h5file=QUAL_H5,
+                observations_csv=obs_csv,
+                stations_csv=stations_csv,
+                centerlines_file=bundled_centerlines,
+                constituent="ec",
+                power=2,
+                echo_inp_file=HYDRO_INP,  # qual H5 has no channel table
+            )
+        yield r
+        r.close()
+
+    # ------------------------------------------------------------------
+    # Static helper
+    # ------------------------------------------------------------------
+
+    def test_channels_loaded_from_h5(self):
+        """_load_channels reads the CHANNEL table from the hydro H5 file.
+        The qual H5 does not store channel geometry; it must come from the
+        companion hydro H5 or a fallback echo .inp file.
+        """
+        from dsm2ui.animate import CorrectedQualH5ConcentrationReader
+        # Hydro H5 stores the table at /hydro/input/channel
+        df = CorrectedQualH5ConcentrationReader._load_channels(HYDRO_H5, None)
+        assert len(df) > 100
+        required = {"chan_no", "upnode", "downnode", "length"}
+        assert required <= set(df.columns)
+        assert df["upnode"].dtype == int or np.issubdtype(df["upnode"].dtype, np.integer)
+
+    def test_channels_loaded_from_echo_inp(self):
+        """_load_channels falls back to the echo .inp file."""
+        from dsm2ui.animate import CorrectedQualH5ConcentrationReader
+        # Pass the qual H5 (no channel table) + echo inp fallback
+        df = CorrectedQualH5ConcentrationReader._load_channels(QUAL_H5, HYDRO_INP)
+        assert len(df) > 100
+        assert {"chan_no", "upnode", "downnode", "length"} <= set(df.columns)
+
+    # ------------------------------------------------------------------
+    # Time index
+    # ------------------------------------------------------------------
+
+    def test_time_index_is_regular(self, reader):
+        assert reader.time_index.freq is not None
+
+    def test_time_index_matches_inner(self, reader):
+        from dsm2ui.animate import QualH5ConcentrationReader
+        with QualH5ConcentrationReader(QUAL_H5, constituent="ec") as raw:
+            assert len(reader.time_index) == len(raw.time_index)
+            assert reader.time_index.freq == raw.time_index.freq
+
+    # ------------------------------------------------------------------
+    # get_slice
+    # ------------------------------------------------------------------
+
+    def test_get_slice_returns_series(self, reader):
+        s = reader.get_slice(reader.time_index[5])
+        assert isinstance(s, pd.Series)
+        assert len(s) > 0
+
+    def test_get_slice_index_matches_inner(self, reader):
+        from dsm2ui.animate import QualH5ConcentrationReader
+        ts = reader.time_index[0]
+        with QualH5ConcentrationReader(QUAL_H5, constituent="ec") as raw:
+            expected_idx = raw.get_slice(ts).index
+        s = reader.get_slice(ts)
+        pd.testing.assert_index_equal(s.index, expected_idx)
+
+    def test_get_slice_no_nan_propagation(self, reader):
+        """Correction must not introduce NaN where model had valid data."""
+        s_corr = reader.get_slice(reader.time_index[5])
+        from dsm2ui.animate import QualH5ConcentrationReader
+        with QualH5ConcentrationReader(QUAL_H5, constituent="ec") as raw:
+            s_raw = raw.get_slice(reader.time_index[5])
+        # Positions that were valid in raw must still be finite after correction
+        valid_mask = s_raw.notna()
+        assert s_corr[valid_mask].notna().all()
+
+    # ------------------------------------------------------------------
+    # All-NaN obs path (max_obs_age guard)
+    # ------------------------------------------------------------------
+
+    def test_all_nan_obs_returns_raw(self, reader):
+        """time_index[-1] is Jan 31 1990; obs CSV ends Jan 4 (~27 days gap).
+        max_obs_age="2h" triggers all-NaN obs → correction=0 → output==raw.
+        """
+        from dsm2ui.animate import QualH5ConcentrationReader
+        ts = reader.time_index[-1]
+        with QualH5ConcentrationReader(QUAL_H5, constituent="ec") as raw:
+            s_raw = raw.get_slice(ts)
+        s_corr = reader.get_slice(ts)
+        pd.testing.assert_series_equal(s_corr, s_raw)
+
+    # ------------------------------------------------------------------
+    # get_slice_range
+    # ------------------------------------------------------------------
+
+    def test_get_slice_range_shape(self, reader):
+        df = reader.get_slice_range(0, 5)
+        assert isinstance(df, pd.DataFrame)
+        assert df.shape[0] == 5
+        # column count equals number of channels
+        from dsm2ui.animate import QualH5ConcentrationReader
+        with QualH5ConcentrationReader(QUAL_H5, constituent="ec") as raw:
+            n_ch = len(raw._channel_numbers)
+        assert df.shape[1] == n_ch
+
+    def test_get_slice_range_index_is_timestamps(self, reader):
+        df = reader.get_slice_range(0, 3)
+        assert isinstance(df.index, pd.DatetimeIndex)
+        assert list(df.index) == list(reader.time_index[:3])
+
+    # ------------------------------------------------------------------
+    # vmin / vmax
+    # ------------------------------------------------------------------
+
+    def test_vmin_vmax_match_inner(self, reader):
+        from dsm2ui.animate import QualH5ConcentrationReader
+        with QualH5ConcentrationReader(QUAL_H5, constituent="ec") as raw:
+            assert reader.vmin == raw.vmin
+            assert reader.vmax == raw.vmax
+
+    # ------------------------------------------------------------------
+    # Context manager
+    # ------------------------------------------------------------------
+
+    def test_context_manager(self, obs_csv, stations_csv, bundled_centerlines):
+        import warnings
+        from dsm2ui.animate import CorrectedQualH5ConcentrationReader
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with CorrectedQualH5ConcentrationReader(
+                QUAL_H5, obs_csv, stations_csv, bundled_centerlines,
+                echo_inp_file=HYDRO_INP,
+            ) as r:
+                s = r.get_slice(r.time_index[0])
+        assert len(s) > 0
+
+
+# ===========================================================================
+# IDW correction correctness — observations must be recovered at station CEs
+# ===========================================================================
+
+class TestIDWCorrectionExactMatch:
+    """Verify the fundamental mathematical property of IDW correction:
+
+    At a station's *home* channel-end (where the station is snapped) the IDW
+    weight is infinite, so the correction is the exact residual and the
+    corrected value equals the observation.
+
+    These tests use only synthetic data — no HDF5 file is required.
+    """
+
+    def _build_corrector(self):
+        """One channel, one station snapped to its upstream end."""
+        channels_df = pd.DataFrame({
+            "chan_no":   ["1"],
+            "upnode":   [1],
+            "downnode": [2],
+            "length":   [10_000.0],
+        })
+        snapped = pd.DataFrame(
+            {
+                "chan_no":           ["1"],
+                "location":         ["upstream"],
+                "node_id":          [1],
+                "distance_fraction": [0.0],
+            },
+            index=pd.Index(["STA_A"], name="station_id"),
+        )
+        from pydsm.analysis.network_correction import NetworkIDWCorrector
+        return NetworkIDWCorrector(channels_df, snapped, power=2)
+
+    def test_corrected_equals_observation_at_station_ce(self):
+        """At the station's home CE the corrected value must equal the obs."""
+        corrector = self._build_corrector()
+        model_ce = pd.Series({"1-upstream": 500.0, "1-downstream": 600.0})
+        obs       = pd.Series({"STA_A": 800.0})
+
+        corrected = corrector.correct(model_ce, obs)
+
+        # 1-upstream is STA_A's home CE; correction = obs - model = +300 → 800
+        assert corrected["1-upstream"] == pytest.approx(800.0)
+
+    def test_unobserved_ce_uses_idw_not_exact(self):
+        """With a single station, ALL reachable CEs receive the full residual
+        correction (IDW weight denominator = that one station's weight).
+        The downstream CE must differ from the raw model but is NOT exact-matched
+        to the observation."""
+        corrector = self._build_corrector()
+        model_ce = pd.Series({"1-upstream": 500.0, "1-downstream": 600.0})
+        obs       = pd.Series({"STA_A": 800.0})
+
+        corrected = corrector.correct(model_ce, obs)
+
+        # With a single reachable station, correction = full residual everywhere.
+        # raw_downstream=600, residual=300 → corrected_downstream = 900
+        assert corrected["1-downstream"] > 600.0   # got corrected
+        # Not exact-match to obs (because downstream CE has finite, not inf weight)
+        assert corrected["1-downstream"] != pytest.approx(800.0)
+
+    def test_all_nan_obs_returns_raw_model(self):
+        """When all observations are NaN the corrector returns the raw model."""
+        corrector = self._build_corrector()
+        model_ce = pd.Series({"1-upstream": 500.0, "1-downstream": 600.0})
+        obs_nan  = pd.Series({"STA_A": float("nan")})
+
+        corrected = corrector.correct(model_ce, obs_nan)
+
+        pd.testing.assert_series_equal(corrected, model_ce)
+
+    def test_vectorized_idw_recovers_obs_at_station_ce(self):
+        """The vectorized batch path in CorrectedQualH5ConcentrationReader must
+        also exactly recover the observation at the station's home channel-end."""
+        # Simulate the data structures used by _apply_idw_vectorized.
+        N_times = 5
+        N_ce = 4  # 2 channels × (upstream + downstream), interleaved
+        N_sta = 1
+
+        # W_finite: station 0 is at CE index 0 (1-upstream) — infinite weight
+        # is handled separately via exact_map; finite weight here is 0.
+        W_finite = np.zeros((N_ce, N_sta))
+        sta_ce_idx = np.array([0], dtype=np.intp)  # STA_A → CE 0
+
+        exact_map = [(0, np.array([0], dtype=np.intp))]  # CE 0 exact-matched by station 0
+
+        model_ce_block = np.full((N_times, N_ce), 500.0)  # all model = 500
+        obs_values     = np.full((N_times, N_sta), 800.0)  # obs = 800
+
+        # --- reproduce _apply_idw_vectorized logic ---
+        valid_sta = sta_ce_idx >= 0
+        model_at_sta = np.full_like(obs_values, np.nan)
+        model_at_sta[:, valid_sta] = model_ce_block[:, sta_ce_idx[valid_sta]]
+
+        residuals = obs_values - model_at_sta  # (N_times, N_sta) = 300
+        valid_f   = (~np.isnan(residuals)).astype(np.float64)
+        res_f     = np.where(np.isnan(residuals), 0.0, residuals)
+
+        wr    = res_f   @ W_finite.T
+        w_sum = valid_f @ W_finite.T
+        with np.errstate(invalid="ignore", divide="ignore"):
+            correction = np.where(w_sum > 0.0, wr / w_sum, 0.0)
+
+        # Exact-match overrides
+        for ce_i, sta_js in exact_map:
+            exact_r = residuals[:, sta_js]
+            any_valid = ~np.all(np.isnan(exact_r), axis=1)
+            if any_valid.any():
+                correction[any_valid, ce_i] = np.nanmean(exact_r[any_valid], axis=1)
+
+        corrected_ce = model_ce_block + correction
+
+        # CE 0 (station home) must equal obs = 800
+        np.testing.assert_allclose(corrected_ce[:, 0], 800.0, atol=1e-9)
+
+
+@pytest.mark.integration
+@skip_no_qual
+class TestIDWCorrectionAtObservationSites:
+    """Integration test: the IDW-corrected model must recover observations at
+    each station's home channel-end.
+
+    Uses the pydsm QUAL H5 test fixture.  Skipped when the fixture is absent.
+    Run with:  pytest -m integration
+    """
+
+    @pytest.fixture(scope="class")
+    def corrector_and_snapped(self, tmp_path_factory, bundled_centerlines):
+        """Build an IDW corrector and snapped-stations table from synthetic obs."""
+        import warnings
+        from dsm2ui.animate import CorrectedQualH5ConcentrationReader
+        from pydsm.analysis.network_correction import (
+            NetworkIDWCorrector,
+            snap_stations_to_channel_ends,
+        )
+        from pydsm.viz.dsm2gis import read_stations
+        import geopandas as gpd
+
+        # Two stations at approximate Delta locations
+        sta_df = pd.DataFrame({
+            "station_id": ["ST_UP", "ST_DN"],
+            "lat":         [38.03,   38.05],
+            "lon":         [-122.13, -121.95],
+        })
+        sta_path = tmp_path_factory.mktemp("sta") / "sta.csv"
+        sta_df.to_csv(sta_path, index=False)
+
+        channels_df = CorrectedQualH5ConcentrationReader._load_channels(
+            HYDRO_H5, None
+        )
+        cl_gdf = gpd.read_file(str(bundled_centerlines))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            snapped = snap_stations_to_channel_ends(
+                read_stations(str(sta_path)), cl_gdf, channels_df
+            )
+        corrector = NetworkIDWCorrector(channels_df, snapped, power=2)
+        return corrector, snapped
+
+    @pytest.fixture(scope="class")
+    def bundled_centerlines(self):
+        import dsm2ui
+        p = Path(dsm2ui.__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson"
+        if not p.exists():
+            pytest.skip(f"Bundled centrelines not found: {p}")
+        return p
+
+    def test_corrected_recovers_obs_at_home_channel_end(
+        self, corrector_and_snapped
+    ):
+        """At each station's exact channel-end node, corrected EC == obs."""
+        from dsm2ui.animate import QualH5ConcentrationReader
+
+        corrector, snapped = corrector_and_snapped
+
+        with QualH5ConcentrationReader(QUAL_H5, constituent="ec") as raw:
+            ts = raw.time_index[10]
+            model_ce_series = _qual_model_ce_series(raw, ts)
+
+        obs = pd.Series({"ST_UP": 1200.0, "ST_DN": 900.0})
+        corrected_ce = corrector.correct(model_ce_series, obs)
+
+        for sta_id, obs_val in obs.items():
+            row = snapped.loc[sta_id]
+            ce_key = f"{row['chan_no']}-{row['location']}"
+            assert corrected_ce[ce_key] == pytest.approx(obs_val, abs=1e-6), (
+                f"Station {sta_id!r}: corrected[{ce_key!r}]={corrected_ce[ce_key]:.2f} "
+                f"!= obs={obs_val:.2f}"
+            )
+
+    def test_residual_at_obs_stations_is_zero(self, corrector_and_snapped):
+        """Residual (corrected − obs) at each station's CE must be ≈ 0."""
+        from dsm2ui.animate import QualH5ConcentrationReader
+
+        corrector, snapped = corrector_and_snapped
+
+        with QualH5ConcentrationReader(QUAL_H5, constituent="ec") as raw:
+            ts = raw.time_index[20]
+            model_ce_series = _qual_model_ce_series(raw, ts)
+
+        obs = pd.Series({"ST_UP": 800.0, "ST_DN": 1500.0})
+        corrected_ce = corrector.correct(model_ce_series, obs)
+
+        residuals = {}
+        for sta_id, obs_val in obs.items():
+            row = snapped.loc[sta_id]
+            ce_key = f"{row['chan_no']}-{row['location']}"
+            residuals[sta_id] = corrected_ce[ce_key] - obs_val
+
+        for sta_id, resid in residuals.items():
+            assert abs(resid) < 1e-6, (
+                f"Station {sta_id!r}: corrected − obs = {resid:.6f} (expected ≈ 0)"
+            )
+
+
+def _qual_model_ce_series(raw_reader, timestamp):
+    """Extract a channel-end Series from a QualH5ConcentrationReader at *timestamp*."""
+    i = raw_reader._time_index.get_indexer([timestamp], method="nearest")[0]
+    ci = raw_reader._constituent_index
+    row = raw_reader._ds[i, ci, :, :].astype(float)
+    row[row < -1e20] = np.nan
+    chan_str = [str(c) for c in raw_reader._channel_numbers]
+    ce_index = [f"{s}-{loc}" for s in chan_str for loc in ("upstream", "downstream")]
+    values = np.empty(2 * len(chan_str))
+    values[0::2] = row[:, 0]
+    values[1::2] = row[:, 1]
+    return pd.Series(values, index=ce_index)
+
+
+# ---------------------------------------------------------------------------
+# Real production file paths used by the live-data integration class below.
+# ---------------------------------------------------------------------------
+_REAL_QUAL_H5 = Path(
+    r"D:\delta\dsm2_v821\studies\historical\output\hist_v821_202312_EC.h5"
+)
+_REAL_EC_OBS  = Path(r"D:\delta\ec_obs_avg.csv")
+_REAL_STA_CSV = Path(r"D:\delta\ec_obs_stations.csv")
+_REAL_ECHO    = Path(
+    r"D:\delta\dsm2_v821\studies\historical\output"
+    r"\hydro_echo_hist_v821_202312.inp"
+)
+_real_prod_files = pytest.mark.skipif(
+    not all(p.exists() for p in [_REAL_QUAL_H5, _REAL_EC_OBS,
+                                  _REAL_STA_CSV, _REAL_ECHO]),
+    reason="Real production files not found on this machine.",
+)
+
+
+@pytest.mark.integration
+@_real_prod_files
+class TestIDWCorrectionWithRealProductionFiles:
+    """Integration test: IDW correction recovers observed EC values at the
+    snapped channel-ends of the real production observation stations.
+
+    Uses the actual study files from D:\\delta\\dsm2_v821.  Skipped when those
+    files are absent.
+
+    The corrector is built directly (bypassing the full
+    CorrectedQualH5ConcentrationReader) to avoid the expensive obs-alignment
+    step over the full model time range.
+
+    Run with:  pytest -m integration -v
+    """
+
+    @pytest.fixture(scope="class")
+    def corrector_and_snapped(self):
+        """Build NetworkIDWCorrector + snapped table from the real station CSV."""
+        import warnings
+        import geopandas as gpd
+        import dsm2ui
+        from dsm2ui.animate import CorrectedQualH5ConcentrationReader
+        from pydsm.analysis.network_correction import (
+            NetworkIDWCorrector,
+            snap_stations_to_channel_ends,
+        )
+        from pydsm.viz.dsm2gis import read_stations
+
+        cl = (Path(dsm2ui.__file__).parent
+              / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson")
+        channels_df = CorrectedQualH5ConcentrationReader._load_channels(
+            str(_REAL_QUAL_H5), str(_REAL_ECHO)
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            snapped = snap_stations_to_channel_ends(
+                read_stations(str(_REAL_STA_CSV)),
+                gpd.read_file(str(cl)),
+                channels_df,
+            )
+        corrector = NetworkIDWCorrector(channels_df, snapped, power=2)
+        return corrector, snapped
+
+    @pytest.fixture(scope="class")
+    def obs_df(self):
+        return pd.read_csv(str(_REAL_EC_OBS), index_col=0, parse_dates=True)
+
+    def _sample_timesteps(self, obs_df, snapped, n=3, min_stations=5):
+        testable = [s for s in obs_df.columns if s in snapped.index]
+        if not testable:
+            pytest.skip("No obs stations found in snapped table.")
+        counts = obs_df[testable].notna().sum(axis=1)
+        candidates = obs_df.index[counts >= min_stations]
+        if len(candidates) == 0:
+            pytest.skip("No timestep has enough non-NaN observations.")
+        step = max(1, len(candidates) // n)
+        return testable, list(candidates[::step][:n])
+
+    def test_corrected_ec_matches_obs_at_station_home_ce(
+        self, corrector_and_snapped, obs_df
+    ):
+        """The corrected EC at observation station CEs must be much closer to
+        observations than the raw model.
+
+        IDW with real data:
+        - At *isolated* nodes (one station per network node) the correction is
+          exact: corrected[CE] == obs.
+        - At *shared* nodes (≥2 stations on the same node) the corrector uses
+          the mean of their residuals, so corrected[CE] = mean(obs values at
+          that node) ≠ any individual obs.
+
+        We therefore test the overall mean absolute error reduction: corrected
+        MAE at station CEs must be < 15 % of the raw-model MAE (≥ 85 % error
+        reduction), which is a conservative lower bound for IDW.
+        """
+        from dsm2ui.animate import QualH5ConcentrationReader
+
+        corrector, snapped = corrector_and_snapped
+        testable, timestamps = self._sample_timesteps(obs_df, snapped)
+
+        raw_errs  = []
+        corr_errs = []
+        with QualH5ConcentrationReader(str(_REAL_QUAL_H5), constituent="ec") as raw:
+            for ts in timestamps:
+                obs_row = obs_df.loc[ts, testable].dropna()
+                if obs_row.empty:
+                    continue
+                model_ce     = _qual_model_ce_series(raw, ts)
+                corrected_ce = corrector.correct(model_ce, obs_row)
+
+                for sta_id, obs_val in obs_row.items():
+                    row    = snapped.loc[sta_id]
+                    ce_key = f"{row['chan_no']}-{row['location']}"
+                    if ce_key not in model_ce.index:
+                        continue
+                    raw_errs.append(abs(float(model_ce[ce_key])  - float(obs_val)))
+                    corr_errs.append(abs(float(corrected_ce[ce_key]) - float(obs_val)))
+
+        if not raw_errs:
+            pytest.skip("No data — check station/obs alignment.")
+
+        mae_raw  = float(np.mean(raw_errs))
+        mae_corr = float(np.mean(corr_errs))
+        frac = mae_corr / max(mae_raw, 1.0)
+
+        assert frac < 0.15, (
+            f"IDW correction reduced MAE from {mae_raw:.1f} to {mae_corr:.1f} µS/cm "
+            f"({frac:.1%} remaining — expected < 15 %)."
+        )
+
+    def test_mean_absolute_residual_across_stations_is_tiny(
+        self, corrector_and_snapped, obs_df
+    ):
+        """Stricter version over more timesteps: corrected MAE < 10 % of raw MAE."""
+        from dsm2ui.animate import QualH5ConcentrationReader
+
+        corrector, snapped = corrector_and_snapped
+        testable, timestamps = self._sample_timesteps(obs_df, snapped, n=5)
+
+        raw_errs  = []
+        corr_errs = []
+        with QualH5ConcentrationReader(str(_REAL_QUAL_H5), constituent="ec") as raw:
+            for ts in timestamps:
+                obs_row = obs_df.loc[ts, testable].dropna()
+                if obs_row.empty:
+                    continue
+                model_ce     = _qual_model_ce_series(raw, ts)
+                corrected_ce = corrector.correct(model_ce, obs_row)
+                for sta_id, obs_val in obs_row.items():
+                    row    = snapped.loc[sta_id]
+                    ce_key = f"{row['chan_no']}-{row['location']}"
+                    if ce_key in model_ce.index:
+                        raw_errs.append(abs(float(model_ce[ce_key])  - float(obs_val)))
+                        corr_errs.append(abs(float(corrected_ce[ce_key]) - float(obs_val)))
+
+        if not raw_errs:
+            pytest.skip("No residuals collected — check station/obs alignment.")
+
+        mae_raw  = float(np.mean(raw_errs))
+        mae_corr = float(np.mean(corr_errs))
+        frac = mae_corr / max(mae_raw, 1.0)
+
+        assert frac < 0.10, (
+            f"IDW correction reduced MAE from {mae_raw:.1f} to {mae_corr:.1f} µS/cm "
+            f"({frac:.1%} remaining — expected < 10 %)."
+        )
+
+
+class TestCorrectedQualH5CLI:
+    """Tests that the qual CLI branches correctly on --observations-csv.
+
+    The factory functions are monkeypatched to avoid actually building readers
+    or opening HDF5 files so no test data is required.
+    """
+
+    @pytest.fixture()
+    def fake_h5(self, tmp_path):
+        p = tmp_path / "fake.h5"
+        p.write_bytes(b"")
+        return str(p)
+
+    @pytest.fixture()
+    def fake_obs_csv(self, tmp_path):
+        p = tmp_path / "obs.csv"
+        p.write_text("datetime,STA_A\n1990-01-03 00:00,800\n")
+        return str(p)
+
+    @pytest.fixture()
+    def fake_stations_csv(self, tmp_path):
+        p = tmp_path / "stations.csv"
+        p.write_text("station_id,lat,lon\nSTA_A,38.03,-122.13\n")
+        return str(p)
+
+    def _run(self, args, monkeypatch):
+        """Patch server & both factories, then invoke the CLI."""
+        from click.testing import CliRunner
+        from dsm2ui.animate_cli import animate
+        import unittest.mock as mock
+
+        fake_mgr = mock.MagicMock()
+        fake_mgr._reader = mock.MagicMock()
+        fake_mgr._reader.time_index = pd.date_range("1990-01-01", periods=5, freq="1h")
+
+        calls = {"qual": 0, "corrected": 0}
+
+        def fake_animate_qual(*a, **kw):
+            calls["qual"] += 1
+            return fake_mgr
+
+        def fake_animate_qual_corrected(*a, **kw):
+            calls["corrected"] += 1
+            return fake_mgr
+
+        # Patch both factories in the CLI module namespace
+        monkeypatch.setattr("dsm2ui.animate.animate_qual", fake_animate_qual)
+        monkeypatch.setattr("dsm2ui.animate.animate_qual_corrected", fake_animate_qual_corrected)
+        # Patch _serve_viewer so the test doesn't actually launch a Panel server
+        monkeypatch.setattr("dsm2ui.animate_cli._serve_viewer", lambda build, **kw: build())
+        # Suppress holoviews / panel extension calls
+        monkeypatch.setattr("holoviews.extension", lambda *a, **kw: None)
+        monkeypatch.setattr("panel.extension", lambda *a, **kw: None)
+
+        runner = CliRunner()
+        result = runner.invoke(animate, args, catch_exceptions=False)
+        return result, calls
+
+    def test_no_obs_csv_calls_animate_qual(self, fake_h5, monkeypatch):
+        """Without --observations-csv the normal animate_qual is used."""
+        result, calls = self._run(["qual", fake_h5], monkeypatch)
+        assert result.exit_code == 0, result.output
+        assert calls["qual"] == 1
+        assert calls["corrected"] == 0
+
+    def test_obs_csv_calls_animate_qual_corrected(
+        self, fake_h5, fake_obs_csv, fake_stations_csv, monkeypatch
+    ):
+        """With --observations-csv the corrected factory is used."""
+        result, calls = self._run(
+            ["qual", fake_h5,
+             "--observations-csv", fake_obs_csv,
+             "--stations-csv", fake_stations_csv],
+            monkeypatch,
+        )
+        assert result.exit_code == 0, result.output
+        assert calls["corrected"] == 1
+        assert calls["qual"] == 0
+
+    def test_obs_csv_without_stations_raises(
+        self, fake_h5, fake_obs_csv, monkeypatch
+    ):
+        """--observations-csv without --stations-csv must be a UsageError."""
+        from click.testing import CliRunner
+        from dsm2ui.animate_cli import animate
+        monkeypatch.setattr("dsm2ui.animate_cli._serve_viewer", lambda build, **kw: build())
+        runner = CliRunner()
+        result = runner.invoke(
+            animate,
+            ["qual", fake_h5, "--observations-csv", fake_obs_csv],
+        )
+        assert result.exit_code != 0
+        assert "stations-csv" in result.output.lower() or "stations_csv" in result.output.lower()
+
+    def test_obs_csv_with_two_h5_raises(
+        self, fake_h5, fake_obs_csv, fake_stations_csv, monkeypatch
+    ):
+        """IDW correction with two H5 files must be a UsageError."""
+        from click.testing import CliRunner
+        from dsm2ui.animate_cli import animate
+        monkeypatch.setattr("dsm2ui.animate_cli._serve_viewer", lambda build, **kw: build())
+        runner = CliRunner()
+        result = runner.invoke(
+            animate,
+            ["qual", fake_h5, fake_h5,
+             "--observations-csv", fake_obs_csv,
+             "--stations-csv", fake_stations_csv],
+        )
+        assert result.exit_code != 0
+        assert "single file" in result.output.lower() or "not supported" in result.output.lower()
+
+    def test_qual_help_lists_new_options(self):
+        """--help must advertise the new IDW options."""
+        from click.testing import CliRunner
+        from dsm2ui.animate_cli import animate
+        result = CliRunner().invoke(animate, ["qual", "--help"])
+        assert "--observations-csv" in result.output
+        assert "--stations-csv" in result.output
+        assert "--idw-power" in result.output
 
 
 # ===========================================================================

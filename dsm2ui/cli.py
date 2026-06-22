@@ -402,6 +402,25 @@ def datastore_group():
     help="DSS file to write extracted time series to.",
 )
 @click.option(
+    "--csv",
+    "csvfile",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="CSV file to write extracted time series to (wide format: rows=timestamps, columns=stations).",
+)
+@click.option(
+    "--start",
+    type=str,
+    default=None,
+    help="Start date for extraction, ISO (2014-10-01) or DSM2 military (01OCT2014).",
+)
+@click.option(
+    "--end",
+    type=str,
+    default=None,
+    help="End date for extraction, ISO (2017-09-30) or DSM2 military (30SEP2017).",
+)
+@click.option(
     "--repo-level",
     type=click.Choice(["screened"], case_sensitive=False),
     default="screened",
@@ -418,25 +437,181 @@ def datastore_group():
     "--stations",
     type=click.Path(dir_okay=False),
     default=None,
-    help="Write a station CSV (station_id, lat, lon) to this file path.",
+    help=(
+        "Write a station CSV (dsm2_id, lat, lon, ...) to this path.  "
+        "When --csv is given and --stations is omitted a companion "
+        "{csv_stem}_stations.csv is written automatically."
+    ),
 )
-def datastore_extract(datastore_dir, dssfile, param, repo_level, unit_name, stations):
+@click.option(
+    "--clip",
+    "clip_polygon_file",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    default=None,
+    help=(
+        "Restrict extraction to stations whose location falls within this "
+        "polygon file (GeoJSON, shapefile, etc.).  Use "
+        "'dsm2ui datastore make-clip-polygon' to generate one from DSM2 "
+        "channel centrelines."
+    ),
+)
+@click.option(
+    "--merge",
+    "merge_existing",
+    is_flag=True,
+    default=False,
+    help=(
+        "Extend an existing --csv file rather than overwriting it.  "
+        "Only the time periods outside the existing file's date range are "
+        "extracted; existing data is preserved and the result is merged."
+    ),
+)
+def datastore_extract(datastore_dir, dssfile, csvfile, param, repo_level,
+                      unit_name, stations, start, end, clip_polygon_file,
+                      merge_existing):
     """Extract a parameter from a DMS Datastore.
 
-    At least one of --output or --stations must be provided.
+    At least one of --output or --csv must be provided.  A companion station
+    metadata CSV is written alongside --csv automatically (override with
+    --stations, or suppress by passing --stations "").
+
+    --csv writes a wide-format CSV with timestamps as rows and stations as
+    columns (station_id, or station_id@subloc when a sub-location is present).
+    Use --start / --end to restrict the time window; both ISO (2014-10-01) and
+    DSM2 military (01OCT2014) date formats are accepted.
+
+    Use --clip to restrict to stations inside a spatial polygon (e.g. a
+    buffered DSM2 channel network created with make-clip-polygon).
 
     Valid PARAM values: elev, predictions, flow, temp, do, ec, ssc, turbidity, ph, velocity, cla
     """
-    if not dssfile and not stations:
-        raise click.UsageError("Provide --output, --stations, or both.")
+    if not dssfile and not csvfile and not stations:
+        raise click.UsageError("Provide at least one of --output or --csv.")
     from dsm2ui import datastore2dss
+    from pydsm.analysis.dsm2study import parse_military_date
+    import pandas as pd
+
+    def _parse_date(s):
+        if s is None:
+            return None
+        try:
+            return parse_military_date(s)
+        except Exception:
+            return pd.Timestamp(s)
+
     if dssfile:
         datastore2dss.read_from_datastore_write_to_dss(
             datastore_dir, dssfile, param, repo_level, unit_name=unit_name
         )
+    if csvfile:
+        if merge_existing:
+            datastore2dss.extend_obs_csv(
+                csvfile, datastore_dir, param, repo_level,
+                start=_parse_date(start), end=_parse_date(end),
+                clip_polygon_file=clip_polygon_file,
+            )
+            click.echo(f"CSV extended: {csvfile}")
+        else:
+            datastore2dss.read_from_datastore_write_to_csv(
+                datastore_dir, csvfile, param, repo_level,
+                start=_parse_date(start), end=_parse_date(end),
+                clip_polygon_file=clip_polygon_file,
+            )
+            click.echo(f"CSV written to: {csvfile}")
+        # Auto-generate companion stations CSV unless the user explicitly set
+        # --stations (including to an empty string to suppress).
+        if stations is None:
+            import pathlib
+            p = pathlib.Path(csvfile)
+            stations = str(p.parent / (p.stem + "_stations" + p.suffix))
     if stations:
-        datastore2dss.write_station_lat_lng(datastore_dir, stations, param, repo_level)
+        datastore2dss.write_station_lat_lng(
+            datastore_dir, stations, param, repo_level,
+            clip_polygon_file=clip_polygon_file,
+        )
         click.echo(f"Station CSV written to: {stations}")
+
+
+@datastore_group.command(name="average-sublocs")
+@click.argument(
+    "input_csv",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+)
+@click.option(
+    "--output",
+    "output_csv",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help=(
+        "Output CSV path.  Defaults to {input_stem}_avg.csv in the same "
+        "directory as the input file."
+    ),
+)
+def datastore_average_sublocs(input_csv, output_csv):
+    """Collapse multi-sublocation stations into a single averaged column.
+
+    Reads a wide-format CSV produced by "dsm2ui datastore extract ... --csv"
+    and writes a new CSV where every station that appears with more than one
+    sub-location (e.g. ANH@upper and ANH@lower) is replaced by a single
+    column holding the row-wise mean.  Stations with only one sub-location
+    have the @subloc suffix stripped; stations without a sub-location are
+    unchanged.
+
+    NaN-safe: if one sensor is missing at a time step the other reading is
+    used as-is.  Only when all sensors for a station are NaN does the output
+    become NaN.
+
+    INPUT_CSV must be a wide-format CSV with a datetime index column.
+    """
+    from dsm2ui import datastore2dss
+    out = datastore2dss.average_sublocs_csv(input_csv, output_csv)
+    click.echo(f"Written to: {out}")
+
+
+@datastore_group.command(name="make-clip-polygon")
+@click.argument(
+    "output_file",
+    type=click.Path(dir_okay=False),
+)
+@click.option(
+    "--buffer",
+    "buffer_m",
+    type=float,
+    default=5000.0,
+    show_default=True,
+    help="Buffer distance in metres applied to the channel centrelines.",
+)
+@click.option(
+    "--channels",
+    "channels_file",
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    default=None,
+    help=(
+        "Channel centrelines GeoJSON file.  Defaults to the bundled "
+        "DSM2 8.2 centrelines (EPSG:26910)."
+    ),
+)
+def datastore_make_clip_polygon(output_file, buffer_m, channels_file):
+    """Create a buffered clip polygon from DSM2 channel centrelines.
+
+    The channel centrelines are buffered by BUFFER metres, dissolved into a
+    single polygon, and written to OUTPUT_FILE as GeoJSON (EPSG:4326).
+
+    The resulting file can be passed to 'dsm2ui datastore extract ... --clip'
+    to restrict station extraction to those within the Delta network.
+
+    Example — 5 km buffer (default):
+
+        dsm2ui datastore make-clip-polygon delta_clip.geojson
+
+    Example — 2 km buffer:
+
+        dsm2ui datastore make-clip-polygon delta_clip.geojson --buffer 2000
+    """
+    from dsm2ui import datastore2dss
+    datastore2dss.make_dsm2_clip_polygon(
+        output_file, buffer_m=buffer_m, channels_file=channels_file
+    )
 
 
 main.add_command(datastore_group)
