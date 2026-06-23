@@ -175,7 +175,7 @@ def tsplot(dflist, names, timewindow=None, zoom_inst_plot=False):
     if dflist[0] is not None:
         start_dt = dflist[0].index.min()
         end_dt = dflist[0].index.max()
-    if zoom_inst_plot and (timewindow is not None):
+    if timewindow is not None:
         try:
             tw = _normalize_timewindow(timewindow)
             parts = tw.split(":")
@@ -604,6 +604,7 @@ def build_calib_plot_template(
         flow_in_thousands=flow_in_thousands,
         manuscript_layout=manuscript_layout,
         units=units,
+        timewindow=timewindow,
         inst_plot_timewindow=inst_plot_timewindow,
         zoom_inst_plot=zoom_inst_plot,
         mask_data=mask_data,
@@ -615,6 +616,7 @@ def build_calib_plot_template(
         flow_in_thousands=flow_in_thousands,
         manuscript_layout=manuscript_layout,
         units=units,
+        timewindow=timewindow,
         time_window_exclusion_list=location.time_window_exclusion_list,
         invert_timewindow_exclusion=invert_timewindow_exclusion,
         threshold_value=location.threshold_value,
@@ -987,6 +989,7 @@ def build_inst_plot(
     flow_in_thousands=False,
     manuscript_layout=False,
     units=None,
+    timewindow=None,
     inst_plot_timewindow=None,
     zoom_inst_plot=False,
     mask_data=True,
@@ -1036,11 +1039,17 @@ def build_inst_plot(
         # tpd.to_csv('plot_df_files/'+location.name+'_'+y_axis_label+'_'+datatype+'.csv')
         i += 1
 
+    # Use inst_plot_timewindow for sub-range zoom when explicitly requested;
+    # otherwise enforce the main timewindow so x-axis is consistent across stations.
+    effective_timewindow = (
+        inst_plot_timewindow
+        if (zoom_inst_plot and inst_plot_timewindow is not None)
+        else timewindow
+    )
     tsp = tsplot(
         tsp_plot_data,
         [p.study.name for p in pp],
-        timewindow=inst_plot_timewindow,
-        zoom_inst_plot=zoom_inst_plot,
+        timewindow=effective_timewindow,
     ).opts(ylabel=y_axis_label, show_grid=True, gridstyle=gridstyle, shared_axes=False)
     tsp = tsp.opts(opts.Curve(color=hv.Cycle(cpalette)))
     return tsp
@@ -1053,6 +1062,7 @@ def build_godin_plot(
     flow_in_thousands=False,
     manuscript_layout=False,
     units=None,
+    timewindow=None,
     time_window_exclusion_list=None,
     invert_timewindow_exclusion=False,
     threshold_value=None,
@@ -1113,7 +1123,7 @@ def build_godin_plot(
         elif i == 1:
             datatype = "model"
         i += 1
-    gtsp = tsplot(gtsp_plot_data, [p.study.name for p in pp]).opts(
+    gtsp = tsplot(gtsp_plot_data, [p.study.name for p in pp], timewindow=timewindow).opts(
         ylabel=godin_y_axis_label, show_grid=True, gridstyle=gridstyle
     )
     gtsp = gtsp.opts(opts.Curve(color=hv.Cycle(cpalette)))
