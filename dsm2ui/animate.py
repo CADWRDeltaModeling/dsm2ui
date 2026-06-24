@@ -1207,15 +1207,46 @@ def load_dsm2_channel_gdf(
             f"Sample values: {gdf['geo_id'].head(5).tolist()}"
         ) from exc
 
-    # Ensure a valid CRS before any reprojection.  If the file has no CRS,
-    # issue a warning and assume EPSG:4326 only as a last resort (this is
-    # almost certainly wrong for shapefiles in a projected system, but lets
-    # the user get a partial result rather than a hard crash).
+    # Ensure a valid CRS before any reprojection.
+    # If the .prj sidecar is missing or unreadable (common on network shares
+    # with some GDAL/pyogrio versions), gdf.crs comes back as None.  Silently
+    # assuming EPSG:4326 is dangerous: projected coordinates (~640 000 m easting)
+    # are wildly out of WGS84 range, so any subsequent to_crs() call produces
+    # all-NaN geometry.  Detect this by checking the coordinate range and raise
+    # immediately with a clear message rather than letting the crash surface
+    # much later as a GEOSException or all-rows-dropped ValueError.
     if gdf.crs is None:
+        import shapely
+        all_coords = shapely.get_coordinates(gdf.geometry.values)
+        finite_coords = all_coords[np.isfinite(all_coords).all(axis=1)]
+        if finite_coords.size > 0:
+            max_abs_x = float(np.abs(finite_coords[:, 0]).max())
+            max_abs_y = float(np.abs(finite_coords[:, 1]).max())
+        else:
+            max_abs_x = max_abs_y = 0.0
+        if max_abs_x > 180.0 or max_abs_y > 90.0:
+            raise ValueError(
+                f"Shapefile/GeoJSON has no CRS and its coordinates look like a "
+                f"projected system (max |x|={max_abs_x:.0f}, max |y|={max_abs_y:.0f}), "
+                f"not WGS84 degrees.\n"
+                f"This usually means the .prj sidecar file could not be read "
+                f"(e.g. network-share permission / GDAL version difference).\n"
+                f"File: {shapefile}\n"
+                f"Fix options:\n"
+                f"  1. Copy the shapefile (all four files: .shp .shx .dbf .prj) "
+                f"to a local path and update --shapefile.\n"
+                f"  2. On a working machine, pre-convert to WGS84:\n"
+                f"       python -c \""
+                f"import geopandas as gpd; "
+                f"gpd.read_file(r'{shapefile}').to_crs('EPSG:4326')"
+                f".to_file('channels_wgs84.shp')\""
+            )
         log.warning(
-            "Shapefile/GeoJSON has no CRS; assuming EPSG:4326. "
-            "If the geometry looks wrong, set the CRS in your file or supply "
-            "a properly georeferenced shapefile with --shapefile."
+            "Shapefile/GeoJSON has no CRS; assuming EPSG:4326 "
+            "(coordinates look like degrees: max |x|=%.1f, max |y|=%.1f). "
+            "If the geometry looks wrong, supply a properly georeferenced "
+            "shapefile with --shapefile.",
+            max_abs_x, max_abs_y,
         )
         gdf = gdf.set_crs("EPSG:4326")
 
@@ -1245,12 +1276,18 @@ def load_dsm2_channel_gdf(
         if gdf.empty:
             raise ValueError(
                 f"All {n_dropped} row(s) in the shapefile/GeoJSON were dropped because "
-                "their geometry coordinates are non-finite (NaN / inf / zero).\n"
-                "This usually means the bundled channel centreline GeoJSON does not "
-                "match the DSM2 grid used by this HDF5 file (e.g. a planning study "
-                "uses a different grid from the historical base).\n"
-                "Fix: supply a shapefile that matches your grid with\n"
-                "  --shapefile path/to/channels.shp"
+                "their geometry coordinates are non-finite (NaN / inf) after reprojection "
+                "to EPSG:3857.\n"
+                "Most likely cause: the shapefile's .prj sidecar file could not be read "
+                "(network-share / GDAL version issue), so the input CRS was assumed to be "
+                "EPSG:4326 but the actual coordinates are in a projected system.\n"
+                f"File: {shapefile}\n"
+                "Fix options:\n"
+                "  1. Copy the shapefile (.shp .shx .dbf .prj) to a local path and "
+                "update --shapefile.\n"
+                "  2. Pre-convert to WGS84 on a working machine and use that file.\n"
+                "  3. Pass --simplify 0 to skip the reprojection step (the crash will "
+                "move to a later stage — see the GEOSException note in the docs)."
             )
         gdf["geometry"] = gdf.geometry.simplify(
             tolerance=simplify_tolerance, preserve_topology=True

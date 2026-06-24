@@ -277,6 +277,8 @@ def hydro_cmd(
         raise click.UsageError(
             "Provide at least one H5FILE argument, or use --config to load a YAML config."
         )
+    else:
+        pass  # no extra vars needed
 
     if len(h5files) > 2:
         raise click.UsageError("At most 2 H5FILE arguments are supported.")
@@ -458,6 +460,8 @@ def qual_cmd(
         raise click.UsageError(
             "Provide at least one H5FILE argument, or use --config to load a YAML config."
         )
+    else:
+        pass  # no extra vars needed
 
     if len(h5files) > 2:
         raise click.UsageError("At most 2 H5FILE arguments are supported.")
