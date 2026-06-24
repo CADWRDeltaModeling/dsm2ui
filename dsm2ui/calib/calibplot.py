@@ -1206,11 +1206,16 @@ def build_scatter_plots(
     if any_data_left:
         splot = None
         if splot_plot_data is not None and splot_plot_data[0] is not None:
+            all_scatter_vals = pd.concat(splot_plot_data).dropna()
+            scatter_max = float(all_scatter_vals.max().max()) if not all_scatter_vals.empty else 1.0
+            scatter_max = max(scatter_max, 0.0)
+            axis_range = (0, scatter_max * 1.05)
             splot = (
                 scatterplot(splot_plot_data, [p.study.name for p in pp])
                 .opts(opts.Scatter(color=shift_cycle(hv.Cycle(cpalette))))
                 .opts(ylabel="Model " + unit_string, legend_position="top_left")
                 .opts(show_grid=True, frame_height=250, frame_width=250, data_aspect=1)
+                .opts(xlim=axis_range, ylim=axis_range)
                 .opts(toolbar=toolbar_option)
             )
 
