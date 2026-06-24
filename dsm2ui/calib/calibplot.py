@@ -1206,8 +1206,10 @@ def build_scatter_plots(
     if any_data_left:
         splot = None
         if splot_plot_data is not None and splot_plot_data[0] is not None:
-            all_scatter_vals = pd.concat(splot_plot_data).dropna()
-            scatter_max = float(all_scatter_vals.max().max()) if not all_scatter_vals.empty else 1.0
+            scatter_max = max(
+                (float(df.max().max()) for df in splot_plot_data if df is not None and not df.empty),
+                default=1.0,
+            )
             scatter_max = max(scatter_max, 0.0)
             axis_range = (0, scatter_max * 1.05)
             splot = (
