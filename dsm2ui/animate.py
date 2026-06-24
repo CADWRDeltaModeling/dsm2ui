@@ -1593,7 +1593,7 @@ def _add_obs_station_overlay(
     # ------------------------------------------------------------------ #
     vmin = (mgr.vmin if mgr.vmin is not None else 0.0)
     vmax = (mgr.vmax if mgr.vmax is not None else 5000.0)
-    pal = _cmap_to_palette(getattr(mgr, "colormap", "rainbow"))
+    pal = _cmap_to_palette(getattr(mgr, "colormap", "turbo"))
     fill_cmap = _lc("value", pal, low=vmin, high=vmax, nan_color="grey")
 
     # ------------------------------------------------------------------ #
@@ -1744,7 +1744,7 @@ def animate_hydro(
         channel_id_column=channel_id_column,
     )
     mgr_kwargs.setdefault("title", f"DSM2 Hydro \u2014 {variable.title()}")
-    mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("colormap", "turbo")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
     mgr = GeoAnimatorManager(reader, gdf, geo_id_column="geo_id", **mgr_kwargs)
@@ -1931,7 +1931,7 @@ def animate_qual(
         channel_id_column=channel_id_column,
     )
     mgr_kwargs.setdefault("title", f"DSM2 QUAL/GTM \u2014 {constituent.upper()}")
-    mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("colormap", "turbo")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
     mgr = GeoAnimatorManager(
@@ -2061,7 +2061,7 @@ def animate_qual_corrected(
     mgr_kwargs.setdefault(
         "title", f"DSM2 QUAL/GTM \u2014 {constituent.upper()} (IDW corrected)"
     )
-    mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("colormap", "turbo")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
     mgr = GeoAnimatorManager(reader, gdf, geo_id_column="geo_id", **mgr_kwargs)
@@ -2247,7 +2247,7 @@ def animate_qual_corrected_multi(
     title_a = f"Model \u2014 {constituent.upper()}"
     title_b = f"Model + {_method} Correction \u2014 {constituent.upper()}"
 
-    mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("colormap", "turbo")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
 
@@ -2569,7 +2569,7 @@ def animate_hydro_multi(
     ta = title_a or _Path(h5file_a).stem
     tb = title_b or _Path(h5file_b).stem
 
-    mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("colormap", "turbo")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
     mgr = MultiGeoAnimatorManager(
@@ -2649,7 +2649,7 @@ def animate_qual_multi(
     ta = title_a or _Path(h5file_a).stem
     tb = title_b or _Path(h5file_b).stem
 
-    mgr_kwargs.setdefault("colormap", "rainbow")
+    mgr_kwargs.setdefault("colormap", "turbo")
     mgr_kwargs.setdefault("transform_options", _dsm2_transform_options())
     mgr_kwargs.setdefault("buffer_chunk_size", 200)
     mgr = MultiGeoAnimatorManager(

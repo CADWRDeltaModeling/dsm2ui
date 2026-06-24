@@ -99,7 +99,7 @@ _COMMON_OPTIONS = [
                  help="Colour-scale lower bound (default: data min)."),
     click.option("--vmax", default=None, type=float,
                  help="Colour-scale upper bound (default: data max)."),
-    click.option("--colormap", default="rainbow", show_default=True,
+    click.option("--colormap", default="turbo", show_default=True,
                  type=click.Choice(CURATED_COLORMAPS, case_sensitive=False),
                  help="Colormap name."),
     click.option("--title", default=None,
