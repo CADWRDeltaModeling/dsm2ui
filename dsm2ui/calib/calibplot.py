@@ -1260,7 +1260,7 @@ def build_scatter_plots(
 
 
 def create_hv_metrics_table(
-    study_list, metrics_list_dict, metrics_list, width=580, fontscale=8
+    study_list, metrics_list_dict, metrics_list, fontscale=8
 ):
     """
     Create a Holoviews table displaying calibration metrics.
@@ -1277,14 +1277,34 @@ def create_hv_metrics_table(
             )
             exit(0)
         if m != "Study":
-            # print('before error: m: '+ str(m))
-            # print('before error: metrics_list_dict[m]:'+str(metrics_list_dict[m]))
             metrics_list_list.append(metrics_list_dict[m])
     metrics_list_tuple = tuple(metrics_list_list)
     metrics_list = ["Study"] + metrics_list
 
+    # Per-column pixel widths: equation strings need more room than short numbers.
+    _EQUATION_COLS = {"Equation", "Mnly Equation"}
+    _EQUATION_WIDTH = 140
+    _STUDY_WIDTH = 90
+    _NUMERIC_WIDTH = 62
+
+    col_widths = {}
+    for col in metrics_list:
+        if col in _EQUATION_COLS:
+            col_widths[col] = _EQUATION_WIDTH
+        elif col == "Study":
+            col_widths[col] = _STUDY_WIDTH
+        else:
+            col_widths[col] = _NUMERIC_WIDTH
+
+    total_width = sum(col_widths.values())
+
+    def _set_col_widths(plot, element):
+        for col in plot.handles["table"].columns:
+            if col.title in col_widths:
+                col.width = col_widths[col.title]
+
     metrics_table = hv.Table(metrics_list_tuple, metrics_list).opts(
-        width=width, fontscale=fontscale
+        width=total_width, fontscale=fontscale, hooks=[_set_col_widths]
     )
     return metrics_table
 
