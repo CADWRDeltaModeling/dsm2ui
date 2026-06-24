@@ -172,6 +172,7 @@ def tsplot(dflist, names, timewindow=None, zoom_inst_plot=False):
     """
     start_dt = None
     end_dt = None
+    xlim = None
     if dflist[0] is not None:
         start_dt = dflist[0].index.min()
         end_dt = dflist[0].index.max()
@@ -181,6 +182,10 @@ def tsplot(dflist, names, timewindow=None, zoom_inst_plot=False):
             parts = tw.split(":")
             start_dt = parts[0]
             end_dt = parts[1]
+            # Explicit xlim forces Bokeh x-axis to the configured window even
+            # when the actual data only covers a sub-range (e.g. observed data
+            # for a station starts later than the configured timewindow start).
+            xlim = (pd.Timestamp(start_dt), pd.Timestamp(end_dt))
         except:
             errmsg = "error in calibplot.tsplot"
             logger.error(errmsg)
@@ -201,7 +206,10 @@ def tsplot(dflist, names, timewindow=None, zoom_inst_plot=False):
         for df, name in zip(dflist, names)
     ]
     plt = [(c.redim(**{c.vdims[0].name: c.label}) if c.name != "" else c) for c in plt]
-    return hv.Overlay(plt).opts(xlabel="Time")
+    overlay = hv.Overlay(plt).opts(xlabel="Time")
+    if xlim is not None:
+        overlay = overlay.opts(xlim=xlim)
+    return overlay
 
 
 def scatterplot(dflist, names, index_x=0):

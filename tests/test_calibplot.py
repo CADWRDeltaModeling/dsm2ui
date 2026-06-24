@@ -272,6 +272,55 @@ class TestTsplot:
         )
         assert isinstance(result, hv.Overlay)
 
+    def test_xlim_enforced_when_data_sparse_relative_to_timewindow(self):
+        """x-axis must be the configured timewindow, not the actual data range,
+        even when data only covers a sub-range of the timewindow.
+
+        Regression: Godin/instantaneous plot x-axis was varying per station
+        because hvplot auto-scales to the data extent. Explicit xlim fixes this.
+        """
+        # Data spans only 2014 – but timewindow is 2004-03-01 : 2015-09-30
+        df_sparse = _make_df(n=365, start="2014-01-01")
+        timewindow = "2004-03-01:2015-09-30"
+
+        overlay = tsplot([df_sparse], ["obs"], timewindow=timewindow)
+
+        fig = hv.render(overlay, backend="bokeh")
+        # HoloViews passes pd.Timestamp directly into Bokeh x_range bounds.
+        one_day = pd.Timedelta(days=1)
+        assert abs(fig.x_range.start - pd.Timestamp("2004-03-01")) <= one_day, (
+            f"x_range.start {fig.x_range.start} should be ~2004-03-01, "
+            f"but data only covers 2014 onwards"
+        )
+        assert abs(fig.x_range.end - pd.Timestamp("2015-09-30")) <= one_day, (
+            f"x_range.end {fig.x_range.end} should be ~2015-09-30"
+        )
+
+    def test_xlim_enforced_with_dsm2_format_sparse_data(self):
+        """Same regression check using the DSM2 military date format (DDMMMYYYY)
+        that is produced by timewindow_dict entries such as
+        ``old_qual_calibration: 01MAR2004 - 30SEP2015``."""
+        df_sparse = _make_df(n=365, start="2014-06-01")
+        timewindow = "01MAR2004 - 30SEP2015"  # DSM2 format from timewindow_dict
+
+        overlay = tsplot([df_sparse], ["obs"], timewindow=timewindow)
+
+        fig = hv.render(overlay, backend="bokeh")
+        one_day = pd.Timedelta(days=1)
+        assert abs(fig.x_range.start - pd.Timestamp("2004-03-01")) <= one_day, (
+            f"x_range.start {fig.x_range.start} should be ~2004-03-01 "
+            f"for DSM2-format timewindow"
+        )
+        assert abs(fig.x_range.end - pd.Timestamp("2015-09-30")) <= one_day, (
+            f"x_range.end {fig.x_range.end} should be ~2015-09-30"
+        )
+
+    def test_no_timewindow_uses_data_range(self):
+        """When no timewindow is given, x-axis defaults to data range (no xlim)."""
+        result = tsplot([self.df1], ["obs"])
+        # Should return without error; no xlim forced
+        assert isinstance(result, hv.Overlay)
+
 
 # ---------------------------------------------------------------------------
 # scatterplot
