@@ -239,9 +239,19 @@ def animate():
               type=click.Path(exists=True, dir_okay=False),
               help="Load all settings from a YAML config file saved by the UI. "
                    "H5FILES and other options are not required when --config is used.")
+@click.option("--flow-config", "flow_config_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="YAML file defining flow arrows and junction bars to overlay. "
+                   "See FlowLayerSpec.from_yaml() for the schema.  "
+                   "The flow layer reads flow from the first H5FILE and mirrors "
+                   "the active transform.")
+@click.option("--nodes-file", "flow_nodes_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Override bundled nodes GeoJSON/shapefile for flow bars.")
 @_add_common_options
 def hydro_cmd(
     h5files, variable, location, show_diff, transform, config_file,
+    flow_config_file, flow_nodes_file,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
@@ -283,6 +293,13 @@ def hydro_cmd(
     if len(h5files) > 2:
         raise click.UsageError("At most 2 H5FILE arguments are supported.")
     multi = len(h5files) == 2
+
+    # Validate flow overlay options (single-file only)
+    if flow_config_file and multi:
+        raise click.UsageError(
+            "Flow overlay (--flow-config) is only supported with a single HYDRO file."
+        )
+
     effective_title = title or (
         f"DSM2 Hydro {variable.title()} (\u0394)" if (multi and show_diff)
         else f"DSM2 Hydro {variable.title()}"
@@ -309,12 +326,18 @@ def hydro_cmd(
             )
         else:
             from dsm2ui.animate import animate_hydro
+            _flow_spec = None
+            if flow_config_file:
+                from dsm2ui.flow_layer import FlowLayerSpec
+                _flow_spec = FlowLayerSpec.from_yaml(flow_config_file)
             mgr = animate_hydro(
                 h5files[0],
                 variable=variable, location=location,
                 shapefile=shapefile,
                 simplify_tolerance=simplify,
                 channel_id_column=channel_id_column,
+                flow_spec=_flow_spec,
+                nodes_file=flow_nodes_file,
                 vmin=vmin, vmax=vmax, colormap=colormap,
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
@@ -393,6 +416,18 @@ def hydro_cmd(
 @click.option("--config", "config_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
               help="Load all settings from a YAML config file saved by the UI.")
+@click.option("--flow-config", "flow_config_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="YAML file defining flow arrows and junction bars to overlay. "
+                   "See FlowLayerSpec.from_yaml() for the schema.  "
+                   "Requires --hydro-h5.")
+@click.option("--hydro-h5", "flow_hydro_h5", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="HYDRO HDF5 tidefile for the flow overlay layer. "
+                   "Required when --flow-config is given.")
+@click.option("--nodes-file", "flow_nodes_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Override bundled nodes GeoJSON/shapefile for flow bars.")
 @_add_common_options
 def qual_cmd(
     h5files, constituent, x2_threshold, show_diff, transform,
@@ -402,6 +437,7 @@ def qual_cmd(
     compare_correction,
     resample_freq, resample_agg,
     config_file,
+    flow_config_file, flow_hydro_h5, flow_nodes_file,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
@@ -466,6 +502,20 @@ def qual_cmd(
     if len(h5files) > 2:
         raise click.UsageError("At most 2 H5FILE arguments are supported.")
     multi = len(h5files) == 2
+
+    # Validate flow overlay options
+    if flow_config_file and not flow_hydro_h5:
+        raise click.UsageError(
+            "--hydro-h5 is required when --flow-config is given."
+        )
+    if flow_hydro_h5 and not flow_config_file:
+        raise click.UsageError(
+            "--flow-config is required when --hydro-h5 is given."
+        )
+    if flow_config_file and multi:
+        raise click.UsageError(
+            "Flow overlay (--flow-config) is only supported with a single QUAL file."
+        )
 
     # ------------------------------------------------------------------
     # IDW correction validation (eager, before building the reader)
@@ -589,6 +639,10 @@ def qual_cmd(
             )
         else:
             from dsm2ui.animate import animate_qual
+            _flow_spec = None
+            if flow_config_file:
+                from dsm2ui.flow_layer import FlowLayerSpec
+                _flow_spec = FlowLayerSpec.from_yaml(flow_config_file)
             mgr = animate_qual(
                 h5files[0],
                 constituent=constituent,
@@ -596,6 +650,9 @@ def qual_cmd(
                 simplify_tolerance=simplify,
                 channel_id_column=channel_id_column,
                 x2_threshold=x2_threshold,
+                flow_spec=_flow_spec,
+                hydro_h5_path=flow_hydro_h5,
+                nodes_file=flow_nodes_file,
                 vmin=vmin, vmax=vmax, colormap=colormap,
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
@@ -630,6 +687,86 @@ def qual_cmd(
         return mgr
 
     _serve_viewer(build, slug=slug, title=effective_title, port=port, desktop=desktop)
+
+
+@animate.command(name="flow", context_settings=CONTEXT_SETTINGS)
+@click.argument("hydro_h5", type=click.Path(exists=True, dir_okay=False, readable=True))
+@click.option("--flow-config", "flow_config_file", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="YAML file defining flow arrows and junction bars.  "
+                   "See FlowLayerSpec.from_yaml() for the schema.")
+@click.option("--nodes-file", "nodes_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Override bundled nodes GeoJSON/shapefile for junction bars.")
+@click.option("--shapefile", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Override bundled channel centreline GeoJSON/shapefile "
+                   "(used for bounding box and tangent computation).")
+@click.option("--title", default="DSM2 Flow",
+              help="Map title.")
+@click.option("--port", default=0, show_default=True, type=int,
+              help="Web server port (0 = random).")
+@click.option("--desktop", is_flag=True, default=False,
+              help="Open in a native desktop window (requires pywebview).")
+@click.option("--map-height", default=500, show_default=True, type=int,
+              help="Minimum map height in pixels.")
+@click.option("--log-level", default="warning", show_default=True,
+              type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
+              help="Logging verbosity.")
+def flow_cmd(
+    hydro_h5, flow_config_file, nodes_file, shapefile,
+    title, port, desktop, map_height, log_level,
+):
+    """Animate DSM2 flow arrows and junction bars on a map tile background.
+
+    Displays user-specified flow arrows and two-sided junction flow-split bars
+    animated from a HYDRO HDF5 tidefile.  The YAML config specifies which
+    channels and nodes to visualise.
+
+    \b
+    Example YAML (flow_config.yaml):
+        scale_mode: linear
+        reference_flow: 10000
+        reference_arrow_length_m: 500
+        arrow_width_m: 150
+        bar_width_m: 200
+        bar_max_height_m: 600
+        arrows:
+          - channel: 10
+            position: 0.5
+            label: "Sacramento R"
+        bars:
+          - node: 329
+            label: "Confluence"
+            channels: [10, 11, 12]
+
+    \b
+    Usage:
+        dsm2ui animate flow hydro.h5 --flow-config flow.yaml
+        dsm2ui animate flow hydro.h5 --flow-config flow.yaml --port 5008
+    """
+    import logging
+    logging.basicConfig(level=getattr(logging, log_level.upper()),
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    slug = _title_to_slug(title)
+
+    def build():
+        import panel as pn
+        pn.extension(throttled=True)
+        from dsm2ui.flow_layer import FlowLayerSpec
+        from dsm2ui.animate import animate_flow
+        flow_spec = FlowLayerSpec.from_yaml(flow_config_file)
+        return animate_flow(
+            hydro_h5,
+            flow_spec,
+            channel_shapefile=shapefile,
+            nodes_file=nodes_file,
+            title=title,
+            map_height=map_height,
+        )
+
+    _serve_viewer(build, slug=slug, title=title, port=port, desktop=desktop)
 
 
 # ---------------------------------------------------------------------------

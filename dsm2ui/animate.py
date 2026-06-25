@@ -1311,6 +1311,52 @@ def load_dsm2_channel_gdf(
     return gdf
 
 
+def load_dsm2_nodes_gdf(
+    nodes_file: "str | Path | None" = None,
+) -> "geopandas.GeoDataFrame":
+    """Load DSM2 node (junction) point geometry.
+
+    Parameters
+    ----------
+    nodes_file : str or Path, optional
+        Path to an alternative GeoJSON or shapefile.  When ``None`` (default)
+        the bundled ``dsm2_nodes_8_2.geojson`` is used.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        Has column ``"id"`` (int) matching DSM2 node numbers, plus
+        ``"geometry"`` (Point).  CRS is preserved from the file; the bundled
+        GeoJSON uses EPSG:26910 (UTM Zone 10 N, California).
+    """
+    import geopandas as gpd
+
+    if nodes_file is not None:
+        gdf = gpd.read_file(nodes_file)
+    else:
+        pkg_path = Path(__file__).parent / "dsm2gis" / "dsm2_nodes_8_2.geojson"
+        gdf = gpd.read_file(str(pkg_path))
+
+    # Resolve the node-number column
+    _AUTO_NAMES = ["id", "node_no", "NODE_NO", "node"]
+    resolved_col = None
+    for nm in _AUTO_NAMES:
+        if nm in gdf.columns:
+            resolved_col = nm
+            break
+    if resolved_col is None:
+        non_geom = [c for c in gdf.columns if c != "geometry"]
+        raise ValueError(
+            f"Cannot identify node-number column in nodes file.\n"
+            f"Tried: {_AUTO_NAMES!r}\n"
+            f"Available: {non_geom}\nFile: {nodes_file}"
+        )
+    if resolved_col != "id":
+        gdf = gdf.rename(columns={resolved_col: "id"})
+    gdf["id"] = gdf["id"].astype(int)
+    return gdf
+
+
 # ---------------------------------------------------------------------------
 # Convenience factories
 # ---------------------------------------------------------------------------
@@ -1716,6 +1762,8 @@ def animate_hydro(
     shapefile: "str | Path | None" = None,
     simplify_tolerance: float = 50.0,
     channel_id_column: "str | None" = None,
+    flow_spec: "Optional[dsm2ui.flow_layer.FlowLayerSpec]" = None,
+    nodes_file: "str | Path | None" = None,
     **mgr_kwargs,
 ) -> "dvue.animator.GeoAnimatorManager":
     """Create a :class:`~dvue.animator.GeoAnimatorManager` for HYDRO channel data.
@@ -1730,6 +1778,13 @@ def animate_hydro(
     channel_id_column : str or None, optional
         Column in *shapefile* holding integer channel IDs.  Auto-detected when
         ``None`` (tries ``'id'``, ``'channel_nu'``, ``'CHAN_NO'``).
+    flow_spec : FlowLayerSpec or None, optional
+        When provided, a :class:`~dsm2ui.flow_layer.FlowLayer` is overlaid on
+        the hydro animation.  The flow layer always reads *flow* from the same
+        *h5file* (regardless of *variable*) and mirrors the active transform.
+    nodes_file : str or Path or None, optional
+        Alternative nodes GeoJSON/shapefile for the flow overlay.  Defaults to
+        the bundled DSM2 8.2 nodes GeoJSON.
     **mgr_kwargs
         Forwarded to :class:`~dvue.animator.GeoAnimatorManager`.
     """
@@ -1771,6 +1826,18 @@ def animate_hydro(
         Path(h5abs).with_name(Path(h5abs).stem + "_animate.yml")
     )
     _add_resample_card_to_manager(mgr)
+
+    # ---- Optional flow overlay ----
+    if flow_spec is not None:
+        from dsm2ui.flow_layer import FlowLayer
+        nodes_gdf = load_dsm2_nodes_gdf(nodes_file)
+        # Reuse the channel GDF that was already loaded for the background.
+        flow_layer = FlowLayer(h5file, flow_spec, gdf, nodes_gdf)
+        flow_layer.setup_on_figure(mgr._bk_figure)
+        mgr.add_frame_callback(flow_layer.update_frame)
+        mgr.add_transform_callback(flow_layer.set_transform)
+        flow_layer.update_frame(mgr._reader.time_index[0])
+
     return mgr
 
 
@@ -1893,6 +1960,9 @@ def animate_qual(
     simplify_tolerance: float = 50.0,
     x2_threshold: "float | None" = None,
     channel_id_column: "str | None" = None,
+    flow_spec: "Optional[dsm2ui.flow_layer.FlowLayerSpec]" = None,
+    hydro_h5_path: "str | Path | None" = None,
+    nodes_file: "str | Path | None" = None,
     **mgr_kwargs,
 ) -> "dvue.animator.GeoAnimatorManager":
     """Create a :class:`~dvue.animator.GeoAnimatorManager` for QUAL/GTM concentrations.
@@ -1912,10 +1982,24 @@ def animate_qual(
     channel_id_column : str or None, optional
         Column in *shapefile* holding integer channel IDs.  Auto-detected when
         ``None`` (tries ``'id'``, ``'channel_nu'``, ``'CHAN_NO'``).
+    flow_spec : FlowLayerSpec or None, optional
+        When provided, a :class:`~dsm2ui.flow_layer.FlowLayer` is overlaid on
+        the qual animation.  Requires *hydro_h5_path*.
+    hydro_h5_path : str or Path or None, optional
+        HYDRO HDF5 tidefile used for the flow overlay.  Required when
+        *flow_spec* is given.
+    nodes_file : str or Path or None, optional
+        Alternative nodes GeoJSON/shapefile for the flow overlay.  Defaults to
+        the bundled DSM2 8.2 nodes GeoJSON.
     **mgr_kwargs
         Forwarded to :class:`~dvue.animator.GeoAnimatorManager`.
     """
     from dvue.animator import GeoAnimatorManager
+
+    if flow_spec is not None and hydro_h5_path is None:
+        raise ValueError(
+            "hydro_h5_path is required when flow_spec is provided."
+        )
 
     reader = QualH5ConcentrationReader(h5file, constituent=constituent)
 
@@ -1947,6 +2031,19 @@ def animate_qual(
     )
     if x2_threshold is not None:
         mgr._x2_threshold_input.value = float(x2_threshold)
+
+    # ---- Optional flow overlay ----
+    if flow_spec is not None:
+        from dsm2ui.flow_layer import FlowLayer
+        nodes_gdf = load_dsm2_nodes_gdf(nodes_file)
+        # Reuse the (simplified) channel GDF that was already loaded
+        flow_layer = FlowLayer(hydro_h5_path, flow_spec, gdf, nodes_gdf)
+        flow_layer.setup_on_figure(mgr._bk_figure)
+        mgr.add_frame_callback(flow_layer.update_frame)
+        mgr.add_transform_callback(flow_layer.set_transform)
+        # Trigger the first frame so arrows/bars appear immediately
+        flow_layer.update_frame(mgr._reader.time_index[0])
+
     # Attach metadata so the Save config card can write a complete YAML.
     h5abs = str(Path(h5file).absolute())
     mgr._animate_meta = {
@@ -1964,6 +2061,56 @@ def animate_qual(
     )
     _add_resample_card_to_manager(mgr)
     return mgr
+
+
+def animate_flow(
+    hydro_h5_path: "str | Path",
+    flow_spec: "dsm2ui.flow_layer.FlowLayerSpec",
+    channel_shapefile: "str | Path | None" = None,
+    nodes_file: "str | Path | None" = None,
+    title: str = "DSM2 Flow",
+    map_height: int = 500,
+) -> "dsm2ui.flow_layer.FlowAnimatorManager":
+    """Create a standalone :class:`~dsm2ui.flow_layer.FlowAnimatorManager`.
+
+    Displays flow arrows and junction flow-split bars on a map tile background
+    with no channel colourmap.  The viewer has the same player/DatetimePicker
+    interface as :class:`~dvue.animator.GeoAnimatorManager`.
+
+    Parameters
+    ----------
+    hydro_h5_path : str or Path
+        HYDRO HDF5 tidefile.
+    flow_spec : FlowLayerSpec
+        Arrow and bar configuration.  Load from YAML with
+        ``FlowLayerSpec.from_yaml("flow.yaml")``.
+    channel_shapefile : str or Path or None, optional
+        Custom channel centreline GeoJSON/shapefile.  Defaults to the bundled
+        DSM2 8.2 GeoJSON (used for bounding box and tangent computation).
+    nodes_file : str or Path or None, optional
+        Custom nodes GeoJSON/shapefile.  Defaults to the bundled DSM2 8.2
+        nodes GeoJSON.
+    title : str, optional
+        Figure title.  Default ``"DSM2 Flow"``.
+    map_height : int, optional
+        Minimum map height in pixels.  Default 500.
+
+    Returns
+    -------
+    FlowAnimatorManager
+    """
+    from dsm2ui.flow_layer import FlowAnimatorManager
+
+    channel_gdf = load_dsm2_channel_gdf(channel_shapefile)
+    nodes_gdf = load_dsm2_nodes_gdf(nodes_file)
+    return FlowAnimatorManager(
+        hydro_h5_path,
+        flow_spec,
+        channel_gdf=channel_gdf,
+        nodes_gdf=nodes_gdf,
+        title=title,
+        map_height=map_height,
+    )
 
 
 def animate_qual_corrected(

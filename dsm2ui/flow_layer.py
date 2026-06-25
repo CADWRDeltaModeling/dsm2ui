@@ -1,0 +1,1148 @@
+"""DSM2 flow visualization layer — arrows and junction bars.
+
+:class:`FlowLayerSpec` describes which channels to show as flow arrows and
+which nodes to show as two-sided flow-split bars.  :class:`FlowLayer` renders
+these elements as Bokeh Patch glyphs on an existing Bokeh figure and updates
+them every animation frame.  :class:`FlowAnimatorManager` is a standalone
+Panel Viewer that wraps :class:`FlowLayer` with a CARTO Light tile background
+and player controls.
+
+Geometry is computed in EPSG:3857 (metres) so arrow lengths and bar heights
+are physically meaningful.
+
+Typical usage — combined with qual animation::
+
+    from dsm2ui.animate import animate_qual, load_dsm2_nodes_gdf
+    from dsm2ui.flow_layer import FlowLayerSpec, FlowLayer
+
+    spec = FlowLayerSpec.from_yaml("flow_config.yaml")
+    mgr  = animate_qual("ec.h5", constituent="ec")
+    nodes_gdf = load_dsm2_nodes_gdf()
+
+    from dsm2ui.animate import load_dsm2_channel_gdf
+    ch_gdf = load_dsm2_channel_gdf()
+    flow   = FlowLayer("hydro.h5", spec, ch_gdf, nodes_gdf)
+    flow.setup_on_figure(mgr._bk_figure)
+    mgr.add_frame_callback(flow.update_frame)
+
+Standalone flow-only animation::
+
+    from dsm2ui.animate import animate_flow
+    mgr = animate_flow("hydro.h5", spec)
+    mgr.servable()
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import logging
+from pathlib import Path
+from typing import List, Optional
+
+import numpy as np
+import pandas as pd
+import panel as pn
+from bokeh.models import (
+    ColumnDataSource,
+    Div,
+    HoverTool,
+    Range1d,
+    WMTSTileSource,
+)
+from bokeh.plotting import figure as bk_figure
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+#: Bokeh Category20 colour palette used for junction bar segments.
+_CATEGORY20: List[str] = [
+    "#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78",
+    "#2ca02c", "#98df8a", "#d62728", "#ff9896",
+    "#9467bd", "#c5b0d5", "#8c564b", "#c49c94",
+    "#e377c2", "#f7b6d2", "#7f7f7f", "#c7c7c7",
+    "#bcbd22", "#dbdb8d", "#17becf", "#9edae5",
+]
+
+_CARTO_LIGHT_URL = "https://basemaps.cartocdn.com/light_all/{Z}/{X}/{Y}.png"
+_CARTO_LIGHT_ATTR = "© CARTO / © OpenStreetMap contributors"
+
+
+# ===========================================================================
+# Configuration dataclasses
+# ===========================================================================
+
+@dataclasses.dataclass
+class ChannelArrowSpec:
+    """Configuration for one flow arrow on a DSM2 channel.
+
+    Parameters
+    ----------
+    channel : int
+        DSM2 channel number (CHAN_NO).
+    position : float, optional
+        Fractional position along the channel centreline where the arrow is
+        centred.  ``0.0`` = upstream end, ``1.0`` = downstream end,
+        ``0.5`` (default) = midpoint.
+    label : str, optional
+        Optional label shown in hover tooltip.
+    """
+
+    channel: int
+    position: float = 0.5
+    label: str = ""
+
+
+@dataclasses.dataclass
+class NodeBarSpec:
+    """Configuration for a two-sided flow-split bar at a DSM2 node.
+
+    Parameters
+    ----------
+    node : int
+        DSM2 node number.
+    channels : list of int or None, optional
+        Channel numbers to include in the split display.  When ``None``
+        (default) all channels connected to the node are used.
+    label : str, optional
+        Optional label shown in hover tooltip.
+    """
+
+    node: int
+    channels: Optional[List[int]] = None
+    label: str = ""
+
+
+@dataclasses.dataclass
+class FlowLayerSpec:
+    """Complete specification for the flow visualization layer.
+
+    Parameters
+    ----------
+    arrows : list of ChannelArrowSpec
+        Flow arrows to display.
+    bars : list of NodeBarSpec
+        Junction flow-split bars to display.
+    scale_mode : {"linear", "log"}, optional
+        Arrow length scaling mode.  ``"linear"`` (default) scales length
+        linearly with ``|flow| / reference_flow``; ``"log"`` uses
+        log10(1 + |flow| / reference_flow).
+    reference_flow : float, optional
+        Flow value in cfs that maps to *reference_arrow_length_m* (and
+        *bar_max_height_m*).  Default 10 000 cfs.
+    reference_arrow_length_m : float, optional
+        Arrow length in EPSG:3857 metres for *reference_flow*.  Default 500 m.
+    arrow_width_m : float, optional
+        Arrow body half-width in metres.  Default 150 m.
+    bar_width_m : float, optional
+        Width of each bar side (inflow and outflow are separate sides) in
+        metres.  Default 200 m.
+    bar_max_height_m : float, optional
+        Bar height in metres for *reference_flow*.  Default 600 m.
+    min_flow_cfs : float, optional
+        Flow magnitude (cfs) below which a stub symbol is rendered instead
+        of a full arrow.  Default 10 cfs.
+    """
+
+    arrows: List[ChannelArrowSpec] = dataclasses.field(default_factory=list)
+    bars: List[NodeBarSpec] = dataclasses.field(default_factory=list)
+    scale_mode: str = "linear"
+    reference_flow: float = 10_000.0
+    reference_arrow_length_m: float = 500.0
+    arrow_width_m: float = 150.0
+    bar_width_m: float = 200.0
+    bar_max_height_m: float = 600.0
+    min_flow_cfs: float = 10.0
+
+    @classmethod
+    def from_yaml(cls, path: "str | Path") -> "FlowLayerSpec":
+        """Load a :class:`FlowLayerSpec` from a YAML file.
+
+        YAML schema::
+
+            scale_mode: linear          # "linear" or "log"
+            reference_flow: 10000       # cfs
+            reference_arrow_length_m: 500
+            arrow_width_m: 150
+            bar_width_m: 200
+            bar_max_height_m: 600
+            min_flow_cfs: 10
+            arrows:
+              - channel: 10
+                position: 0.5
+                label: "Sacramento R"
+              - channel: 35
+                position: 0.75
+            bars:
+              - node: 329
+                label: "Confluence"
+                channels: [10, 11, 12]
+
+        Parameters
+        ----------
+        path : str or Path
+            YAML file path.
+        """
+        import yaml
+
+        with open(path) as fh:
+            d = yaml.safe_load(fh) or {}
+
+        arrows = [ChannelArrowSpec(**a) for a in d.pop("arrows", [])]
+        bars = [NodeBarSpec(**b) for b in d.pop("bars", [])]
+        valid_keys = {f.name for f in dataclasses.fields(cls)} - {"arrows", "bars"}
+        return cls(
+            arrows=arrows,
+            bars=bars,
+            **{k: v for k, v in d.items() if k in valid_keys},
+        )
+
+
+# ===========================================================================
+# Internal geometry dataclasses (all coordinates in EPSG:3857, metres)
+# ===========================================================================
+
+@dataclasses.dataclass
+class _ArrowGeom:
+    """Pre-computed geometry for one channel arrow."""
+
+    channel: int
+    label: str
+    cx: float   # centroid x (m, EPSG:3857)
+    cy: float   # centroid y (m, EPSG:3857)
+    tx: float   # unit tangent x (upstream→downstream)
+    ty: float   # unit tangent y
+    # Note: normal = (-ty, tx) — 90° CCW from tangent, computed on demand
+
+
+@dataclasses.dataclass
+class _ChannelNodeConn:
+    """One channel connected to a junction bar node."""
+
+    channel: int
+    is_upnode: bool  # True if the bar-node is the UPNODE of this channel
+    color: str       # hex colour from _CATEGORY20
+
+
+@dataclasses.dataclass
+class _BarGeom:
+    """Pre-computed geometry for one junction bar."""
+
+    node: int
+    label: str
+    bx: float               # node x (m, EPSG:3857) — centre of the bar pair
+    by: float               # node y (m, EPSG:3857) — bottom of the bar columns
+    connections: List[_ChannelNodeConn]
+
+
+# ===========================================================================
+# Geometry computation helpers
+# ===========================================================================
+
+def _compute_arrow_geom(
+    spec: ChannelArrowSpec,
+    channel_gdf_3857: "geopandas.GeoDataFrame",
+) -> Optional[_ArrowGeom]:
+    """Compute centroid and tangent direction for a channel arrow.
+
+    Parameters
+    ----------
+    spec : ChannelArrowSpec
+    channel_gdf_3857 : GeoDataFrame
+        Channel centreline geometry reproduced in EPSG:3857.
+        Must have a ``geo_id`` column (int channel number).
+
+    Returns
+    -------
+    _ArrowGeom or None
+        ``None`` when the channel is not found in *channel_gdf_3857*.
+    """
+    mask = channel_gdf_3857["geo_id"] == spec.channel
+    if not mask.any():
+        log.warning("Channel %d not found in channel GDF — arrow skipped.", spec.channel)
+        return None
+
+    geom = channel_gdf_3857.loc[mask, "geometry"].iloc[0]
+
+    # Flatten MultiLineString → single LineString (longest component wins)
+    if geom.geom_type == "MultiLineString":
+        try:
+            import shapely.ops
+
+            merged = shapely.ops.linemerge(geom)
+            geom = merged if merged.geom_type == "LineString" else max(
+                merged.geoms if merged.geom_type == "MultiLineString" else [merged],
+                key=lambda g: g.length,
+            )
+        except Exception:
+            geom = max(geom.geoms, key=lambda g: g.length)
+
+    pos = max(0.0, min(1.0, spec.position))
+    point = geom.interpolate(pos, normalized=True)
+    cx, cy = float(point.x), float(point.y)
+
+    # Tangent via finite difference (avoid the exact endpoints)
+    delta = 0.02
+    p0 = geom.interpolate(max(0.0, pos - delta), normalized=True)
+    p1 = geom.interpolate(min(1.0, pos + delta), normalized=True)
+    dx, dy = p1.x - p0.x, p1.y - p0.y
+    length = float(np.hypot(dx, dy))
+    if length < 1.0:
+        log.debug("Degenerate tangent for channel %d — defaulting East.", spec.channel)
+        tx, ty = 1.0, 0.0
+    else:
+        tx, ty = dx / length, dy / length
+
+    return _ArrowGeom(
+        channel=spec.channel, label=spec.label,
+        cx=cx, cy=cy, tx=tx, ty=ty,
+    )
+
+
+def _compute_bar_geom(
+    spec: NodeBarSpec,
+    nodes_gdf_3857: "geopandas.GeoDataFrame",
+    chan_no_arr: np.ndarray,
+    upnode_arr: np.ndarray,
+    downnode_arr: np.ndarray,
+) -> Optional[_BarGeom]:
+    """Compute node position and connected channel topology for a bar.
+
+    Parameters
+    ----------
+    spec : NodeBarSpec
+    nodes_gdf_3857 : GeoDataFrame
+        Node point geometry in EPSG:3857.  Must have an ``id`` column.
+    chan_no_arr : ndarray of int
+        Channel numbers array (length = n_channels).
+    upnode_arr : ndarray of int
+        Upstream-node numbers per channel.
+    downnode_arr : ndarray of int
+        Downstream-node numbers per channel.
+
+    Returns
+    -------
+    _BarGeom or None
+        ``None`` when the node is not found or no channels are connected.
+    """
+    mask = nodes_gdf_3857["id"] == spec.node
+    if not mask.any():
+        log.warning("Node %d not found in nodes GDF — bar skipped.", spec.node)
+        return None
+
+    point = nodes_gdf_3857.loc[mask, "geometry"].iloc[0]
+    bx, by = float(point.x), float(point.y)
+
+    connections: List[_ChannelNodeConn] = []
+    color_idx = 0
+    for ch_no, upn, downn in zip(chan_no_arr, upnode_arr, downnode_arr):
+        ch_int = int(ch_no)
+        if spec.channels is not None and ch_int not in spec.channels:
+            continue
+        if int(upn) == spec.node:
+            is_upnode = True
+        elif int(downn) == spec.node:
+            is_upnode = False
+        else:
+            continue
+        connections.append(_ChannelNodeConn(
+            channel=ch_int,
+            is_upnode=is_upnode,
+            color=_CATEGORY20[color_idx % len(_CATEGORY20)],
+        ))
+        color_idx += 1
+
+    if not connections:
+        log.warning(
+            "Node %d: no channels found in connection (spec.channels=%s) — bar skipped.",
+            spec.node, spec.channels,
+        )
+        return None
+
+    return _BarGeom(
+        node=spec.node, label=spec.label,
+        bx=bx, by=by,
+        connections=connections,
+    )
+
+
+# ===========================================================================
+# Per-frame polygon construction
+# ===========================================================================
+
+def _arrow_polygon(
+    cx: float, cy: float,
+    tx: float, ty: float,
+    flow: float,
+    reference_flow: float,
+    reference_length_m: float,
+    arrow_width_m: float,
+    scale_mode: str,
+    min_flow_cfs: float,
+) -> tuple:
+    """Build the arrow polygon for one channel at the current flow value.
+
+    The arrow is a 7-point polygon: rectangular body + triangular head.
+    The arrow direction reflects the instantaneous tidal sign of *flow*
+    (positive = upstream→downstream in DSM2 convention, arrow points in
+    the downstream direction of the centreline; negative = reversed).
+
+    For ``|flow| < min_flow_cfs`` a small diamond stub is returned to keep
+    the arrow location visible.
+
+    Parameters
+    ----------
+    cx, cy : float
+        Arrow centroid in EPSG:3857 metres.
+    tx, ty : float
+        Unit tangent vector of the channel (upstream→downstream).
+    flow : float
+        Signed flow value in cfs.
+    reference_flow, reference_length_m : float
+        Scaling: *reference_flow* cfs maps to *reference_length_m* metres.
+    arrow_width_m : float
+        Arrow body half-width in metres.
+    scale_mode : str
+        ``"linear"``, ``"log"``, ``"sqrt"``, or ``"cbrt"``.
+    min_flow_cfs : float
+        Threshold below which a stub is shown.
+
+    Returns
+    -------
+    (xs, ys, display_value) : (list[float], list[float], float)
+    """
+    abs_flow = abs(flow)
+    sign_d = 1.0 if flow >= 0.0 else -1.0
+
+    if abs_flow < min_flow_cfs:
+        # Tiny diamond stub so the location stays visible
+        r = arrow_width_m * 0.35
+        xs = [cx + r, cx, cx - r, cx, cx + r]
+        ys = [cy, cy + r, cy, cy - r, cy]
+        return xs, ys, flow
+
+    ratio = abs_flow / reference_flow
+    if scale_mode == "log":
+        # log2(1 + ratio): equals 1 at ratio=1, compresses large values
+        L = np.log10(1.0 + ratio) / np.log10(2.0) * reference_length_m
+    elif scale_mode == "sqrt":
+        # Square root: more visible for small flows than log
+        L = np.sqrt(ratio) * reference_length_m
+    elif scale_mode == "cbrt":
+        # Cube root: most aggressive compression — smallest flows most visible
+        L = np.cbrt(ratio) * reference_length_m
+    else:  # "linear"
+        L = ratio * reference_length_m
+
+    # Clamp to 3× reference length to avoid runaway polygons on extreme flows
+    L = min(float(L), 3.0 * reference_length_m)
+
+    W = float(arrow_width_m)           # body half-width
+    HW = W * 1.25                      # arrowhead half-width (flare)
+    BF = 0.65                          # fraction of L that is the body
+
+    body_L = L * BF
+
+    # Direction vector aligned with (possibly reversed) flow
+    dx, dy = sign_d * tx, sign_d * ty
+
+    def pt(along: float, perp: float):
+        """Point at *along* metres ahead, *perp* metres left of arrow dir."""
+        # Normal = 90° CCW of (dx, dy) = (-dy, dx)
+        # new = (cx + along*dx + perp*(-dy), cy + along*dy + perp*dx)
+        return (cx + along * dx - perp * dy,
+                cy + along * dy + perp * dx)
+
+    # 7-point polygon: tail-left → shoulder-left → flare-left → tip →
+    #                  flare-right → shoulder-right → tail-right
+    pts = [
+        pt(-0.15 * L,  W),    # tail-left  (small notch behind centroid)
+        pt(body_L,     W),    # shoulder-left
+        pt(body_L,     HW),   # flare-left (arrowhead base)
+        pt(L,          0.0),  # tip
+        pt(body_L,    -HW),   # flare-right
+        pt(body_L,    -W),    # shoulder-right
+        pt(-0.15 * L, -W),    # tail-right
+    ]
+    return [p[0] for p in pts], [p[1] for p in pts], flow
+
+
+def _bar_segments(
+    bx: float, by: float,
+    connections: List[_ChannelNodeConn],
+    flow_values: dict,
+    reference_flow: float,
+    bar_width_m: float,
+    bar_max_height_m: float,
+) -> tuple:
+    """Build bar segment polygons for one junction node.
+
+    The bar is two-sided:
+
+    * **Left side** (x < *bx*): inflow channels — segments stacked from
+      bottom to top, each proportional to the channel's contribution
+      flowing INTO the node.
+    * **Right side** (x ≥ *bx*): outflow channels — same convention for
+      flow leaving the node.
+
+    Inflow/outflow sign convention:
+
+    * ``is_upnode=True``: positive flow goes downstream (away from this node)
+      → outflow.  Negative flow enters the node → inflow.
+    * ``is_upnode=False``: positive flow arrives at this node → inflow.
+      Negative flow leaves the node → outflow.
+
+    Parameters
+    ----------
+    bx, by : float
+        Node position in EPSG:3857.  Bars grow upward from *by*.
+    connections : list of _ChannelNodeConn
+        Connected channels with pre-assigned colours.
+    flow_values : dict mapping channel_no (int) → flow (float, cfs)
+    reference_flow, bar_width_m, bar_max_height_m : float
+        Scaling parameters from :class:`FlowLayerSpec`.
+
+    Returns
+    -------
+    (xs_list, ys_list, colors, channel_ids, node_id_list, values, sides)
+        Each element is a list; one entry per bar segment.
+    """
+    inflows: List[tuple] = []   # (channel, color, |contrib|)
+    outflows: List[tuple] = []
+
+    for conn in connections:
+        f = float(flow_values.get(conn.channel, 0.0))
+        # Signed contribution INTO this node
+        contrib = (-f) if conn.is_upnode else f
+        if abs(contrib) < 1.0:
+            continue
+        if contrib > 0:
+            inflows.append((conn.channel, conn.color, contrib))
+        else:
+            outflows.append((conn.channel, conn.color, abs(contrib)))
+
+    xs_list, ys_list, colors = [], [], []
+    ch_ids, vals, sides = [], [], []
+
+    GAP_M = 4.0  # visual gap between stacked segments (metres)
+
+    for side_name, segments, x_left in (
+        ("inflow",  inflows,  bx - bar_width_m),
+        ("outflow", outflows, bx),
+    ):
+        y_cursor = by
+        for ch, color, magnitude in segments:
+            seg_h = (magnitude / reference_flow) * bar_max_height_m
+            # Cap at 5× reference height to avoid extreme overflow
+            seg_h = min(float(seg_h), 5.0 * bar_max_height_m)
+            x0, y0 = x_left, y_cursor
+            x1, y1 = x_left + bar_width_m, y_cursor + max(seg_h - GAP_M, 1.0)
+            xs_list.append([x0, x1, x1, x0, x0])
+            ys_list.append([y0, y0, y1, y1, y0])
+            colors.append(color)
+            ch_ids.append(ch)
+            vals.append(round(magnitude, 1))
+            sides.append(side_name)
+            y_cursor += seg_h
+
+    return xs_list, ys_list, colors, ch_ids, vals, sides
+
+
+# ===========================================================================
+# FlowLayer — the main data + rendering class
+# ===========================================================================
+
+class FlowLayer:
+    """Animated flow arrows and junction bars for DSM2 HYDRO data.
+
+    This class manages its own Bokeh ``ColumnDataSource`` objects and can be
+    attached to any existing Bokeh figure via :meth:`setup_on_figure`.  It
+    is designed to plug into :class:`~dvue.animator.GeoAnimatorManager`::
+
+        flow = FlowLayer("hydro.h5", spec, channel_gdf, nodes_gdf)
+        flow.setup_on_figure(mgr._bk_figure)
+        mgr.add_frame_callback(flow.update_frame)
+
+    Parameters
+    ----------
+    hydro_h5_path : str or Path
+        HYDRO HDF5 tidefile.
+    spec : FlowLayerSpec
+        Arrow and bar configuration.
+    channel_gdf : geopandas.GeoDataFrame
+        DSM2 channel centreline geometry returned by
+        :func:`~dsm2ui.animate.load_dsm2_channel_gdf`.
+    nodes_gdf : geopandas.GeoDataFrame
+        DSM2 node point geometry returned by
+        :func:`~dsm2ui.animate.load_dsm2_nodes_gdf`.
+    """
+
+    def __init__(
+        self,
+        hydro_h5_path: "str | Path",
+        spec: FlowLayerSpec,
+        channel_gdf: "geopandas.GeoDataFrame",
+        nodes_gdf: "geopandas.GeoDataFrame",
+    ) -> None:
+        import h5py
+
+        self._spec = spec
+        self._hydro_h5_path = Path(hydro_h5_path)
+
+        # ----------------------------------------------------------------
+        # Project GDFs to EPSG:3857 (metres)
+        # ----------------------------------------------------------------
+        ch_gdf_3857 = channel_gdf.to_crs("EPSG:3857").copy()
+        nd_gdf_3857 = nodes_gdf.to_crs("EPSG:3857").copy()
+
+        # ----------------------------------------------------------------
+        # Read channel topology (upnode/downnode) from the HDF5 file
+        # ----------------------------------------------------------------
+        with h5py.File(self._hydro_h5_path, "r") as hf:
+            ch_table = hf["/hydro/input/channel"]
+            dtype_names = list(ch_table.dtype.names or [])
+            raw = ch_table[:]
+
+        def _int_col(*name_candidates):
+            for nm in name_candidates:
+                if nm in dtype_names:
+                    arr = raw[nm]
+                    if arr.dtype.kind in ("S", "U", "O"):
+                        return np.array([
+                            int(v.decode("utf-8").strip())
+                            if isinstance(v, (bytes, np.bytes_))
+                            else int(str(v).strip())
+                            for v in arr
+                        ], dtype=np.int64)
+                    return arr.astype(np.int64)
+            return np.array([], dtype=np.int64)
+
+        chan_no_arr  = _int_col("chan_no", "CHAN_NO", "channel_number")
+        upnode_arr   = _int_col("upnode", "UPNODE")
+        downnode_arr = _int_col("downnode", "DOWNNODE")
+
+        # ----------------------------------------------------------------
+        # Pre-compute arrow and bar geometries
+        # ----------------------------------------------------------------
+        self._arrow_geoms: List[_ArrowGeom] = []
+        for asp in spec.arrows:
+            ag = _compute_arrow_geom(asp, ch_gdf_3857)
+            if ag is not None:
+                self._arrow_geoms.append(ag)
+
+        self._bar_geoms: List[_BarGeom] = []
+        for bsp in spec.bars:
+            bg = _compute_bar_geom(bsp, nd_gdf_3857, chan_no_arr, upnode_arr, downnode_arr)
+            if bg is not None:
+                self._bar_geoms.append(bg)
+
+        # ----------------------------------------------------------------
+        # Collect all channel numbers that will need flow data
+        # ----------------------------------------------------------------
+        arrow_channels = [ag.channel for ag in self._arrow_geoms]
+        bar_channels = [
+            conn.channel
+            for bg in self._bar_geoms
+            for conn in bg.connections
+        ]
+        self._all_channels: List[int] = sorted(set(arrow_channels + bar_channels))
+
+        # Reader is lazily initialised on first update_frame() call
+        self._reader = None
+
+        # Bokeh sources — set in setup_on_figure()
+        self._arrow_source: Optional[ColumnDataSource] = None
+        self._arrow_text_source: Optional[ColumnDataSource] = None
+        self._bar_source: Optional[ColumnDataSource] = None
+
+    # ----------------------------------------------------------------
+    # Reader (lazy, transform-aware)
+    # ----------------------------------------------------------------
+
+    def _get_base_reader(self):
+        """Return the raw (untransformed) HydroH5FlowReader, built once."""
+        if self._reader is not None and not hasattr(self, "_base_reader_raw"):
+            # Legacy: reader was already built without base/transform split
+            return None
+        if not hasattr(self, "_base_reader_raw") or self._base_reader_raw is None:
+            from dsm2ui.animate import HydroH5FlowReader
+            self._base_reader_raw = HydroH5FlowReader(
+                self._hydro_h5_path, location="both"
+            )
+        return self._base_reader_raw
+
+    def _get_reader(self):
+        """Return the current active flow reader (raw or transformed+buffered)."""
+        if self._reader is None:
+            from dvue.animator import BufferedSlicingReader
+            self._base_reader_raw = None  # trigger creation in _get_base_reader
+            base = self._get_base_reader()
+            self._reader = BufferedSlicingReader(base, chunk_size=200)
+        return self._reader
+
+    def set_transform(self, transform_spec_or_none) -> None:
+        """Rebuild the flow reader to apply (or remove) a time-domain transform.
+
+        Called automatically when the :class:`~dvue.animator.GeoAnimatorManager`
+        transform is changed via :meth:`~dvue.animator.GeoAnimatorManager.add_transform_callback`.
+
+        Parameters
+        ----------
+        transform_spec_or_none : TransformSpec or None
+            When ``None`` the raw reader is used.  Otherwise a
+            :class:`~dvue.animator.StreamingTransformedSlicingReader` is wrapped
+            around the raw reader before buffering.
+        """
+        from dvue.animator import BufferedSlicingReader
+        base = self._get_base_reader()
+        if transform_spec_or_none is not None:
+            from dvue.animator.reader import (
+                StreamingTransformedSlicingReader,
+                TransformSpec,
+            )
+            if isinstance(transform_spec_or_none, TransformSpec):
+                base = StreamingTransformedSlicingReader(base, transform_spec_or_none)
+        self._reader = BufferedSlicingReader(base, chunk_size=200)
+
+    @property
+    def time_index(self) -> pd.DatetimeIndex:
+        """Time index from the current (possibly transformed) flow reader."""
+        return self._get_reader().time_index
+
+    # ----------------------------------------------------------------
+    # Bokeh setup
+    # ----------------------------------------------------------------
+
+    def setup_on_figure(self, figure) -> None:
+        """Add Bokeh renderers and HoverTools to an existing Bokeh figure.
+
+        Must be called before :meth:`update_frame`.  Renderers are added at
+        the ``"overlay"`` level so they appear above the channel colour patches.
+        """
+        # ---- Arrow patches ----
+        self._arrow_source = ColumnDataSource({
+            "xs": [], "ys": [],
+            "values": [], "channel_ids": [], "labels": [], "directions": [],
+        })
+        arrow_renderer = figure.patches(
+            xs="xs", ys="ys",
+            source=self._arrow_source,
+            fill_color="#3182bd",
+            fill_alpha=0.82,
+            line_color="white",
+            line_width=0.8,
+            level="overlay",
+        )
+        figure.add_tools(HoverTool(
+            renderers=[arrow_renderer],
+            tooltips=[
+                ("Arrow",     "@labels"),
+                ("Ch #",      "@channel_ids"),
+                ("Flow",      "@values{0,0.} cfs"),
+                ("Direction", "@directions"),
+            ],
+        ))
+
+        # ---- Arrow text labels (flow value inside body) ----
+        self._arrow_text_source = ColumnDataSource({
+            "x": [], "y": [], "text": [], "angle": [],
+        })
+        figure.text(
+            x="x", y="y",
+            text="text",
+            angle="angle",
+            source=self._arrow_text_source,
+            text_color="white",
+            text_align="center",
+            text_baseline="middle",
+            text_font_size="10px",
+            text_font_style="bold",
+            level="overlay",
+        )
+
+        # ---- Bar patches ----
+        self._bar_source = ColumnDataSource({
+            "xs": [], "ys": [],
+            "colors": [], "channel_ids": [], "node_ids": [], "node_labels": [],
+            "values": [], "sides": [],
+        })
+        bar_renderer = figure.patches(
+            xs="xs", ys="ys",
+            fill_color="colors",
+            source=self._bar_source,
+            fill_alpha=0.80,
+            line_color="black",
+            line_width=0.7,
+            level="overlay",
+        )
+        figure.add_tools(HoverTool(
+            renderers=[bar_renderer],
+            tooltips=[
+                ("Node",      "@node_labels"),
+                ("Channel",   "ch @channel_ids"),
+                ("Direction", "@sides"),
+                ("Flow",      "@values{0,0.} cfs"),
+            ],
+        ))
+
+    # ----------------------------------------------------------------
+    # Per-frame update
+    # ----------------------------------------------------------------
+
+    def update_frame(self, ts: pd.Timestamp) -> None:
+        """Compute and patch Bokeh sources for the given animation timestamp.
+
+        Designed to be registered with
+        :meth:`~dvue.animator.GeoAnimatorManager.add_frame_callback` — the
+        manager passes the resolved :class:`pandas.Timestamp` for the current
+        frame, so the flow reader can snap to its nearest available step
+        independently of the main animation reader's time index (important when
+        a transform changes the step count).
+
+        Parameters
+        ----------
+        ts : pd.Timestamp
+            Current animation timestamp from the main reader.
+        """
+        if self._arrow_source is None:
+            raise RuntimeError(
+                "Call setup_on_figure() before update_frame()."
+            )
+
+        series = self._get_reader().get_slice_nearest(ts)
+
+        # Fast lookup dict
+        flow_dict: dict = {
+            int(ch): float(v)
+            for ch, v in series.items()
+            if int(ch) in set(self._all_channels)
+        }
+
+        # ---- Arrow update ----
+        arr_xs, arr_ys, arr_vals, arr_chs, arr_labels, arr_dirs = [], [], [], [], [], []
+        spec = self._spec
+        for ag in self._arrow_geoms:
+            flow = flow_dict.get(ag.channel, 0.0)
+            xs, ys, fval = _arrow_polygon(
+                ag.cx, ag.cy, ag.tx, ag.ty,
+                flow,
+                spec.reference_flow,
+                spec.reference_arrow_length_m,
+                spec.arrow_width_m,
+                spec.scale_mode,
+                spec.min_flow_cfs,
+            )
+            arr_xs.append(xs)
+            arr_ys.append(ys)
+            arr_vals.append(round(fval, 1))
+            arr_chs.append(ag.channel)
+            arr_labels.append(ag.label or f"Ch {ag.channel}")
+            if abs(fval) < spec.min_flow_cfs:
+                arr_dirs.append("~ 0")
+            elif fval > 0:
+                arr_dirs.append("\u2192 downstream")
+            else:
+                arr_dirs.append("\u2190 upstream")
+
+        self._arrow_source.data = {
+            "xs":          arr_xs,
+            "ys":          arr_ys,
+            "values":      arr_vals,
+            "channel_ids": arr_chs,
+            "labels":      arr_labels,
+            "directions":  arr_dirs,
+        }
+
+        # ---- Arrow text labels ----
+        if self._arrow_text_source is not None:
+            import math
+            txt_xs, txt_ys, txt_texts, txt_angles = [], [], [], []
+            for ag, fval in zip(self._arrow_geoms, arr_vals):
+                abs_f = abs(fval)
+                # Compact label: sub-1k shows integer, ≥1k shows "N.Nk"
+                if abs_f < spec.min_flow_cfs:
+                    txt_texts.append("")
+                elif abs_f < 1_000:
+                    txt_texts.append(f"{abs_f:.0f}")
+                else:
+                    txt_texts.append(f"{abs_f / 1_000:.1f}k")
+                # Text position: slightly forward of the body centre
+                sign_d = 1.0 if fval >= 0.0 else -1.0
+                txt_xs.append(ag.cx)
+                txt_ys.append(ag.cy)
+                # Angle: follow arrow direction, normalised to avoid upside-down text
+                raw = math.atan2(sign_d * ag.ty, sign_d * ag.tx)
+                if raw > math.pi / 2:
+                    raw -= math.pi
+                elif raw < -math.pi / 2:
+                    raw += math.pi
+                txt_angles.append(raw)
+            self._arrow_text_source.data = {
+                "x": txt_xs, "y": txt_ys,
+                "text": txt_texts, "angle": txt_angles,
+            }
+
+        # ---- Bar update ----
+        bar_xs, bar_ys, bar_colors = [], [], []
+        bar_ch_ids, bar_node_ids, bar_node_labels, bar_vals, bar_sides = [], [], [], [], []
+        for bg in self._bar_geoms:
+            ch_flows = {conn.channel: flow_dict.get(conn.channel, 0.0) for conn in bg.connections}
+            xs_l, ys_l, c_l, ch_l, v_l, s_l = _bar_segments(
+                bg.bx, bg.by, bg.connections, ch_flows,
+                spec.reference_flow, spec.bar_width_m, spec.bar_max_height_m,
+            )
+            n = len(xs_l)
+            node_label = bg.label or f"Node {bg.node}"
+            bar_xs.extend(xs_l)
+            bar_ys.extend(ys_l)
+            bar_colors.extend(c_l)
+            bar_ch_ids.extend(ch_l)
+            bar_node_ids.extend([bg.node] * n)
+            bar_node_labels.extend([node_label] * n)
+            bar_vals.extend(v_l)
+            bar_sides.extend(s_l)
+
+        self._bar_source.data = {
+            "xs":          bar_xs,
+            "ys":          bar_ys,
+            "colors":      bar_colors,
+            "channel_ids": bar_ch_ids,
+            "node_ids":    bar_node_ids,
+            "node_labels": bar_node_labels,
+            "values":      bar_vals,
+            "sides":       bar_sides,
+        }
+
+
+# ===========================================================================
+# FlowAnimatorManager — standalone Panel Viewer
+# ===========================================================================
+
+class FlowAnimatorManager(pn.viewable.Viewer):
+    """Standalone Panel Viewer for DSM2 flow arrows and junction bars.
+
+    Displays flow arrows and junction flow-split bars on a CARTO Light map
+    tile background with no channel colourmap.  The viewer has the same
+    player/DatetimePicker interface as
+    :class:`~dvue.animator.GeoAnimatorManager`.
+
+    For overlaying flow on an existing qual animation use
+    :func:`~dsm2ui.animate.animate_qual` with the ``flow_spec`` /
+    ``hydro_h5_path`` keyword arguments instead.
+
+    Parameters
+    ----------
+    hydro_h5_path : str or Path
+        HYDRO HDF5 tidefile.
+    spec : FlowLayerSpec
+        Arrow and bar configuration.
+    channel_gdf : geopandas.GeoDataFrame, optional
+        DSM2 channel centreline geometry.  Defaults to the bundled GeoJSON.
+    nodes_gdf : geopandas.GeoDataFrame, optional
+        DSM2 node geometry.  Defaults to the bundled GeoJSON.
+    title : str, optional
+        Figure title.  Default ``"DSM2 Flow"``.
+    map_height : int, optional
+        Minimum map height in pixels.  Default 500.
+    """
+
+    def __init__(
+        self,
+        hydro_h5_path: "str | Path",
+        spec: FlowLayerSpec,
+        channel_gdf: "geopandas.GeoDataFrame | None" = None,
+        nodes_gdf: "geopandas.GeoDataFrame | None" = None,
+        title: str = "DSM2 Flow",
+        map_height: int = 500,
+        **params,
+    ) -> None:
+        from dsm2ui.animate import load_dsm2_channel_gdf, load_dsm2_nodes_gdf
+
+        if channel_gdf is None:
+            channel_gdf = load_dsm2_channel_gdf()
+        if nodes_gdf is None:
+            nodes_gdf = load_dsm2_nodes_gdf()
+
+        self._title = title
+        self._map_height = map_height
+
+        # Build FlowLayer
+        self._flow_layer = FlowLayer(hydro_h5_path, spec, channel_gdf, nodes_gdf)
+
+        # Build Bokeh figure zoomed to arrow/bar locations + add layer
+        figure = self._build_figure(channel_gdf)
+        self._flow_layer.setup_on_figure(figure)
+        self._bk_figure = figure
+        self._chart_pane = pn.pane.Bokeh(
+            figure, sizing_mode="stretch_both", min_height=map_height
+        )
+
+        # Player controls
+        ti = self._flow_layer.time_index
+        self._time_div = Div(
+            text=f"<b>{ti[0].strftime('%Y-%m-%d %H:%M')}</b>",
+            styles={"font-size": "13px", "margin": "2px 0 6px 0"},
+        )
+        self._time_label_pane = pn.pane.Bokeh(self._time_div, sizing_mode="stretch_width")
+        self._time_slider = pn.widgets.DiscretePlayer(
+            name="",
+            options=list(range(len(ti))),
+            value=0,
+            interval=500,
+            loop_policy="once",
+            show_value=False,
+            sizing_mode="stretch_width",
+        )
+        self._datetime_picker = pn.widgets.DatetimePicker(
+            name="Go to date/time",
+            value=ti[0].to_pydatetime(),
+            start=ti[0].to_pydatetime(),
+            end=ti[-1].to_pydatetime(),
+            sizing_mode="stretch_width",
+        )
+        self._syncing = False
+
+        super().__init__(**params)
+
+        # Wire watchers after super().__init__
+        self._time_slider.param.watch(self._on_slider_change, "value")
+        self._datetime_picker.param.watch(self._on_datetime_picker_change, "value")
+
+        # Render the first frame immediately
+        self._flow_layer.update_frame(self._flow_layer.time_index[0])
+
+    # ----------------------------------------------------------------
+    # Figure construction
+    # ----------------------------------------------------------------
+
+    def _build_figure(self, channel_gdf: "geopandas.GeoDataFrame"):
+        """Build a Bokeh figure with WMTS tile.
+
+        The initial viewport is centred on the pre-computed arrow centroids and
+        bar node positions so the elements are immediately visible without the
+        user having to zoom in.  Falls back to the full channel-network bounds
+        when no arrows or bars are configured.
+        """
+        spec = self._flow_layer._spec
+
+        # Gather all pre-computed positions in EPSG:3857 (metres)
+        xs = [ag.cx for ag in self._flow_layer._arrow_geoms]
+        ys = [ag.cy for ag in self._flow_layer._arrow_geoms]
+        xs += [bg.bx for bg in self._flow_layer._bar_geoms]
+        ys += [bg.by for bg in self._flow_layer._bar_geoms]
+
+        if xs:
+            x_min, x_max = min(xs), max(xs)
+            y_min, y_max = min(ys), max(ys)
+            cx = (x_min + x_max) / 2.0
+            cy = (y_min + y_max) / 2.0
+
+            # Minimum span: ensure arrows fit comfortably even when all
+            # features are co-located (e.g. a single node with no arrows).
+            min_span = spec.reference_arrow_length_m * 8.0
+            span = max(x_max - x_min, y_max - y_min, min_span)
+
+            # 60 % padding on each side so features aren't right at the edge.
+            half = span * 0.5 + span * 0.6
+            x0, x1 = cx - half, cx + half
+            y0, y1 = cy - half, cy + half
+        else:
+            # Fall back to full channel-network bounds.
+            gdf_3857 = channel_gdf.to_crs("EPSG:3857")
+            b = gdf_3857.total_bounds  # [minx, miny, maxx, maxy]
+            pw, ph = (b[2] - b[0]) * 0.05, (b[3] - b[1]) * 0.05
+            x0, x1 = b[0] - pw, b[2] + pw
+            y0, y1 = b[1] - ph, b[3] + ph
+
+        x_range = Range1d(x0, x1, bounds="auto")
+        y_range = Range1d(y0, y1, bounds="auto")
+
+        p = bk_figure(
+            x_range=x_range,
+            y_range=y_range,
+            x_axis_type="mercator",
+            y_axis_type="mercator",
+            match_aspect=True,
+            sizing_mode="stretch_both",
+            min_height=self._map_height,
+            title=self._title,
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+            active_scroll="wheel_zoom",
+        )
+        p.axis.visible = False
+        p.add_tile(WMTSTileSource(url=_CARTO_LIGHT_URL, attribution=_CARTO_LIGHT_ATTR))
+        return p
+
+    # ----------------------------------------------------------------
+    # Callbacks
+    # ----------------------------------------------------------------
+
+    def _on_slider_change(self, event) -> None:
+        if self._syncing:
+            return
+        idx = int(event.new)
+        ti = self._flow_layer.time_index
+        ts = ti[idx]
+        self._syncing = True
+        try:
+            self._datetime_picker.value = ts.to_pydatetime()
+        finally:
+            self._syncing = False
+        doc = self._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(
+                lambda _i=idx, _ts=ts: self._apply_frame(_i, _ts)
+            )
+        else:
+            self._apply_frame(idx, ts)
+
+    def _apply_frame(self, idx: int, ts: pd.Timestamp) -> None:
+        self._time_div.text = f"<b>{ts.strftime('%Y-%m-%d %H:%M')}</b>"
+        self._flow_layer.update_frame(ts)
+
+    def _on_datetime_picker_change(self, event) -> None:
+        if self._syncing:
+            return
+        ti = self._flow_layer.time_index
+        ts = pd.Timestamp(event.new)
+        idx = int(ti.get_indexer([ts], method="nearest")[0])
+        idx = max(0, min(idx, len(ti) - 1))
+        self._syncing = True
+        try:
+            self._time_slider.value = idx
+        finally:
+            self._syncing = False
+        doc = self._bk_figure.document
+        if doc is not None:
+            doc.add_next_tick_callback(
+                lambda _i=idx, _ts=ti[_i]: self._apply_frame(_i, _ts)
+            )
+        else:
+            self._apply_frame(idx, ti[idx])
+
+    # ----------------------------------------------------------------
+    # Panel layout
+    # ----------------------------------------------------------------
+
+    def __panel__(self) -> pn.viewable.Viewable:
+        controls = pn.Column(
+            pn.pane.Markdown("### Flow Controls", margin=(4, 0, 2, 0)),
+            self._time_label_pane,
+            self._time_slider,
+            self._datetime_picker,
+            sizing_mode="stretch_width",
+            max_width=280,
+            margin=(4, 8, 4, 4),
+        )
+        return pn.Column(
+            pn.Row(controls, self._chart_pane, sizing_mode="stretch_both"),
+            sizing_mode="stretch_both",
+            min_height=self._map_height,
+        )
+
+    def servable(self, title: Optional[str] = None, **kwargs) -> "FlowAnimatorManager":
+        """Mark this component as the app entry point."""
+        super().servable(title=title or self._title, **kwargs)
+        return self
