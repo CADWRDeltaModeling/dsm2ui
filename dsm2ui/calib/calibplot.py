@@ -363,22 +363,16 @@ def calculate_metrics(dflist, names, index_x=0, location=None):
         DataFrame: DataFrame of metrics
     """
     dfa = pd.concat([_normalize_dt_index(df) for df in dflist], axis=1)
-    dfa = dfa.dropna()
-
-    # dfa = remove_data_for_time_windows(dfa, time_window_exclusion_list, location, invert_selection=invert_timewindow_exclusion)
-    dfa.dropna(inplace=True)  # this is necessary for metrics
-    # x_series contains observed data
-    # y_series contains model output for each of the studies
-    x_series = dfa.iloc[:, index_x]
-    dfr = dfa.drop(columns=dfa.columns[index_x])
+    # Keep the full aligned DataFrame; each model uses a pairwise dropna so that NaN
+    # in one model does not exclude timestamps from another model's metrics.
+    x_col = dfa.columns[index_x]
+    dfr = dfa.drop(columns=x_col)
     names = names.copy()
     names.remove(names[index_x])
     slopes, interceps, equations, r2s, pvals, stds = [], [], [], [], [], []
     (
         mean_errors,
         nmean_errors,
-        ses,
-        nmses,
         mses,
         nmses,
         rmses,
@@ -387,13 +381,19 @@ def calculate_metrics(dflist, names, index_x=0, location=None):
         nses,
         kges,
         rsrs,
-    ) = ([], [], [], [], [], [], [], [], [], [], [], [])
+    ) = ([], [], [], [], [], [], [], [], [], [])
 
     metrics_calculated = False
-    if len(x_series) > 0:
-        for i in range(len(dfr.columns)):
-            y_series = dfr.iloc[:, i]
+    for i in range(len(dfr.columns)):
+        # Pairwise dropna: only obs and this model need to be non-NaN.
+        # A joint dropna would exclude timestamps where *other* models have NaN,
+        # causing this model's regression line to be fit on fewer points than
+        # its scatter plot shows (the second-model-line inaccuracy bug).
+        pair = pd.concat([dfa[[x_col]], dfr.iloc[:, [i]]], axis=1).dropna()
+        x_series = pair.iloc[:, 0]
+        y_series = pair.iloc[:, 1]
 
+        if len(x_series) > 0:
             if len(y_series) > 0:
                 slope, intercep, rval, pval, std = stats.linregress(x_series, y_series)
                 slopes.append(slope)
@@ -418,10 +418,9 @@ def calculate_metrics(dflist, names, index_x=0, location=None):
             else:
                 errmsg = "calibplot.calculate_metrics: no y_series data found. Metrics can not be calculated."
                 logger.warning(errmsg)
-
-    else:
-        errmsg = "calibplot.calculate_metrics: no x_series data found. Metrics can not be calculated."
-        logger.warning(errmsg)
+        else:
+            errmsg = "calibplot.calculate_metrics: no x_series data found for model %d. Metrics can not be calculated." % i
+            logger.warning(errmsg)
     dfmetrics = None
 
     if metrics_calculated:
