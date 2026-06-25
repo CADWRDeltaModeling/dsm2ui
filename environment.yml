@@ -22,6 +22,8 @@ dependencies:
   - h5py
   - scipy
   # geo stuff
+  - gdal
+  - pyproj
   - geopandas
   # then plot stuff
   - matplotlib
