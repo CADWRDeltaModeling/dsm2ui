@@ -372,6 +372,30 @@ def _compute_bar_geom(
 # Per-frame polygon construction
 # ===========================================================================
 
+
+def _scaled_arrow_length(
+    abs_flow: float,
+    reference_flow: float,
+    reference_length_m: float,
+    scale_mode: str,
+) -> float:
+    """Return the arrow length in EPSG:3857 metres for the given absolute flow.
+
+    Shared by :func:`_arrow_polygon` (polygon construction) and the text-label
+    positioning in :meth:`FlowLayer.update_frame`.
+    """
+    ratio = abs_flow / reference_flow
+    if scale_mode == "log":
+        L = np.log10(1.0 + ratio) / np.log10(2.0) * reference_length_m
+    elif scale_mode == "sqrt":
+        L = np.sqrt(ratio) * reference_length_m
+    elif scale_mode == "cbrt":
+        L = np.cbrt(ratio) * reference_length_m
+    else:  # "linear"
+        L = ratio * reference_length_m
+    return min(float(L), 3.0 * reference_length_m)
+
+
 def _arrow_polygon(
     cx: float, cy: float,
     tx: float, ty: float,
@@ -423,21 +447,7 @@ def _arrow_polygon(
         ys = [cy, cy + r, cy, cy - r, cy]
         return xs, ys, flow
 
-    ratio = abs_flow / reference_flow
-    if scale_mode == "log":
-        # log2(1 + ratio): equals 1 at ratio=1, compresses large values
-        L = np.log10(1.0 + ratio) / np.log10(2.0) * reference_length_m
-    elif scale_mode == "sqrt":
-        # Square root: more visible for small flows than log
-        L = np.sqrt(ratio) * reference_length_m
-    elif scale_mode == "cbrt":
-        # Cube root: most aggressive compression — smallest flows most visible
-        L = np.cbrt(ratio) * reference_length_m
-    else:  # "linear"
-        L = ratio * reference_length_m
-
-    # Clamp to 3× reference length to avoid runaway polygons on extreme flows
-    L = min(float(L), 3.0 * reference_length_m)
+    L = _scaled_arrow_length(abs_flow, reference_flow, reference_length_m, scale_mode)
 
     W = float(arrow_width_m)           # body half-width
     HW = W * 1.25                      # arrowhead half-width (flare)
@@ -864,14 +874,26 @@ class FlowLayer:
                 # Compact label: sub-1k shows integer, ≥1k shows "N.Nk"
                 if abs_f < spec.min_flow_cfs:
                     txt_texts.append("")
-                elif abs_f < 1_000:
+                    txt_xs.append(ag.cx)
+                    txt_ys.append(ag.cy)
+                    txt_angles.append(0.0)
+                    continue
+                if abs_f < 1_000:
                     txt_texts.append(f"{abs_f:.0f}")
                 else:
                     txt_texts.append(f"{abs_f / 1_000:.1f}k")
-                # Text position: slightly forward of the body centre
                 sign_d = 1.0 if fval >= 0.0 else -1.0
-                txt_xs.append(ag.cx)
-                txt_ys.append(ag.cy)
+                # Compute arrow length using the same scaling as the polygon,
+                # then place text at 0.75L — inside the arrowhead where there
+                # is clear space (head starts at 0.65L, tip at L).
+                L = _scaled_arrow_length(
+                    abs_f,
+                    spec.reference_flow,
+                    spec.reference_arrow_length_m,
+                    spec.scale_mode,
+                )
+                txt_xs.append(ag.cx + 0.75 * L * sign_d * ag.tx)
+                txt_ys.append(ag.cy + 0.75 * L * sign_d * ag.ty)
                 # Angle: follow arrow direction, normalised to avoid upside-down text
                 raw = math.atan2(sign_d * ag.ty, sign_d * ag.tx)
                 if raw > math.pi / 2:

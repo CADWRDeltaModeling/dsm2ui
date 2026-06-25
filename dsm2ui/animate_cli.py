@@ -491,6 +491,12 @@ def qual_cmd(
         if resample_cfg.get("enabled"):
             resample_freq = resample_cfg.get("freq") or resample_freq
             resample_agg  = resample_cfg.get("agg",  resample_agg)
+        # Restore flow layer overlay from config (CLI flags take precedence)
+        _flow_cfg = cfg.get("flow", {})
+        if not flow_config_file and _flow_cfg.get("flow_config") and _flow_cfg.get("hydro_h5"):
+            flow_config_file = _flow_cfg["flow_config"]
+            flow_hydro_h5    = _flow_cfg["hydro_h5"]
+            flow_nodes_file  = _flow_cfg.get("nodes_file") or flow_nodes_file
         log.info("Loaded config from %s (%d file(s))", config_file, len(h5files))
     elif not h5files:
         raise click.UsageError(
@@ -657,6 +663,24 @@ def qual_cmd(
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
+            # Patch collect_state() to persist the flow layer paths in saved YAML
+            if flow_config_file:
+                import os as _os
+                _fc = _os.path.abspath(flow_config_file)
+                _hh = _os.path.abspath(flow_hydro_h5)
+                _nf = _os.path.abspath(flow_nodes_file) if flow_nodes_file else None
+                _orig_cs = mgr.collect_state
+                def _cs_with_flow(
+                    _ocs=_orig_cs, _fc=_fc, _hh=_hh, _nf=_nf,
+                ):
+                    state = _ocs()
+                    state["flow"] = {
+                        "flow_config": _fc,
+                        "hydro_h5":    _hh,
+                        "nodes_file":  _nf,
+                    }
+                    return state
+                mgr.collect_state = _cs_with_flow
         # Apply custom resample on top of the primary transform if requested.
         if resample_freq:
             from dsm2ui.animate import (
