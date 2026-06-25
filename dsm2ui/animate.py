@@ -1283,11 +1283,18 @@ def load_dsm2_channel_gdf(
                 "EPSG:4326 but the actual coordinates are in a projected system.\n"
                 f"File: {shapefile}\n"
                 "Fix options:\n"
-                "  1. Copy the shapefile (.shp .shx .dbf .prj) to a local path and "
+                "  1. Convert the shapefile to GeoJSON (recommended — GeoJSON is a "
+                "single file, always EPSG:4326, and has no .prj sidecar that can go "
+                "missing over a network share):\n"
+                "       QGIS: right-click layer → Export → Save Features As → "
+                "Format: GeoJSON, CRS: EPSG:4326\n"
+                "       ArcGIS: right-click layer → Data → Export Features → "
+                "change Save as type to GeoJSON\n"
+                "     Then set shapefile: channels.geojson in your config.\n"
+                "  2. Copy the shapefile (.shp .shx .dbf .prj) to a local path and "
                 "update --shapefile.\n"
-                "  2. Pre-convert to WGS84 on a working machine and use that file.\n"
-                "  3. Pass --simplify 0 to skip the reprojection step (the crash will "
-                "move to a later stage — see the GEOSException note in the docs)."
+                "  3. Pass --simplify 0 (or simplify: 0 in the YAML) to skip the "
+                "reprojection step entirely."
             )
         gdf["geometry"] = gdf.geometry.simplify(
             tolerance=simplify_tolerance, preserve_topology=True
