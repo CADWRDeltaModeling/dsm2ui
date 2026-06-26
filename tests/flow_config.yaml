@@ -1,0 +1,174 @@
+# DSM2 Flow Visualization Layer Configuration
+# =============================================
+# Used with:
+#   dsm2ui animate flow  hydro.h5 --flow-config flow_config.yaml
+#   dsm2ui animate qual  ec.h5    --flow-config flow_config.yaml --hydro-h5 hydro.h5
+#
+# Arrow length/bar height at reference_flow maps to reference_arrow_length_m /
+# bar_max_height_m (in EPSG:3857 metres).  Adjust these to suit the map zoom level.
+
+# ---- Scaling ----------------------------------------------------------------
+# scale_mode options (most to least non-linear compression):
+#   cbrt   — cube root: even 1% flows show at ~21% of reference size (most visible)
+#   sqrt   — square root: 1% flows show at ~10% of reference size
+#   log    — log base-2: 1% flows show at ~1.4% of reference size
+#   linear — proportional: 1% flows show at 1% of reference size
+scale_mode: cbrt              # changed from log — shows smaller flows more visibly
+reference_flow: 10000         # cfs — flow value that maps to reference sizes below
+reference_arrow_length_m: 4000  # metres (EPSG:3857): arrow length at reference_flow
+arrow_width_m: 600            # arrow body half-width in metres
+bar_max_height_m: 5000        # bar height in metres at reference_flow
+bar_width_m: 600              # each bar side (inflow / outflow) width in metres
+min_flow_cfs: 50              # flows below this show a stub symbol only
+
+# ---- Colour mapping ---------------------------------------------------------
+# Diverging colormap: positive flow → warm end, negative → cool end, zero → neutral.
+# Available: coolwarm, RdBu_r, RdYlBu_r, seismic, bwr, PiYG
+colormap: coolwarm
+
+# Color range in cfs.  Flows outside this range saturate at the colormap extremes.
+# Zero is always pinned to the neutral colormap midpoint (TwoSlopeNorm), so the
+# negative and positive sides can have independent saturation thresholds.
+# null means auto: flow_vmin defaults to -reference_flow, flow_vmax to +reference_flow
+flow_vmin: -10000             # cool end saturates at this value (cfs)
+flow_vmax: 50000              # warm end saturates at this value (cfs)
+
+# ---- Flow arrows (one per channel) -----------------------------------------
+# position: 0.0 = upstream end, 0.5 = midpoint, 1.0 = downstream end
+# Arrow direction flips automatically with tidal sign of flow.
+arrows:
+  - channel: 17
+    position: 0.0
+    label: "Vernalis"
+
+  - channel: 11
+    position: 0.5
+    label: "San Joaquin River upstream of Stockton"
+
+  - channel: 57
+    position: 0.5
+    label: "Old River downstream of Head of Old River"
+
+  - channel: 209
+    position: 0.5
+    label: "Grantline Canal"
+
+  - channel: 228
+    position: 0.5
+    label: "Victoria Canal"
+
+  - channel: 279
+    position: 0.5
+    label: "False River"
+
+  - channel: 437
+    position: 0.5
+    label: "Chipps Island"
+
+  - channel: 513
+    position: 0.3
+    label: "Montezuma Slough @ National Steel"
+
+  - channel: 523
+    position: 0.5
+    label: "Montezuma Slough @ Beldons Landing"
+
+  - channel: 414
+    position: 0.5
+    label: "Freeport"
+
+  - channel: 349
+    position: 0.5
+    label: "Georgiana Slough"
+
+  - channel: 434
+    position: 0.5
+    label: "Sacramento River @ Emmaton"
+
+  - channel: 83
+    position: 0.5
+    label: "San Joaquin River @ Jersey Point"
+
+  - channel: 310
+    position: 0.5
+    label: "Three Mile Slough"
+
+  - channel: 441
+    position: 0.5
+    label: "Martinez"
+
+  - channel: 101
+    position: 0.5
+    label: "Old River"
+
+  - channel: 144
+    position: 0.5
+    label: "Middle River"
+
+  #- channel: 216
+  #  position: 0.5
+  #  label: "CVP Intake"
+
+  - channel: 75
+    position: 0.5
+    label: "Old River"
+
+  - channel: 130
+    position: 0.5
+    label: "Middle River"
+
+# ---- Junction flow-split bars (one per node) --------------------------------
+# channels: null  → all channels connected to the node are shown
+# Left side of bar  = inflow channels (water entering the junction)
+# Right side of bar = outflow channels (water leaving the junction)
+#
+# Node 342: upnode of [365, 422], downnode of [421]
+# Node 343: upnode of [366, 423], downnode of [422]
+# Node 162: upnode of [196],      downnode of [195]
+#bars:
+#  - node: 342
+#    label: "Node 342"
+#    channels: null            # show all connected channels: 365, 421, 422
+
+#  - node: 343
+#    label: "Node 343"
+#    channels: null            # show all connected channels: 366, 422, 423
+
+#  - node: 162
+#    label: "Node 162"
+#    channels: null            # show all connected channels: 195, 196
+
+# ---- Reservoir connection arrows -------------------------------------------
+# Reads /hydro/data/reservoir flow via /hydro/geometry/reservoir_node_connect
+# direction_deg: 0=East 90=North 180=West 270=South
+# point: [lat, lon]  optional — overrides the node's geographic position on the map
+#   Use when the node location doesn't look right or you want a cleaner placement.
+#   node is still required for ReservoirArrowSpec (identifies the flow column).
+# Available reservoirs in this model:
+#   clifton_court@72, decker_island@414/416, discovery_bay@197/198,
+#   franks_tract@102/103/216/219/224/225/232, liberty@322,
+#   little_franks_tract@220, mildred@127/129/130/136, tule_red@228, yolo_flyway@713
+reservoir_arrows:
+  - reservoir: clifton_court
+    node: 72
+    direction_deg: 0          # SW — points toward CCF reservoir location
+    label: "CCF Inflow (ch↔res)"
+    # point: [37.816, -121.573]  # optional: override map placement with lat/lon
+
+# ---- Qext (external source/sink) arrows ------------------------------------
+# Reads /hydro/data/qext flow via /hydro/geometry/qext
+# point: [lat, lon]  replaces 'node' for positioning (node optional when point given)
+# Available pumping entries: swp, cvp, jones_pumpout, pump62, pump63
+qext_arrows:
+  - name: swp
+    # node: 72                    # place near CCF (SWP pumps from CCF)
+    direction_deg: 60            # E = inflow direction; negative flow (export) → arrow points W
+    label: "SWP Banks Pumping"
+    point: [37.80068,-121.62090]  # alternative to node — set exact lat/lon position
+  - name: cvp
+    # node: 179                   # CVP Jones Pumping Plant area
+    direction_deg: 60           # N = inflow direction; negative flow (export) → arrow points S
+    label: "CVP Jones Pumping"
+    point: [37.79135, -121.58725]
+    # point: [37.820, -121.560]  # alternative: place at exact plant coordinates
+
