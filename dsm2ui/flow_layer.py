@@ -88,11 +88,17 @@ class ChannelArrowSpec:
         ``0.5`` (default) = midpoint.
     label : str, optional
         Optional label shown in hover tooltip.
+    point : list of float [lat, lon] or None, optional
+        Optional geographic override for the arrow centroid in WGS84 decimal
+        degrees ``[latitude, longitude]``.  When provided the computed
+        centreline position is ignored; the tangent direction is still derived
+        from the channel geometry.
     """
 
     channel: int
     position: float = 0.5
     label: str = ""
+    point: Optional[List[float]] = None
 
 
 @dataclasses.dataclass
@@ -113,6 +119,82 @@ class NodeBarSpec:
     node: int
     channels: Optional[List[int]] = None
     label: str = ""
+
+
+@dataclasses.dataclass
+class ReservoirArrowSpec:
+    """Configuration for a flow arrow at a reservoir-to-node connection.
+
+    Reads ``/hydro/data/reservoir flow`` using the HDF5 geometry table
+    ``/hydro/geometry/reservoir_node_connect``.
+
+    Parameters
+    ----------
+    reservoir : str
+        Reservoir name exactly as stored in the HDF5 (lowercase).
+        Examples: ``"clifton_court"``, ``"franks_tract"``.
+    node : int
+        DSM2 node number the reservoir connects to.  Identifies the correct
+        flow column AND the arrow map position (from *nodes_gdf*).
+    direction_deg : float, optional
+        Arrow pointing direction in degrees — standard math convention:
+        0\u202f=\u202fEast, 90\u202f=\u202fNorth, 180\u202f=\u202fWest, 270\u202f=\u202fSouth.
+        Default 270 (southward, typical for export-side reservoirs).
+    label : str, optional
+        Display label shown in hover tooltip.
+    """
+
+    reservoir: str
+    node: int
+    direction_deg: float = 270.0
+    label: str = ""
+    point: Optional[List[float]] = None
+    """Optional ``[lat, lon]`` override for arrow position on the map.
+
+    When supplied the geographic position of *node* is ignored and the arrow
+    is placed at this WGS84 coordinate instead.  ``node`` is still required
+    to identify the correct flow column.
+    """
+
+
+@dataclasses.dataclass
+class QextArrowSpec:
+    """Configuration for a flow arrow for an external (qext) source/sink.
+
+    Reads ``/hydro/data/qext flow``.  Use this for special boundary sinks
+    such as **swp** (SWP Banks Pumping) and **cvp** (CVP Jones Pumping)
+    that are modelled as source flows applied to a reservoir node.
+
+    Parameters
+    ----------
+    name : str
+        Qext name exactly as stored in the HDF5 (lowercase).
+        Examples: ``"swp"``, ``"cvp"``.
+    node : int
+        DSM2 node number used only for map position lookup.
+    direction_deg : float, optional
+        Arrow pointing direction in degrees.  Default 270 (southward).
+    label : str, optional
+        Display label shown in hover tooltip.
+    """
+
+    name: str
+    node: Optional[int] = None
+    direction_deg: float = 270.0
+    label: str = ""
+    point: Optional[List[float]] = None
+    """Optional ``[lat, lon]`` override for arrow position on the map.
+
+    Either *node* **or** *point* must be supplied.  When both are given
+    *point* takes precedence and *node* is used only as a display hint.
+    """
+
+    def __post_init__(self) -> None:
+        if self.node is None and self.point is None:
+            raise ValueError(
+                f"QextArrowSpec '{self.name}': either 'node' or 'point' "
+                "must be specified to provide a map position."
+            )
 
 
 @dataclasses.dataclass
@@ -148,6 +230,8 @@ class FlowLayerSpec:
 
     arrows: List[ChannelArrowSpec] = dataclasses.field(default_factory=list)
     bars: List[NodeBarSpec] = dataclasses.field(default_factory=list)
+    reservoir_arrows: List[ReservoirArrowSpec] = dataclasses.field(default_factory=list)
+    qext_arrows: List[QextArrowSpec] = dataclasses.field(default_factory=list)
     scale_mode: str = "linear"
     reference_flow: float = 10_000.0
     reference_arrow_length_m: float = 500.0
@@ -155,6 +239,9 @@ class FlowLayerSpec:
     bar_width_m: float = 200.0
     bar_max_height_m: float = 600.0
     min_flow_cfs: float = 10.0
+    colormap: str = "coolwarm"  # diverging colormap: positive=warm, negative=cool
+    flow_vmin: Optional[float] = None  # colour lower bound (cfs); None = -reference_flow
+    flow_vmax: Optional[float] = None  # colour upper bound (cfs); None = +reference_flow
 
     @classmethod
     def from_yaml(cls, path: "str | Path") -> "FlowLayerSpec":
@@ -192,10 +279,17 @@ class FlowLayerSpec:
 
         arrows = [ChannelArrowSpec(**a) for a in d.pop("arrows", [])]
         bars = [NodeBarSpec(**b) for b in d.pop("bars", [])]
-        valid_keys = {f.name for f in dataclasses.fields(cls)} - {"arrows", "bars"}
+        reservoir_arrows = [ReservoirArrowSpec(**r) for r in d.pop("reservoir_arrows", [])]
+        qext_arrows = [QextArrowSpec(**q) for q in d.pop("qext_arrows", [])]
+        valid_keys = (
+            {f.name for f in dataclasses.fields(cls)}
+            - {"arrows", "bars", "reservoir_arrows", "qext_arrows"}
+        )
         return cls(
             arrows=arrows,
             bars=bars,
+            reservoir_arrows=reservoir_arrows,
+            qext_arrows=qext_arrows,
             **{k: v for k, v in d.items() if k in valid_keys},
         )
 
@@ -237,9 +331,80 @@ class _BarGeom:
     connections: List[_ChannelNodeConn]
 
 
+@dataclasses.dataclass
+class _ExtArrowGeom:
+    """Pre-computed geometry for a reservoir-connection or qext arrow.
+
+    Unlike channel arrows, the direction is user-specified via
+    ``direction_deg`` rather than derived from a channel centreline.
+    """
+
+    source_type: str   # ``"reservoir"`` or ``"qext"``
+    lookup_key: object # ``(res_name, node)`` tuple  or  qext name str
+    label: str
+    cx: float          # node x (m, EPSG:3857)
+    cy: float          # node y (m, EPSG:3857)
+    tx: float          # unit direction x = cos(direction_deg)
+    ty: float          # unit direction y = sin(direction_deg)
+
+
 # ===========================================================================
 # Geometry computation helpers
 # ===========================================================================
+
+
+def _latlon_to_3857(lat: float, lon: float) -> "tuple[float, float]":
+    """Convert WGS84 decimal degrees to EPSG:3857 (x, y) in metres."""
+    from pyproj import Transformer
+
+    tr = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    x, y = tr.transform(lon, lat)   # always_xy: (lon, lat) → (x, y)
+    return float(x), float(y)
+
+
+def _compute_ext_arrow_geom(
+    node: Optional[int],
+    direction_deg: float,
+    label: str,
+    source_type: str,
+    lookup_key: object,
+    nodes_gdf_3857,
+    point_latlon: Optional[List[float]] = None,
+) -> "Optional[_ExtArrowGeom]":
+    """Compute position and direction for a reservoir/qext arrow (EPSG:3857).
+
+    Position resolution order:
+    1. *point_latlon* ``[lat, lon]`` — explicit geographic coordinates
+    2. *node* lookup in *nodes_gdf_3857*
+    """
+    import math
+
+    if point_latlon is not None:
+        cx, cy = _latlon_to_3857(point_latlon[0], point_latlon[1])
+    elif node is not None:
+        mask = nodes_gdf_3857["id"] == node
+        if not mask.any():
+            log.warning(
+                "Node %d not found in nodes GDF \u2014 %s arrow skipped.", node, source_type
+            )
+            return None
+        pt = nodes_gdf_3857.loc[mask, "geometry"].iloc[0]
+        cx, cy = float(pt.x), float(pt.y)
+    else:
+        log.warning(
+            "No position info for %s arrow '%s' \u2014 skipped.", source_type, label
+        )
+        return None
+
+    tx = math.cos(math.radians(direction_deg))
+    ty = math.sin(math.radians(direction_deg))
+    return _ExtArrowGeom(
+        source_type=source_type,
+        lookup_key=lookup_key,
+        label=label,
+        cx=cx, cy=cy, tx=tx, ty=ty,
+    )
+
 
 def _compute_arrow_geom(
     spec: ChannelArrowSpec,
@@ -282,6 +447,10 @@ def _compute_arrow_geom(
     pos = max(0.0, min(1.0, spec.position))
     point = geom.interpolate(pos, normalized=True)
     cx, cy = float(point.x), float(point.y)
+
+    # Override centroid if the user supplied an explicit geographic point
+    if spec.point is not None:
+        cx, cy = _latlon_to_3857(spec.point[0], spec.point[1])
 
     # Tangent via finite difference (avoid the exact endpoints)
     delta = 0.02
@@ -649,6 +818,33 @@ class FlowLayer:
                 self._bar_geoms.append(bg)
 
         # ----------------------------------------------------------------
+        # Pre-compute ext arrow geometries (reservoir connections + qext)
+        # ----------------------------------------------------------------
+        self._ext_arrow_geoms: List[_ExtArrowGeom] = []
+        for rspec in spec.reservoir_arrows:
+            eg = _compute_ext_arrow_geom(
+                rspec.node, rspec.direction_deg,
+                rspec.label or f"{rspec.reservoir}@{rspec.node}",
+                "reservoir",
+                (rspec.reservoir.lower().strip(), rspec.node),
+                nd_gdf_3857,
+                point_latlon=rspec.point,
+            )
+            if eg is not None:
+                self._ext_arrow_geoms.append(eg)
+        for qspec in spec.qext_arrows:
+            eg = _compute_ext_arrow_geom(
+                qspec.node, qspec.direction_deg,
+                qspec.label or qspec.name,
+                "qext",
+                qspec.name.lower().strip(),
+                nd_gdf_3857,
+                point_latlon=qspec.point,
+            )
+            if eg is not None:
+                self._ext_arrow_geoms.append(eg)
+
+        # ----------------------------------------------------------------
         # Collect all channel numbers that will need flow data
         # ----------------------------------------------------------------
         arrow_channels = [ag.channel for ag in self._arrow_geoms]
@@ -659,13 +855,18 @@ class FlowLayer:
         ]
         self._all_channels: List[int] = sorted(set(arrow_channels + bar_channels))
 
-        # Reader is lazily initialised on first update_frame() call
+        # Readers — lazily initialised on first update_frame() call
         self._reader = None
+        self._res_reader = None
+        self._qext_reader = None
+        self._last_ts: Optional[pd.Timestamp] = None   # for live control re-render
 
         # Bokeh sources — set in setup_on_figure()
         self._arrow_source: Optional[ColumnDataSource] = None
         self._arrow_text_source: Optional[ColumnDataSource] = None
         self._bar_source: Optional[ColumnDataSource] = None
+        self._ext_arrow_source: Optional[ColumnDataSource] = None
+        self._ext_arrow_text_source: Optional[ColumnDataSource] = None
 
     # ----------------------------------------------------------------
     # Reader (lazy, transform-aware)
@@ -684,7 +885,7 @@ class FlowLayer:
         return self._base_reader_raw
 
     def _get_reader(self):
-        """Return the current active flow reader (raw or transformed+buffered)."""
+        """Return the current active channel flow reader (raw or transformed+buffered)."""
         if self._reader is None:
             from dvue.animator import BufferedSlicingReader
             self._base_reader_raw = None  # trigger creation in _get_base_reader
@@ -692,34 +893,121 @@ class FlowLayer:
             self._reader = BufferedSlicingReader(base, chunk_size=200)
         return self._reader
 
+    def _get_res_reader(self):
+        """Return the reservoir-connection flow reader, building it on first call."""
+        if self._res_reader is None:
+            from dsm2ui.animate import HydroH5ReservoirConnectionReader
+            from dvue.animator import BufferedSlicingReader
+            self._base_res_reader_raw = HydroH5ReservoirConnectionReader(
+                self._hydro_h5_path
+            )
+            self._res_reader = BufferedSlicingReader(
+                self._base_res_reader_raw, chunk_size=200
+            )
+        return self._res_reader
+
+    def _get_qext_reader(self):
+        """Return the qext source/sink flow reader, building it on first call."""
+        if self._qext_reader is None:
+            from dsm2ui.animate import HydroH5QextReader
+            from dvue.animator import BufferedSlicingReader
+            self._base_qext_reader_raw = HydroH5QextReader(self._hydro_h5_path)
+            self._qext_reader = BufferedSlicingReader(
+                self._base_qext_reader_raw, chunk_size=200
+            )
+        return self._qext_reader
+
+    def _apply_transform_to_base(self, base_reader, transform_spec_or_none):
+        """Wrap *base_reader* with an optional transform and buffer it."""
+        from dvue.animator import BufferedSlicingReader
+        if transform_spec_or_none is not None:
+            from dvue.animator.reader import StreamingTransformedSlicingReader, TransformSpec
+            if isinstance(transform_spec_or_none, TransformSpec):
+                base_reader = StreamingTransformedSlicingReader(
+                    base_reader, transform_spec_or_none
+                )
+        return BufferedSlicingReader(base_reader, chunk_size=200)
+
     def set_transform(self, transform_spec_or_none) -> None:
-        """Rebuild the flow reader to apply (or remove) a time-domain transform.
+        """Rebuild all flow readers to apply (or remove) a time-domain transform.
 
         Called automatically when the :class:`~dvue.animator.GeoAnimatorManager`
         transform is changed via :meth:`~dvue.animator.GeoAnimatorManager.add_transform_callback`.
+        Rebuilds the channel, reservoir-connection, and qext readers so they
+        all stay in sync with the background animation.
 
         Parameters
         ----------
         transform_spec_or_none : TransformSpec or None
-            When ``None`` the raw reader is used.  Otherwise a
+            When ``None`` the raw readers are used.  Otherwise a
             :class:`~dvue.animator.StreamingTransformedSlicingReader` is wrapped
-            around the raw reader before buffering.
+            before buffering.
         """
-        from dvue.animator import BufferedSlicingReader
-        base = self._get_base_reader()
-        if transform_spec_or_none is not None:
-            from dvue.animator.reader import (
-                StreamingTransformedSlicingReader,
-                TransformSpec,
+        # Channel reader
+        self._reader = self._apply_transform_to_base(
+            self._get_base_reader(), transform_spec_or_none
+        )
+        # Reservoir reader (only if previously built)
+        if hasattr(self, "_base_res_reader_raw") and self._base_res_reader_raw is not None:
+            self._res_reader = self._apply_transform_to_base(
+                self._base_res_reader_raw, transform_spec_or_none
             )
-            if isinstance(transform_spec_or_none, TransformSpec):
-                base = StreamingTransformedSlicingReader(base, transform_spec_or_none)
-        self._reader = BufferedSlicingReader(base, chunk_size=200)
+        # Qext reader (only if previously built)
+        if hasattr(self, "_base_qext_reader_raw") and self._base_qext_reader_raw is not None:
+            self._qext_reader = self._apply_transform_to_base(
+                self._base_qext_reader_raw, transform_spec_or_none
+            )
 
     @property
     def time_index(self) -> pd.DatetimeIndex:
         """Time index from the current (possibly transformed) flow reader."""
         return self._get_reader().time_index
+
+    # ----------------------------------------------------------------
+    # Color computation
+    # ----------------------------------------------------------------
+
+    def _flow_to_color(self, flow: float) -> str:
+        """Map a signed flow value to a hex colour via the current diverging colormap.
+
+        Uses :class:`matplotlib.colors.TwoSlopeNorm` so that zero is always at
+        the colour-map centre (0.5) even when *flow_vmin* and *flow_vmax* are
+        asymmetric.  Falls back to symmetric \u00b1reference_flow when no explicit
+        range is set.
+        """
+        import matplotlib.cm
+        import matplotlib.colors as mcolors
+
+        try:
+            cmap = matplotlib.colormaps[self._spec.colormap]
+        except (AttributeError, KeyError):
+            cmap = matplotlib.cm.get_cmap(self._spec.colormap)
+
+        ref  = max(self._spec.reference_flow, 1.0)
+        vmin = self._spec.flow_vmin if self._spec.flow_vmin is not None else -ref
+        vmax = self._spec.flow_vmax if self._spec.flow_vmax is not None else  ref
+
+        # Reversed range (e.g. "1000, -1000") inverts the colourmap so that
+        # positive flow maps to the cool end and negative to the warm end.
+        inverted = (vmin > vmax)
+        if inverted:
+            vmin, vmax = vmax, vmin   # normalise so TwoSlopeNorm gets valid args
+
+        if abs(flow) < self._spec.min_flow_cfs:
+            mapped = 0.5  # neutral mid-point for sub-threshold stubs
+        else:
+            try:
+                norm   = mcolors.TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax)
+                mapped = float(np.clip(norm(flow), 0.0, 1.0))
+            except (ValueError, ZeroDivisionError):
+                # Fallback: symmetric linear normalisation
+                norm_val = float(np.clip(flow / ref, -3.0, 3.0) / 3.0)
+                mapped   = (norm_val + 1.0) / 2.0
+
+        if inverted:
+            mapped = 1.0 - mapped  # flip colour direction
+
+        return mcolors.to_hex(cmap(mapped))
 
     # ----------------------------------------------------------------
     # Bokeh setup
@@ -735,12 +1023,13 @@ class FlowLayer:
         self._arrow_source = ColumnDataSource({
             "xs": [], "ys": [],
             "values": [], "channel_ids": [], "labels": [], "directions": [],
+            "color": [],
         })
         arrow_renderer = figure.patches(
             xs="xs", ys="ys",
             source=self._arrow_source,
-            fill_color="#3182bd",
-            fill_alpha=0.82,
+            fill_color="color",
+            fill_alpha=0.88,
             line_color="white",
             line_width=0.8,
             level="overlay",
@@ -797,6 +1086,45 @@ class FlowLayer:
             ],
         ))
 
+        # ---- Ext arrow patches (reservoir connections + qext) ----
+        if self._ext_arrow_geoms:
+            self._ext_arrow_source = ColumnDataSource({
+                "xs": [], "ys": [],
+                "values": [], "labels": [], "directions": [], "color": [],
+            })
+            ext_renderer = figure.patches(
+                xs="xs", ys="ys",
+                source=self._ext_arrow_source,
+                fill_color="color",
+                fill_alpha=0.88,
+                line_color="white",
+                line_width=0.8,
+                level="overlay",
+            )
+            figure.add_tools(HoverTool(
+                renderers=[ext_renderer],
+                tooltips=[
+                    ("Source",    "@labels"),
+                    ("Flow",      "@values{0,0.} cfs"),
+                    ("Direction", "@directions"),
+                ],
+            ))
+            self._ext_arrow_text_source = ColumnDataSource({
+                "x": [], "y": [], "text": [], "angle": [],
+            })
+            figure.text(
+                x="x", y="y",
+                text="text",
+                angle="angle",
+                source=self._ext_arrow_text_source,
+                text_color="white",
+                text_align="center",
+                text_baseline="middle",
+                text_font_size="10px",
+                text_font_style="bold",
+                level="overlay",
+            )
+
     # ----------------------------------------------------------------
     # Per-frame update
     # ----------------------------------------------------------------
@@ -822,6 +1150,7 @@ class FlowLayer:
             )
 
         series = self._get_reader().get_slice_nearest(ts)
+        self._last_ts = ts  # remember for control-panel live re-render
 
         # Fast lookup dict
         flow_dict: dict = {
@@ -863,6 +1192,7 @@ class FlowLayer:
             "channel_ids": arr_chs,
             "labels":      arr_labels,
             "directions":  arr_dirs,
+            "color":       [self._flow_to_color(v) for v in arr_vals],
         }
 
         # ---- Arrow text labels ----
@@ -892,8 +1222,8 @@ class FlowLayer:
                     spec.reference_arrow_length_m,
                     spec.scale_mode,
                 )
-                txt_xs.append(ag.cx + 0.75 * L * sign_d * ag.tx)
-                txt_ys.append(ag.cy + 0.75 * L * sign_d * ag.ty)
+                txt_xs.append(ag.cx + 0.15 * L * sign_d * ag.tx)
+                txt_ys.append(ag.cy + 0.15 * L * sign_d * ag.ty)
                 # Angle: follow arrow direction, normalised to avoid upside-down text
                 raw = math.atan2(sign_d * ag.ty, sign_d * ag.tx)
                 if raw > math.pi / 2:
@@ -905,6 +1235,77 @@ class FlowLayer:
                 "x": txt_xs, "y": txt_ys,
                 "text": txt_texts, "angle": txt_angles,
             }
+
+        # ---- Ext arrow update (reservoir connections + qext) ----
+        if self._ext_arrow_geoms and self._ext_arrow_source is not None:
+            need_res  = any(eg.source_type == "reservoir" for eg in self._ext_arrow_geoms)
+            need_qext = any(eg.source_type == "qext"      for eg in self._ext_arrow_geoms)
+            res_series  = self._get_res_reader().get_slice_nearest(ts)  if need_res  else None
+            qext_series = self._get_qext_reader().get_slice_nearest(ts) if need_qext else None
+
+            ext_xs, ext_ys, ext_vals, ext_labels, ext_dirs = [], [], [], [], []
+            ext_txt_xs, ext_txt_ys, ext_txt_texts, ext_txt_angles = [], [], [], []
+            for eg in self._ext_arrow_geoms:
+                if eg.source_type == "reservoir":
+                    flow = float(res_series.get(eg.lookup_key, 0.0)) if res_series is not None else 0.0
+                else:
+                    flow = float(qext_series.get(eg.lookup_key, 0.0)) if qext_series is not None else 0.0
+
+                xs, ys, fval = _arrow_polygon(
+                    eg.cx, eg.cy, eg.tx, eg.ty,
+                    flow,
+                    spec.reference_flow,
+                    spec.reference_arrow_length_m,
+                    spec.arrow_width_m,
+                    spec.scale_mode,
+                    spec.min_flow_cfs,
+                )
+                ext_xs.append(xs)
+                ext_ys.append(ys)
+                ext_vals.append(round(fval, 1))
+                ext_labels.append(eg.label)
+                abs_f = abs(fval)
+                if abs_f < spec.min_flow_cfs:
+                    ext_dirs.append("~ 0")
+                elif fval > 0:
+                    ext_dirs.append("\u2192 outflow" if eg.source_type == "qext" else "\u2192 into reservoir")
+                else:
+                    ext_dirs.append("\u2190 return" if eg.source_type == "qext" else "\u2190 from reservoir")
+
+                # Text label inside arrowhead
+                sign_d = 1.0 if fval >= 0.0 else -1.0
+                if abs_f < spec.min_flow_cfs:
+                    ext_txt_texts.append("")
+                    ext_txt_xs.append(eg.cx)
+                    ext_txt_ys.append(eg.cy)
+                    ext_txt_angles.append(0.0)
+                else:
+                    ext_txt_texts.append(
+                        f"{abs_f:.0f}" if abs_f < 1_000 else f"{abs_f / 1_000:.1f}k"
+                    )
+                    L = _scaled_arrow_length(
+                        abs_f, spec.reference_flow,
+                        spec.reference_arrow_length_m, spec.scale_mode,
+                    )
+                    ext_txt_xs.append(eg.cx + 0.15 * L * sign_d * eg.tx)
+                    ext_txt_ys.append(eg.cy + 0.15 * L * sign_d * eg.ty)
+                    raw = math.atan2(sign_d * eg.ty, sign_d * eg.tx)
+                    if raw > math.pi / 2:
+                        raw -= math.pi
+                    elif raw < -math.pi / 2:
+                        raw += math.pi
+                    ext_txt_angles.append(raw)
+
+            self._ext_arrow_source.data = {
+                "xs": ext_xs, "ys": ext_ys,
+                "values": ext_vals, "labels": ext_labels, "directions": ext_dirs,
+                "color": [self._flow_to_color(v) for v in ext_vals],
+            }
+            if self._ext_arrow_text_source is not None:
+                self._ext_arrow_text_source.data = {
+                    "x": ext_txt_xs, "y": ext_txt_ys,
+                    "text": ext_txt_texts, "angle": ext_txt_angles,
+                }
 
         # ---- Bar update ----
         bar_xs, bar_ys, bar_colors = [], [], []
@@ -936,6 +1337,130 @@ class FlowLayer:
             "values":      bar_vals,
             "sides":       bar_sides,
         }
+
+    # ----------------------------------------------------------------
+    # Live control card
+    # ----------------------------------------------------------------
+
+    #: Diverging colormaps available in the flow controls panel.
+    _FLOW_COLORMAPS = ["coolwarm", "RdBu_r", "RdYlBu_r", "seismic", "bwr", "PiYG"]
+
+    def create_control_card(self) -> "pn.Card":
+        """Return a collapsible Panel Card with live flow-layer controls.
+
+        Wire the card into a parent layout::
+
+            card = flow_layer.create_control_card()
+            mgr._controls.append(card)      # GeoAnimatorManager sidebar
+        """
+        self._w_colormap = pn.widgets.Select(
+            name="Colormap",
+            options=self._FLOW_COLORMAPS,
+            value=self._spec.colormap,
+            sizing_mode="stretch_width",
+        )
+        ref = max(self._spec.reference_flow, 1.0)
+        _vmin = self._spec.flow_vmin if self._spec.flow_vmin is not None else -ref
+        _vmax = self._spec.flow_vmax if self._spec.flow_vmax is not None else  ref
+        self._w_clim = pn.widgets.TextInput(
+            name="Color range  (min, max)",
+            value=f"{_vmin:.4g}, {_vmax:.4g}",
+            sizing_mode="stretch_width",
+        )
+        self._w_scale = pn.widgets.Select(
+            name="Scale mode",
+            options=["linear", "log", "sqrt", "cbrt"],
+            value=self._spec.scale_mode,
+            sizing_mode="stretch_width",
+        )
+        self._w_ref_flow = pn.widgets.FloatInput(
+            name="Reference flow (cfs)",
+            value=self._spec.reference_flow,
+            step=1_000.0,
+            start=1.0,
+            sizing_mode="stretch_width",
+        )
+        self._w_arrow_length = pn.widgets.FloatInput(
+            name="Arrow length at ref (m)",
+            value=self._spec.reference_arrow_length_m,
+            step=100.0,
+            start=10.0,
+            sizing_mode="stretch_width",
+        )
+        self._w_arrow_width = pn.widgets.FloatInput(
+            name="Arrow width (m)",
+            value=self._spec.arrow_width_m,
+            step=50.0,
+            start=10.0,
+            sizing_mode="stretch_width",
+        )
+        self._w_bar_height = pn.widgets.FloatInput(
+            name="Bar height at ref (m)",
+            value=self._spec.bar_max_height_m,
+            step=200.0,
+            start=10.0,
+            sizing_mode="stretch_width",
+        )
+        self._w_min_flow = pn.widgets.FloatInput(
+            name="Min flow stub (cfs)",
+            value=self._spec.min_flow_cfs,
+            step=10.0,
+            start=0.0,
+            sizing_mode="stretch_width",
+        )
+        for w in (
+            self._w_colormap, self._w_clim, self._w_scale, self._w_ref_flow,
+            self._w_arrow_length, self._w_arrow_width,
+            self._w_bar_height, self._w_min_flow,
+        ):
+            w.param.watch(self._on_spec_change, "value")
+
+        return pn.Card(
+            self._w_colormap,
+            self._w_clim,
+            self._w_scale,
+            pn.layout.Divider(margin=(2, 0, 2, 0)),
+            self._w_ref_flow,
+            self._w_arrow_length,
+            self._w_arrow_width,
+            pn.layout.Divider(margin=(2, 0, 2, 0)),
+            self._w_bar_height,
+            self._w_min_flow,
+            title="\U0001f9ed Flow Layer",
+            collapsed=True,
+            sizing_mode="stretch_width",
+        )
+
+    def _on_spec_change(self, event=None) -> None:
+        """Apply current widget values to spec and re-render the current frame."""
+        if not hasattr(self, "_w_colormap"):
+            return
+        self._spec.colormap             = self._w_colormap.value
+        self._spec.scale_mode           = self._w_scale.value
+        self._spec.reference_flow       = float(self._w_ref_flow.value or 1)
+        self._spec.reference_arrow_length_m = float(self._w_arrow_length.value or 10)
+        self._spec.arrow_width_m        = float(self._w_arrow_width.value or 10)
+        self._spec.bar_max_height_m     = float(self._w_bar_height.value or 10)
+        self._spec.min_flow_cfs         = float(self._w_min_flow.value or 0)
+        # Parse "min, max" color range — reversed order (e.g. "1000, -1000") inverts
+        # the colourmap, identical to the channel appearance colour range behaviour.
+        try:
+            parts = [p.strip() for p in self._w_clim.value.split(",")]
+            if len(parts) == 2:
+                vmin, vmax = float(parts[0]), float(parts[1])
+                if vmin != vmax:   # reject only equal values (would cause div/0)
+                    self._spec.flow_vmin = vmin
+                    self._spec.flow_vmax = vmax
+        except (ValueError, AttributeError):
+            pass
+        if self._last_ts is None or self._arrow_source is None:
+            return
+        ts = self._last_ts
+        doc = self._arrow_source.document
+        if doc is not None:
+            doc.add_next_tick_callback(lambda: self.update_frame(ts))
+        else:
+            self.update_frame(ts)
 
 
 # ===========================================================================
@@ -1154,8 +1679,10 @@ class FlowAnimatorManager(pn.viewable.Viewer):
             self._time_label_pane,
             self._time_slider,
             self._datetime_picker,
+            pn.layout.Divider(margin=(4, 0, 4, 0)),
+            self._flow_layer.create_control_card(),
             sizing_mode="stretch_width",
-            max_width=280,
+            max_width=300,
             margin=(4, 8, 4, 4),
         )
         return pn.Column(

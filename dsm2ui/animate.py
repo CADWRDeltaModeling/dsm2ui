@@ -419,6 +419,184 @@ class HydroH5VelocityReader(_DSM2BaseH5Reader):
 
 
 # ---------------------------------------------------------------------------
+# Reservoir connection and qext readers
+# ---------------------------------------------------------------------------
+
+def _h5_str(v) -> str:
+    """Decode an HDF5 bytes/string field to a stripped Python str."""
+    if isinstance(v, (bytes, np.bytes_)):
+        return v.decode("utf-8").strip()
+    return str(v).strip()
+
+
+def _h5_time_index_from_ds(ds) -> pd.DatetimeIndex:
+    """Build a DatetimeIndex from a DSM2 HDF5 dataset's time attributes."""
+    attrs = dict(ds.attrs)
+    start = _parse_dsm2_timestamp(attrs["start_time"])
+    raw = attrs["interval"]
+    if hasattr(raw, "__len__") and not isinstance(raw, (str, bytes)):
+        raw = raw[0]
+    if isinstance(raw, (bytes, np.bytes_)):
+        raw = raw.decode("utf-8")
+    freq = _normalise_interval(str(raw).strip())
+    return pd.date_range(start=start, periods=ds.shape[0], freq=freq)
+
+
+class HydroH5ReservoirConnectionReader(SlicingReader):
+    """SlicingReader for DSM2 HYDRO reservoir-to-channel-node connection flows.
+
+    Reads ``/hydro/data/reservoir flow`` (shape: ``n_times × n_connections``)
+    and returns a :class:`pd.Series` indexed by ``(res_name, node_no)`` tuples.
+    The column mapping is built from
+    ``/hydro/geometry/reservoir_node_connect``.
+
+    Reservoir names are lowercase exactly as stored in the HDF5
+    (e.g. ``"clifton_court"``, ``"franks_tract"``).
+
+    Parameters
+    ----------
+    filepath : str or Path
+        HYDRO HDF5 tidefile.
+    """
+
+    _DATASET = "/hydro/data/reservoir flow"
+    _GEOM    = "/hydro/geometry/reservoir_node_connect"
+
+    def __init__(self, filepath: "str | Path") -> None:
+        import h5py
+
+        self._h5 = h5py.File(Path(filepath), "r")
+        self._ds = self._h5[self._DATASET]
+        idx = _h5_time_index_from_ds(self._ds)
+
+        rc = self._h5[self._GEOM][:]
+        self._keys: list = [
+            (_h5_str(row["res_name"]).lower(), int(row["ext_node_no"]))
+            for row in rc
+        ]
+
+        n_samp = min(20, self._ds.shape[0])
+        data = self._ds[:n_samp].astype(float)
+        data[data < -1e20] = np.nan
+        self._vmin = float(np.nanmin(data)) if not np.all(np.isnan(data)) else 0.0
+        self._vmax = float(np.nanmax(data)) if not np.all(np.isnan(data)) else 1.0
+        super().__init__(idx)
+
+    @property
+    def vmin(self) -> float:
+        return self._vmin
+
+    @property
+    def vmax(self) -> float:
+        return self._vmax
+
+    @property
+    def keys(self) -> list:
+        """List of ``(res_name, node_no)`` tuples, one per dataset column."""
+        return self._keys
+
+    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
+        i = self._time_index.get_indexer([timestamp], method="nearest")[0]
+        row = self._ds[i, :].astype(float)
+        row[row < -1e20] = np.nan
+        return pd.Series(row, index=self._keys, dtype=float)
+
+    def get_slice_range(self, start_idx: int, end_idx: int) -> pd.DataFrame:
+        rows = self._ds[start_idx:end_idx, :].astype(float)
+        rows[rows < -1e20] = np.nan
+        return pd.DataFrame(
+            rows,
+            index=self._time_index[start_idx:end_idx],
+            columns=self._keys,
+        )
+
+    def close(self) -> None:
+        if self._h5.id.valid:
+            self._h5.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class HydroH5QextReader(SlicingReader):
+    """SlicingReader for DSM2 HYDRO external (qext) source/sink flows.
+
+    Reads ``/hydro/data/qext flow`` and returns a :class:`pd.Series` indexed
+    by lowercase qext name strings.  Qext entries include special boundary
+    sinks such as **swp** (State Water Project Banks Pumping) and **cvp**
+    (Central Valley Project Jones Pumping) which are modelled as source flows
+    applied directly to reservoir nodes rather than as channel boundary flows.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        HYDRO HDF5 tidefile.
+    """
+
+    _DATASET = "/hydro/data/qext flow"
+    _GEOM    = "/hydro/geometry/qext"
+
+    def __init__(self, filepath: "str | Path") -> None:
+        import h5py
+
+        self._h5 = h5py.File(Path(filepath), "r")
+        self._ds = self._h5[self._DATASET]
+        idx = _h5_time_index_from_ds(self._ds)
+
+        tbl = self._h5[self._GEOM][:]
+        name_col = tbl.dtype.names[0]
+        self._names: list = [_h5_str(row[name_col]).lower() for row in tbl]
+
+        n_samp = min(20, self._ds.shape[0])
+        data = self._ds[:n_samp].astype(float)
+        data[data < -1e20] = np.nan
+        self._vmin = float(np.nanmin(data)) if not np.all(np.isnan(data)) else 0.0
+        self._vmax = float(np.nanmax(data)) if not np.all(np.isnan(data)) else 1.0
+        super().__init__(idx)
+
+    @property
+    def vmin(self) -> float:
+        return self._vmin
+
+    @property
+    def vmax(self) -> float:
+        return self._vmax
+
+    @property
+    def qext_names(self) -> list:
+        """Qext names in column order."""
+        return self._names
+
+    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
+        i = self._time_index.get_indexer([timestamp], method="nearest")[0]
+        row = self._ds[i, :].astype(float)
+        row[row < -1e20] = np.nan
+        return pd.Series(row, index=self._names, dtype=float)
+
+    def get_slice_range(self, start_idx: int, end_idx: int) -> pd.DataFrame:
+        rows = self._ds[start_idx:end_idx, :].astype(float)
+        rows[rows < -1e20] = np.nan
+        return pd.DataFrame(
+            rows,
+            index=self._time_index[start_idx:end_idx],
+            columns=self._names,
+        )
+
+    def close(self) -> None:
+        if self._h5.id.valid:
+            self._h5.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+# ---------------------------------------------------------------------------
 # Qual / GTM reader
 # ---------------------------------------------------------------------------
 
@@ -1837,6 +2015,7 @@ def animate_hydro(
         mgr.add_frame_callback(flow_layer.update_frame)
         mgr.add_transform_callback(flow_layer.set_transform)
         flow_layer.update_frame(mgr._reader.time_index[0])
+        mgr._controls.append(flow_layer.create_control_card())
 
     return mgr
 
@@ -2043,6 +2222,7 @@ def animate_qual(
         mgr.add_transform_callback(flow_layer.set_transform)
         # Trigger the first frame so arrows/bars appear immediately
         flow_layer.update_frame(mgr._reader.time_index[0])
+        mgr._controls.append(flow_layer.create_control_card())
 
     # Attach metadata so the Save config card can write a complete YAML.
     h5abs = str(Path(h5file).absolute())
