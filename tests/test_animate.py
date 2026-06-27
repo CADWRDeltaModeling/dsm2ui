@@ -45,6 +45,11 @@ skip_no_geo = pytest.mark.skipif(
 # Performance benchmarks  (skipped by default — run with: pytest -m performance)
 # ===========================================================================
 
+@pytest.mark.skip(
+    reason="Crashes Python with Windows fatal exception 0xc06d007f (DLL not found) "
+           "in the numpy BLAS matmul path on this environment.  "
+           "Re-enable once the BLAS DLL linkage is resolved."
+)
 @pytest.mark.performance
 class TestIDWVectorizedPerformance:
     """Confirm the vectorised IDW path is substantially faster than the
@@ -1276,7 +1281,7 @@ def _make_synthetic_manager():
     )
 
     mgr = GeoAnimatorManager(reader, gdf, geo_id_column="geo_id",
-                             colormap="rainbow", vmin=100.0, vmax=4000.0,
+                             colormap="turbo", vmin=100.0, vmax=4000.0,
                              size=3.0)
     # Simulate what animate_hydro() sets
     mgr._animate_meta = {
@@ -1358,7 +1363,7 @@ class TestConfigSaveLoad:
         loaded = yaml.safe_load(out.read_text(encoding="utf-8"))
         assert loaded["version"] == 1
         assert loaded["file_type"] == "hydro"
-        assert loaded["colormap"] == "rainbow"
+        assert loaded["colormap"] == "turbo"
 
     def test_save_creates_parent_dirs(self, tmp_path):
         import yaml
@@ -1384,8 +1389,8 @@ class TestConfigSaveLoad:
         mgr.vmin = 200.0
         mgr.vmax = 3000.0
         mgr.size = 5.0
-        mgr._show_channels_check.value = False
-        mgr._show_basemap_check.value = False
+        mgr._channels_alpha_slider.value = 25
+        mgr._basemap_alpha_slider.value = 50
         mgr._contours_check.value = True
         mgr._n_contours_slider.value = 12
         mgr._contour_smooth_slider.value = 5.0
@@ -1405,8 +1410,8 @@ class TestConfigSaveLoad:
         assert saved["vmin"] == 200.0
         assert saved["vmax"] == 3000.0
         assert saved["size"] == 5.0
-        assert saved["show_channels"] is False
-        assert saved["show_basemap"] is False
+        assert saved["show_channels"] == 25
+        assert saved["show_basemap"] == 50
         c = saved["contours"]
         assert c["enabled"] is True
         assert c["n_levels"] == 12
@@ -1433,8 +1438,8 @@ class TestConfigSaveLoad:
                 "color": False,
                 "labels": True,
             },
-            "show_channels": False,
-            "show_basemap": False,
+            "show_channels": 25,
+            "show_basemap": 50,
         }
         _apply_config_to_manager(mgr, cfg)
 
@@ -1445,8 +1450,8 @@ class TestConfigSaveLoad:
         assert mgr._contour_custom_input.value == "250, 750"
         assert mgr._contour_color_check.value is False
         assert mgr._contour_labels_check.value is True
-        assert mgr._show_channels_check.value is False
-        assert mgr._show_basemap_check.value is False
+        assert mgr._channels_alpha_slider.value == 25
+        assert mgr._basemap_alpha_slider.value == 50
 
     def test_cli_help_shows_config_option(self):
         """--config appears in both subcommand help texts."""
@@ -1983,4 +1988,119 @@ class TestSliderOutOfBoundsRegression:
         # Reader should now be the raw hourly reader (transform removed)
         assert len(mgr._reader.time_index) == 240, (
             "Genuine 'none' transform selection after init must apply correctly"
+        )
+
+
+# ===========================================================================
+# Integration performance benchmarks — real QUAL HDF5 + Godin -> Daily
+# (skipped by default; run with: pytest -m performance)
+# These exercise the full streaming-transform + buffered-prefetch reader stack
+# against the real DSM2 QUAL tidefile, mirroring `dsm2ui animate qual` with the
+# "Godin filter -> Daily mean" transform.  They quantify the worst-frame stall
+# that the async double-buffer prefetch in BufferedSlicingReader removes.
+# ===========================================================================
+
+@pytest.mark.performance
+@pytest.mark.integration
+@skip_no_qual
+class TestGodinDailyPrefetchPerformance:
+    """Measure per-frame latency of the qual Godin->Daily animation stack.
+
+    Compares ``BufferedSlicingReader(prefetch=False)`` (synchronous chunk
+    refill on the playback thread — the old behaviour) against
+    ``prefetch=True`` (async double-buffer).  With prefetch enabled and a
+    realistic inter-frame interval, the slow Godin+daily transform happens on a
+    background thread, so no single frame should incur the full chunk-load cost.
+    """
+
+    CHUNK_SIZE = 90
+    N_FRAMES = 180
+    FRAME_INTERVAL = 0.04  # seconds between frames (DiscretePlayer is 0.5s)
+
+    def _build_streaming(self):
+        """Return (base_reader, streaming_reader) for the Godin->Daily stack."""
+        from dsm2ui.animate import (
+            QualH5ConcentrationReader,
+            make_godin_transform,
+            make_resample_transform,
+            make_composed_transform,
+        )
+        from dvue.animator import StreamingTransformedSlicingReader
+
+        base = QualH5ConcentrationReader(str(QUAL_H5), constituent="ec")
+        spec = make_composed_transform(
+            make_godin_transform(),
+            make_resample_transform("D", "mean"),
+        )
+        streaming = StreamingTransformedSlicingReader(base, spec)
+        return base, streaming
+
+    def _sweep_worst_frame(self, buffered, n, frame_interval):
+        """Forward sweep; return (worst_frame_seconds, total_seconds)."""
+        import time
+
+        n = min(n, len(buffered.time_index))
+        worst = 0.0
+        t_start = time.perf_counter()
+        for i in range(n):
+            ts = buffered.time_index[i]
+            t0 = time.perf_counter()
+            buffered.get_slice(ts)
+            worst = max(worst, time.perf_counter() - t0)
+            if frame_interval:
+                time.sleep(frame_interval)
+        return worst, time.perf_counter() - t_start
+
+    def test_streaming_stack_builds_and_is_daily(self):
+        base, streaming = self._build_streaming()
+        try:
+            assert len(streaming.time_index) > 0
+            # Daily output frequency from the composed transform's final stage.
+            assert streaming.time_index.freq == pd.tseries.frequencies.to_offset("D")
+        finally:
+            base.close()
+
+    def test_prefetch_lowers_worst_frame_latency(self):
+        from dvue.animator import BufferedSlicingReader
+
+        # --- Synchronous baseline (old behaviour) ---
+        base_a, stream_a = self._build_streaming()
+        try:
+            sync = BufferedSlicingReader(
+                stream_a, chunk_size=self.CHUNK_SIZE, prefetch=False
+            )
+            sync_worst, _ = self._sweep_worst_frame(
+                sync, self.N_FRAMES, frame_interval=0.0
+            )
+        finally:
+            base_a.close()
+
+        # If a full chunk load is too cheap to measure, the comparison is
+        # meaningless on this machine/fixture — skip rather than assert noise.
+        if sync_worst < 0.02:
+            pytest.skip(
+                f"Chunk transform too fast to benchmark (sync worst-frame "
+                f"{sync_worst*1e3:.1f} ms < 20 ms)"
+            )
+
+        # --- Async prefetch (new behaviour) ---
+        base_b, stream_b = self._build_streaming()
+        try:
+            pre = BufferedSlicingReader(
+                stream_b, chunk_size=self.CHUNK_SIZE,
+                refill_margin=0.4, prefetch=True,
+            )
+            pre.get_slice(pre.time_index[0])  # warm the first chunk
+            pre_worst, _ = self._sweep_worst_frame(
+                pre, self.N_FRAMES, frame_interval=self.FRAME_INTERVAL
+            )
+        finally:
+            base_b.close()
+
+        # With background prefetch the playback thread never pays the full
+        # Godin+daily chunk-load cost; worst frame should be a fraction of sync.
+        assert pre_worst < sync_worst * 0.6, (
+            f"prefetch worst-frame {pre_worst*1e3:.1f} ms not < 60% of sync "
+            f"worst-frame {sync_worst*1e3:.1f} ms — async prefetch is not "
+            "hiding the chunk-load stall"
         )

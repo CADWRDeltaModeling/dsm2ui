@@ -275,7 +275,6 @@ def hydro_cmd(
         variable  = cfg.get("variable", variable)
         location  = cfg.get("location", location)
         show_diff = cfg.get("diff", {}).get("show", show_diff)
-        transform = cfg.get("transform", transform)
         shapefile = cfg.get("shapefile") or shapefile
         channel_id_column = cfg.get("channel_id_column") or channel_id_column
         simplify  = cfg.get("simplify", simplify)
@@ -460,7 +459,6 @@ def qual_cmd(
         h5files     = tuple(_files)
         constituent = cfg.get("variable", constituent)
         show_diff   = cfg.get("diff", {}).get("show", show_diff)
-        transform   = cfg.get("transform", transform)
         shapefile   = cfg.get("shapefile") or shapefile
         channel_id_column = cfg.get("channel_id_column") or channel_id_column
         simplify    = cfg.get("simplify", simplify)

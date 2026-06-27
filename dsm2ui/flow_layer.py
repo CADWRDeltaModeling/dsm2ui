@@ -890,7 +890,7 @@ class FlowLayer:
             from dvue.animator import BufferedSlicingReader
             self._base_reader_raw = None  # trigger creation in _get_base_reader
             base = self._get_base_reader()
-            self._reader = BufferedSlicingReader(base, chunk_size=200)
+            self._reader = BufferedSlicingReader(base, chunk_size=200, prefetch=True)
         return self._reader
 
     def _get_res_reader(self):
@@ -902,7 +902,7 @@ class FlowLayer:
                 self._hydro_h5_path
             )
             self._res_reader = BufferedSlicingReader(
-                self._base_res_reader_raw, chunk_size=200
+                self._base_res_reader_raw, chunk_size=200, prefetch=True
             )
         return self._res_reader
 
@@ -913,7 +913,7 @@ class FlowLayer:
             from dvue.animator import BufferedSlicingReader
             self._base_qext_reader_raw = HydroH5QextReader(self._hydro_h5_path)
             self._qext_reader = BufferedSlicingReader(
-                self._base_qext_reader_raw, chunk_size=200
+                self._base_qext_reader_raw, chunk_size=200, prefetch=True
             )
         return self._qext_reader
 
@@ -926,7 +926,7 @@ class FlowLayer:
                 base_reader = StreamingTransformedSlicingReader(
                     base_reader, transform_spec_or_none
                 )
-        return BufferedSlicingReader(base_reader, chunk_size=200)
+        return BufferedSlicingReader(base_reader, chunk_size=200, prefetch=True)
 
     def set_transform(self, transform_spec_or_none) -> None:
         """Rebuild all flow readers to apply (or remove) a time-domain transform.
