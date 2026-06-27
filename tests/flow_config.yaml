@@ -14,9 +14,9 @@
 #   log    — log base-2: 1% flows show at ~1.4% of reference size
 #   linear — proportional: 1% flows show at 1% of reference size
 scale_mode: cbrt              # changed from log — shows smaller flows more visibly
-reference_flow: 10000         # cfs — flow value that maps to reference sizes below
+reference_flow: 1000         # cfs — flow value that maps to reference sizes below
 reference_arrow_length_m: 4000  # metres (EPSG:3857): arrow length at reference_flow
-arrow_width_m: 600            # arrow body half-width in metres
+arrow_width_m: 900            # arrow body half-width in metres
 bar_max_height_m: 5000        # bar height in metres at reference_flow
 bar_width_m: 600              # each bar side (inflow / outflow) width in metres
 min_flow_cfs: 50              # flows below this show a stub symbol only
@@ -24,14 +24,14 @@ min_flow_cfs: 50              # flows below this show a stub symbol only
 # ---- Colour mapping ---------------------------------------------------------
 # Diverging colormap: positive flow → warm end, negative → cool end, zero → neutral.
 # Available: coolwarm, RdBu_r, RdYlBu_r, seismic, bwr, PiYG
-colormap: coolwarm
+colormap: seismic
 
 # Color range in cfs.  Flows outside this range saturate at the colormap extremes.
 # Zero is always pinned to the neutral colormap midpoint (TwoSlopeNorm), so the
 # negative and positive sides can have independent saturation thresholds.
 # null means auto: flow_vmin defaults to -reference_flow, flow_vmax to +reference_flow
-flow_vmin: -10000             # cool end saturates at this value (cfs)
-flow_vmax: 50000              # warm end saturates at this value (cfs)
+flow_vmin: 1000             # cool end saturates at this value (cfs)
+flow_vmax: -1000              # warm end saturates at this value (cfs)
 
 # ---- Flow arrows (one per channel) -----------------------------------------
 # position: 0.0 = upstream end, 0.5 = midpoint, 1.0 = downstream end
@@ -41,13 +41,21 @@ arrows:
     position: 0.0
     label: "Vernalis"
 
+  - channel: 6
+    position: 0.15
+    label: "San Joaquin River @ Mossdale"
+
   - channel: 11
     position: 0.5
-    label: "San Joaquin River upstream of Stockton"
+    label: "San Joaquin River @ Brandt Bridge"
 
-  - channel: 57
-    position: 0.5
-    label: "Old River downstream of Head of Old River"
+  - channel: 56
+    position: 1.0
+    label: "Old River @ Head of Old River"
+
+  - channel: 8
+    position: 0.99
+    label: "San Joaquin River downstream of Head of Old River"
 
   - channel: 209
     position: 0.5
@@ -78,20 +86,52 @@ arrows:
     label: "Freeport"
 
   - channel: 420
-    position: 0.5
-    label: "Sacramento Below Sutter/Steamboat Slough"
+    position: 0.8
+    label: "Sacramento Above Cross Channel"
 
-  - channel: 424
-    position: 0.5
+  - channel: 426
+    position: 1.0
     label: "Sacramento River past Cross Channel"
 
   - channel: 386
-    position: 0.5
+    position: 0
     label: "Sutter and Steamboat Slough"
+
+  - channel: 398
+    position: 0
+    label: "Yolo Bypass below Cache Slough"
+
+  - channel: 409
+    position: 0
+    label: "Cache Slough"
 
   - channel: 430
     position: 0.5
     label: "Sacramento River @ Rio Vista"
+
+  - channel: 372
+    position: 0.05
+    label: "Georgiana Slough"
+
+  - channel: 362
+    position: 0.95
+    label: "Mokelumne River below Cross Channel"
+
+  - channel: 341
+    position: 0.5
+    label: "South Mokelumne River below Cross Channel"
+
+  - channel: 247
+    position: 0.5
+    label: "Rock Slough"
+
+  - channel: 159
+    position: 0.5
+    label: "San Joaquin River To Middle River"
+
+  - channel: 124
+    position: 0.5
+    label: "San Joaquin River To Franks Tract"
 
   - channel: 348
     position: 0.5
@@ -101,12 +141,12 @@ arrows:
     position: 0.5
     label: "Sacramento River @ Emmaton"
 
-  - channel: 83
+  - channel: 49
     position: 0.5
     label: "San Joaquin River @ Jersey Point"
 
   - channel: 310
-    position: 0.5
+    position: 1.0
     label: "Three Mile Slough"
 
   - channel: 441
@@ -117,29 +157,37 @@ arrows:
     position: 0.5
     label: "San Joaquin River @ Stockton"
 
-  - channel: 96
+  - channel: 117
     position: 0.5
-    label: "Old River"
+    label: "Franks Tract to Old River"
 
-  - channel: 140
-    position: 0.5
-    label: "Middle River"
+  - channel: 119
+    position: 0.8
+    label: "Franks Tract to Middle River"
+
+  - channel: 96
+    position: 0.05
+    label: "Old River @ OMR"
+
+  - channel: 143
+    position: 0.1
+    label: "Middle River @ OMR"
 
   - channel: 173
     position: 0.5
     label: "Turner Cut"
 
-  #- channel: 216
-  #  position: 0.5
-  #  label: "CVP Intake"
+  - channel: 196
+    position: 0.1
+    label: "Paradise Cut"
 
-  - channel: 75
-    position: 0.5
-    label: "Old River"
+  - channel: 71
+    position: 0.75
+    label: "Old River @ Tracy"
 
-  - channel: 130
-    position: 0.5
-    label: "Middle River"
+  - channel: 126
+    position: 0.9
+    label: "Middle River @ Undine"
 
 # ---- Junction flow-split bars (one per node) --------------------------------
 # channels: null  → all channels connected to the node are shown
