@@ -77,9 +77,25 @@ arrows:
     position: 0.5
     label: "Freeport"
 
-  - channel: 349
+  - channel: 420
     position: 0.5
-    label: "Georgiana Slough"
+    label: "Sacramento Below Sutter/Steamboat Slough"
+
+  - channel: 424
+    position: 0.5
+    label: "Sacramento River past Cross Channel"
+
+  - channel: 386
+    position: 0.5
+    label: "Sutter and Steamboat Slough"
+
+  - channel: 430
+    position: 0.5
+    label: "Sacramento River @ Rio Vista"
+
+  - channel: 348
+    position: 0.5
+    label: "Cross Delta Flow"
 
   - channel: 434
     position: 0.5
@@ -97,13 +113,21 @@ arrows:
     position: 0.5
     label: "Martinez"
 
-  - channel: 101
+  - channel: 21
+    position: 0.5
+    label: "San Joaquin River @ Stockton"
+
+  - channel: 96
     position: 0.5
     label: "Old River"
 
-  - channel: 144
+  - channel: 140
     position: 0.5
     label: "Middle River"
+
+  - channel: 173
+    position: 0.5
+    label: "Turner Cut"
 
   #- channel: 216
   #  position: 0.5

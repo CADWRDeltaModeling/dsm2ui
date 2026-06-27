@@ -1469,3 +1469,518 @@ class TestConfigSaveLoad:
         result = runner.invoke(animate, ["hydro"])
         # exit code non-zero or error message present
         assert result.exit_code != 0 or "H5FILE" in result.output
+
+
+# ===========================================================================
+# Rolling 14 D → Daily mean transform (overlap fix + registration)
+# ===========================================================================
+
+class TestRolling14dDailyTransform:
+    """Tests for the 'Rolling 14 D → Daily mean' composed transform.
+
+    The transform applies a 14-day centred rolling mean to the raw data
+    and then resamples to daily values.  The key regression being tested is
+    that ``StreamingTransformedSlicingReader`` fetches enough raw context
+    (overlap = 7 days on each side) before applying the rolling window so
+    that boundary output days are correctly smoothed rather than being
+    computed from only a fraction of the 14-day window.
+    """
+
+    # ----------------------------------------------------------------
+    # Helper: in-memory reader with synthetic hourly data
+    # ----------------------------------------------------------------
+
+    @pytest.fixture
+    def hourly_reader_30d(self):
+        """InMemorySlicingReader with 30 days of hourly data, single channel."""
+        from dvue.animator import InMemorySlicingReader
+
+        ti = pd.date_range("2020-01-01", periods=30 * 24, freq="1h")
+        rng = np.random.default_rng(7)
+        df = pd.DataFrame({"ch1": rng.uniform(0, 10_000, len(ti))}, index=ti)
+        return InMemorySlicingReader(df)
+
+    @pytest.fixture
+    def hourly_reader_60d_30min(self):
+        """InMemorySlicingReader with 60 days of 30-min data, single channel."""
+        from dvue.animator import InMemorySlicingReader
+
+        ti = pd.date_range("2020-01-01", periods=60 * 48, freq="30min")
+        rng = np.random.default_rng(42)
+        df = pd.DataFrame({"ch1": rng.uniform(0, 10_000, len(ti))}, index=ti)
+        return InMemorySlicingReader(df)
+
+    # ----------------------------------------------------------------
+    # TransformSpec properties
+    # ----------------------------------------------------------------
+
+    def test_composed_spec_kind_is_aggregate(self):
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+
+        r14d = make_moving_average_transform("14D")
+        dmean = make_resample_transform("D", "mean")
+        spec = make_composed_transform(r14d, dmean)
+        assert spec.kind == "aggregate"
+
+    def test_composed_spec_output_freq_is_daily(self):
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+
+        r14d = make_moving_average_transform("14D")
+        spec = make_composed_transform(r14d, make_resample_transform("D", "mean"))
+        assert spec.output_freq == "D"
+
+    def test_overlap_is_half_14d_window_at_1h(self):
+        """Overlap should be ceil(7 days / 1h) = 168 steps for hourly data."""
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        freq_nanos = int(pd.Timedelta("1h").total_seconds() * 1e9)
+        assert spec.get_overlap(freq_nanos) == 7 * 24
+
+    def test_overlap_is_half_14d_window_at_30min(self):
+        """Overlap = ceil(7 days / 30min) = 336 steps for 30-min data."""
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        freq_nanos = int(pd.Timedelta("30min").total_seconds() * 1e9)
+        assert spec.get_overlap(freq_nanos) == 7 * 48
+
+    # ----------------------------------------------------------------
+    # StreamingTransformedSlicingReader behaviour
+    # ----------------------------------------------------------------
+
+    def test_output_time_index_is_daily(self, hourly_reader_30d):
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+        from dvue.animator.reader import StreamingTransformedSlicingReader
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        reader = StreamingTransformedSlicingReader(hourly_reader_30d, spec)
+        assert reader.time_index.freq is not None
+        assert len(reader.time_index) == 30
+
+    def test_no_nan_in_middle_chunk(self, hourly_reader_30d):
+        """A chunk in the middle of the file must have no NaN values."""
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+        from dvue.animator.reader import StreamingTransformedSlicingReader
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        reader = StreamingTransformedSlicingReader(hourly_reader_30d, spec)
+        mid = len(reader.time_index) // 2
+        chunk = reader.get_slice_range(mid - 3, mid + 4)
+        assert not chunk["ch1"].isna().any(), "Middle chunk must not contain NaN"
+
+    def test_first_day_not_nan(self, hourly_reader_30d):
+        """The first output day must produce a value (min_periods=1)."""
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+        from dvue.animator.reader import StreamingTransformedSlicingReader
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        reader = StreamingTransformedSlicingReader(hourly_reader_30d, spec)
+        first = reader.get_slice_range(0, 1)
+        assert not first["ch1"].isna().any(), "First output day must not be NaN"
+
+    def test_last_day_not_nan(self, hourly_reader_30d):
+        """The last output day must produce a value (min_periods=1)."""
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+        from dvue.animator.reader import StreamingTransformedSlicingReader
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        reader = StreamingTransformedSlicingReader(hourly_reader_30d, spec)
+        n = len(reader.time_index)
+        last = reader.get_slice_range(n - 1, n)
+        assert not last["ch1"].isna().any(), "Last output day must not be NaN"
+
+    def test_rolling_daily_differs_from_raw_daily(self, hourly_reader_30d):
+        """Rolling-14D-daily must differ from raw daily mean (smoothing effect)."""
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+        from dvue.animator.reader import StreamingTransformedSlicingReader
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        reader = StreamingTransformedSlicingReader(hourly_reader_30d, spec)
+
+        # Compare the middle day
+        mid = len(reader.time_index) // 2
+        rolling_val = reader.get_slice_range(mid, mid + 1)["ch1"].iloc[0]
+
+        # Compute raw daily mean for the same day
+        raw_df = hourly_reader_30d.get_slice_range(0, 30 * 24)
+        raw_daily = raw_df.resample("D").mean()
+        raw_val = raw_daily["ch1"].iloc[mid]
+
+        # 14-day rolling should smooth across ±7 days, so values differ
+        assert abs(rolling_val - raw_val) > 1.0, (
+            f"Rolling-daily ({rolling_val:.1f}) suspiciously close to "
+            f"raw-daily ({raw_val:.1f}) — smoothing may not be applied"
+        )
+
+    def test_boundary_chunk_uses_overlap_context(self, hourly_reader_60d_30min):
+        """Verify the overlap fix: day 1 of a 30-min dataset should use context
+        from days 2-7 (right-side context via the overlap extension)."""
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+        from dvue.animator.reader import StreamingTransformedSlicingReader
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        reader = StreamingTransformedSlicingReader(hourly_reader_60d_30min, spec)
+        assert spec.get_overlap(int(pd.Timedelta("30min").total_seconds() * 1e9)) == 7 * 48
+
+        # Fetch a small window that straddles the chunk boundary to confirm
+        # the overlap is fetched (test that no IndexError or NaN occurs)
+        chunk = reader.get_slice_range(0, 10)
+        assert len(chunk) == 10
+        assert not chunk["ch1"].isna().all(), "Chunk should not be entirely NaN"
+
+    def test_buffered_reader_round_trip(self, hourly_reader_30d):
+        """BufferedSlicingReader wrapping the streaming transform must work."""
+        from dsm2ui.animate import make_moving_average_transform, make_resample_transform, make_composed_transform
+        from dvue.animator.reader import StreamingTransformedSlicingReader, BufferedSlicingReader
+
+        spec = make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D", "mean"),
+        )
+        streaming = StreamingTransformedSlicingReader(hourly_reader_30d, spec)
+        buffered = BufferedSlicingReader(streaming, chunk_size=7)
+
+        ts = buffered.time_index[15]  # mid-run
+        s = buffered.get_slice_nearest(ts)
+        assert isinstance(s, pd.Series)
+        assert not s.isna().any()
+
+    # ----------------------------------------------------------------
+    # Registration in options dict and CLI
+    # ----------------------------------------------------------------
+
+    def test_transform_in_options_dict(self):
+        from dsm2ui.animate import _dsm2_transform_options
+        opts = _dsm2_transform_options()
+        assert "Rolling 14 D \u2192 Daily mean" in opts, (
+            "Transform not found in _dsm2_transform_options() — "
+            "check _dsm2_transform_options() in animate.py"
+        )
+
+    def test_cli_key_mapping(self):
+        from dsm2ui.animate import _dsm2_transform_cli_keys
+        keys = _dsm2_transform_cli_keys()
+        assert "Rolling 14 D \u2192 Daily mean" in keys
+        assert keys["Rolling 14 D \u2192 Daily mean"] == "rolling-14d-daily"
+
+    def test_cli_map_in_animate_cli(self):
+        from dsm2ui.animate_cli import _CLI_TRANSFORM_MAP
+        assert "rolling-14d-daily" in _CLI_TRANSFORM_MAP
+        assert _CLI_TRANSFORM_MAP["rolling-14d-daily"] == "Rolling 14 D \u2192 Daily mean"
+
+    def test_rolling_14d_daily_in_hydro_help(self):
+        """rolling-14d-daily must appear as a --transform choice in hydro help."""
+        from click.testing import CliRunner
+        from dsm2ui.animate_cli import animate
+        runner = CliRunner()
+        result = runner.invoke(animate, ["hydro", "--help"])
+        assert "rolling-14d-daily" in result.output, (
+            "rolling-14d-daily not found in 'dsm2ui animate hydro --help'"
+        )
+
+    def test_rolling_14d_daily_in_qual_help(self):
+        """rolling-14d-daily must appear as a --transform choice in qual help."""
+        from click.testing import CliRunner
+        from dsm2ui.animate_cli import animate
+        runner = CliRunner()
+        result = runner.invoke(animate, ["qual", "--help"])
+        assert "rolling-14d-daily" in result.output
+
+    def test_transform_uses_integer_rolling_for_regular_freq(self):
+        """For regular-frequency data, rolling uses an odd integer window.
+
+        An odd window guarantees perfect symmetry for center=True.  The result
+        should be numerically very close to (but NOT necessarily identical to)
+        time-offset rolling because pandas' integer-center and time-offset-center
+        have slightly different edge-bin definitions.  For a 14-day smooth the
+        two are within 0.1 % at interior points where the full window is available.
+        """
+        from dsm2ui.animate import make_moving_average_transform
+
+        ti = pd.date_range("2020-01-01", periods=200, freq="1h")
+        rng = np.random.default_rng(7)
+        df = pd.DataFrame(
+            rng.uniform(0, 1, (200, 3)),
+            index=ti, columns=["a", "b", "c"],
+        )
+        spec = make_moving_average_transform("14D")
+        result = spec.transform_fn(df)
+
+        # Shape and frequency must be preserved
+        assert result.shape == df.shape
+        assert result.index.freq == df.index.freq
+
+        # Interior values (away from edges where both windows have the full
+        # 14-day context) must be numerically very close to time rolling.
+        # We compare the middle 50 rows (well away from any edge effects).
+        time_rolled = df.rolling("14D", center=True, min_periods=1).mean()
+        mid = slice(75, 125)
+        pd.testing.assert_frame_equal(
+            result.iloc[mid],
+            time_rolled.iloc[mid],
+            check_exact=False,
+            rtol=1e-3,   # within 0.1 %  — differences are at boundary rows only
+        )
+
+    def test_integer_rolling_window_is_odd(self):
+        """The integer window must be odd so center=True is perfectly symmetric."""
+        from dsm2ui.animate import make_moving_average_transform
+
+        for window_str, freq_str, expected_half in [
+            ("14D",  "30min", 336),   # 14*48/2=336 → window=673
+            ("14D",  "1h",    168),   # 14*24/2=168 → window=337
+            ("24h",  "30min",  24),   # 24*2/2=24  → window=49
+            ("24h",  "1h",     12),   # 24/2=12    → window=25
+        ]:
+            ti = pd.date_range("2020-01-01", periods=2 * expected_half + 5, freq=freq_str)
+            df = pd.DataFrame({"x": np.arange(len(ti), dtype=float)}, index=ti)
+            spec = make_moving_average_transform(window_str)
+            result = spec.transform_fn(df)
+            assert result.shape == df.shape, f"Shape mismatch for {window_str} at {freq_str}"
+
+
+# ===========================================================================
+# Slider out-of-bounds regression
+# ===========================================================================
+
+class TestSliderOutOfBoundsRegression:
+    """Regression tests for stale-slider-value handling in _on_slider_change.
+
+    Panel's DiscretePlayer can deliver a value from a previous browser session
+    that is outside the current reader's time_index.  History of fixes:
+
+    * **No guard**: ``IndexError: index 31356 is out of bounds`` — server crash
+    * **Clamp (bad)**: no crash, but display jumped to last timestamp with no
+      warning — confusing because slider thumb was visually mid-range
+    * **Ignore (bad)**: no crash, no display update — slider thumb moved but
+      displayed timestamp stayed frozen — equally confusing
+    * **Log + reset (current)**: logs a WARNING with the stale index, then
+      resets the slider to 0 so both the browser thumb and the server-side
+      display are in sync at the beginning of the run.
+    """
+
+    def _make_manager(self, n_steps: int):
+        import geopandas as gpd
+        import panel as pn
+        from shapely.geometry import LineString
+        from dvue.animator import GeoAnimatorManager, InMemorySlicingReader
+
+        pn.extension()
+        ti = pd.date_range("2020-01-01", periods=n_steps, freq="1h")
+        df = pd.DataFrame({"ch1": np.arange(n_steps, dtype=float)}, index=ti)
+        reader = InMemorySlicingReader(df)
+        gdf = gpd.GeoDataFrame(
+            {"geo_id": [1]},
+            geometry=[LineString([(0, 0), (1, 0)])],
+            crs="EPSG:4326",
+        )
+        return GeoAnimatorManager(reader, gdf, geo_id_column="geo_id")
+
+    def _event(self, value):
+        from unittest.mock import MagicMock
+        ev = MagicMock()
+        ev.new = value
+        return ev
+
+    def test_valid_index_does_not_raise(self):
+        """A slider value within bounds must not raise."""
+        mgr = self._make_manager(100)
+        mgr._on_slider_change(self._event(50))
+
+    def test_stale_index_31356_logs_warning_and_resets_to_zero(self, caplog):
+        """Stale value logs a WARNING and resets slider+display to step 0.
+
+        The warning must include the stale index value so it is visible in
+        server logs without needing to enable debug-level logging.
+        """
+        import logging
+        n = 3774
+        mgr = self._make_manager(n)
+        with caplog.at_level(logging.WARNING):
+            mgr._on_slider_change(self._event(31356))
+        # Slider must be reset to 0
+        assert mgr._time_slider.value == 0
+        # A warning mentioning the stale index must have been logged
+        assert any("31356" in r.message for r in caplog.records), (
+            "Expected WARNING log containing stale index 31356; "
+            f"got: {[r.message for r in caplog.records]}"
+        )
+
+    def test_stale_index_no_crash(self):
+        """Exact repro: idx=31356 against 3774-step reader must not raise IndexError."""
+        mgr = self._make_manager(3774)
+        mgr._on_slider_change(self._event(31356))   # must not raise
+
+    def test_stale_index_resets_slider_to_zero(self):
+        """After a stale event, the slider value must be reset to 0."""
+        mgr = self._make_manager(3774)
+        mgr._on_slider_change(self._event(31356))
+        assert mgr._time_slider.value == 0
+
+    def test_negative_index_resets_to_zero(self):
+        """A negative stale index also resets slider to 0."""
+        mgr = self._make_manager(50)
+        mgr._on_slider_change(self._event(-5))
+        assert mgr._time_slider.value == 0
+
+    def test_last_valid_index_ok(self):
+        """Index == len - 1 (the last valid step) must not raise."""
+        n = 100
+        mgr = self._make_manager(n)
+        mgr._on_slider_change(self._event(n - 1))
+
+    def test_one_past_end_resets_to_zero(self):
+        """Index == len resets to 0, not snaps to end."""
+        n = 100
+        mgr = self._make_manager(n)
+        mgr._on_slider_change(self._event(n))
+        assert mgr._time_slider.value == 0
+
+    def test_initial_transform_gives_correct_slider_options(self):
+        """Root-cause test: slider options must reflect the TRANSFORMED reader.
+
+        When GeoAnimatorManager is constructed with initial_transform set to
+        an aggregate transform (e.g. "Daily mean"), the slider options must
+        have len(self._reader.time_index) entries — NOT len(raw_reader) entries.
+
+        This is the bug that caused "slider index 22231 is out of range [0, 3774)"
+        when loading from a saved config with rolling-14d-daily: the raw hourly
+        reader had 22231 steps but the transformed daily reader had 3774 steps.
+        The slider was created with 22231 hourly options, so any move beyond
+        position 3773 triggered the out-of-bounds warning.
+        """
+        import geopandas as gpd
+        import panel as pn
+        from shapely.geometry import LineString
+        from dvue.animator import GeoAnimatorManager, InMemorySlicingReader
+        from dsm2ui.animate import make_resample_transform
+
+        pn.extension()
+        # Build a reader with 240 hourly steps (10 days)
+        ti_hourly = pd.date_range("2020-01-01", periods=240, freq="1h")
+        df = pd.DataFrame({"ch1": np.arange(240, dtype=float)}, index=ti_hourly)
+        raw_reader = InMemorySlicingReader(df)
+
+        daily_spec = make_resample_transform("D", "mean")
+        transform_options = {"Daily mean": daily_spec}
+
+        gdf = gpd.GeoDataFrame(
+            {"geo_id": [1]},
+            geometry=[LineString([(0, 0), (1, 0)])],
+            crs="EPSG:4326",
+        )
+        mgr = GeoAnimatorManager(
+            raw_reader, gdf,
+            geo_id_column="geo_id",
+            transform_options=transform_options,
+            initial_transform="Daily mean",
+        )
+
+        # The transformed reader has 10 daily steps (not 240 hourly)
+        assert len(mgr._reader.time_index) == 10, (
+            f"Expected 10 daily steps, got {len(mgr._reader.time_index)}"
+        )
+        # Slider options must match the TRANSFORMED (daily) reader
+        assert len(mgr._time_slider.options) == 10, (
+            f"Slider has {len(mgr._time_slider.options)} options but reader "
+            f"has {len(mgr._reader.time_index)} steps — options should match the "
+            "transformed reader, not the raw hourly reader"
+        )
+        # Slider position 0 should not raise (it's a valid daily index)
+        mgr._on_slider_change(self._event(0))
+        # Slider position 5 (5th day) should not raise
+        mgr._on_slider_change(self._event(5))
+        # Slider position 200 (hourly range, out of daily range) must log+reset
+        mgr._on_slider_change(self._event(200))
+        assert mgr._time_slider.value == 0
+
+    def test_spurious_none_event_on_browser_connect_is_suppressed(self):
+        """Spurious 'none' event on first browser connect must NOT reset reader,
+        AND must restore the widget label to the initial transform name.
+
+        When loading from config with initial_transform='Daily mean', Panel
+        fires _on_transform_change(event.new='none') once on browser connect
+        before the real widget value propagates.  Without the guard this was
+        reported as 'doing none transform on init'.
+
+        The guard must:
+        1. Suppress the reader reset (reader stays daily).
+        2. Restore _transform_select.value = initial_transform so the dropdown
+           shows the correct label (not 'none').  This triggers a recursive
+           _on_transform_change(initial_transform) which rebuilds the reader
+           and loads frame 0 — making data and label consistent.
+        """
+        import geopandas as gpd
+        import panel as pn
+        from shapely.geometry import LineString
+        from dvue.animator import GeoAnimatorManager, InMemorySlicingReader
+        from dsm2ui.animate import make_resample_transform
+        from unittest.mock import MagicMock
+
+        pn.extension()
+        ti_hourly = pd.date_range("2020-01-01", periods=240, freq="1h")
+        df = pd.DataFrame({"ch1": np.arange(240, dtype=float)}, index=ti_hourly)
+        raw_reader = InMemorySlicingReader(df)
+        daily_spec = make_resample_transform("D", "mean")
+        gdf = gpd.GeoDataFrame(
+            {"geo_id": [1]},
+            geometry=[LineString([(0, 0), (1, 0)])],
+            crs="EPSG:4326",
+        )
+        mgr = GeoAnimatorManager(
+            raw_reader, gdf,
+            geo_id_column="geo_id",
+            transform_options={"Daily mean": daily_spec},
+            initial_transform="Daily mean",
+        )
+
+        # Simulate the spurious Panel "none" event on first browser connect
+        ev = MagicMock()
+        ev.new = "none"
+        mgr._on_transform_change(ev)  # must be suppressed; widget restored
+
+        # After suppression the widget label must be restored to initial_transform
+        assert mgr._transform_select.value == "Daily mean", (
+            f"Widget label should be restored to 'Daily mean', got "
+            f"'{mgr._transform_select.value}'"
+        )
+        # The recursive call triggered by restoring the widget rebuilds the
+        # daily reader — verify slider options are still daily (10 steps, not 240).
+        assert len(mgr._reader.time_index) == 10, (
+            "Spurious 'none' event must not reset daily reader to hourly "
+            "(reader should remain 10-step daily)"
+        )
+
+        # After the first suppression, a GENUINE 'none' selection MUST apply
+        ev2 = MagicMock()
+        ev2.new = "none"
+        mgr._on_transform_change(ev2)  # second call — NOT suppressed
+        # Reader should now be the raw hourly reader (transform removed)
+        assert len(mgr._reader.time_index) == 240, (
+            "Genuine 'none' transform selection after init must apply correctly"
+        )

@@ -40,16 +40,17 @@ def _title_to_slug(title: str) -> str:
 
 
 _CLI_TRANSFORM_MAP = {
-    "none":             "none",
-    "daily":            "Daily mean",
-    "daily-min":        "Daily min",
-    "daily-max":        "Daily max",
-    "rolling-24h":      "Rolling 24 h",
-    "rolling-14d":      "Rolling 14 D",
-    "godin":            "Godin filter",
-    "godin-daily":      "Godin \u2192 Daily mean",
-    "godin-daily-min":  "Godin \u2192 Daily min",
-    "godin-daily-max":  "Godin \u2192 Daily max",
+    "none":               "none",
+    "daily":              "Daily mean",
+    "daily-min":          "Daily min",
+    "daily-max":          "Daily max",
+    "rolling-24h":        "Rolling 24 h",
+    "rolling-14d":        "Rolling 14 D",
+    "rolling-14d-daily":  "Rolling 14 D \u2192 Daily mean",
+    "godin":              "Godin filter",
+    "godin-daily":        "Godin \u2192 Daily mean",
+    "godin-daily-min":    "Godin \u2192 Daily min",
+    "godin-daily-max":    "Godin \u2192 Daily max",
 }
 
 
@@ -225,7 +226,7 @@ def animate():
 @click.option("--transform", default="none", show_default=True,
               type=click.Choice(
                   ["none", "daily", "daily-min", "daily-max",
-                   "rolling-24h", "rolling-14d",
+                   "rolling-24h", "rolling-14d", "rolling-14d-daily",
                    "godin", "godin-daily", "godin-daily-min", "godin-daily-max"],
                   case_sensitive=False),
               help="Time-domain transform to apply before animation.\n"
@@ -233,6 +234,7 @@ def animate():
                    "daily / daily-min / daily-max: daily resample (mean / min / max).\n"
                    "rolling-24h: 24 h centred rolling mean.\n"
                    "rolling-14d: 14-day centred rolling mean.\n"
+                   "rolling-14d-daily: 14-day rolling mean then daily mean.\n"
                    "godin: Godin tidal filter.\n"
                    "godin-daily / godin-daily-min / godin-daily-max: Godin then daily.")   
 @click.option("--config", "config_file", default=None,
@@ -363,7 +365,7 @@ def hydro_cmd(
 @click.option("--transform", default="none", show_default=True,
               type=click.Choice(
                   ["none", "daily", "daily-min", "daily-max",
-                   "rolling-24h", "rolling-14d",
+                   "rolling-24h", "rolling-14d", "rolling-14d-daily",
                    "godin", "godin-daily", "godin-daily-min", "godin-daily-max"],
                   case_sensitive=False),
               help="Time-domain transform (see hydro --help for details).")
