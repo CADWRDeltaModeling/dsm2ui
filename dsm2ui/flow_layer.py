@@ -207,25 +207,34 @@ class FlowLayerSpec:
         Flow arrows to display.
     bars : list of NodeBarSpec
         Junction flow-split bars to display.
+    variable : {"flow", "velocity"}, optional
+        Data source for arrows and bars.  ``"flow"`` (default) reads channel
+        flow (cfs) from the HYDRO HDF5; ``"velocity"`` reads velocity (ft/s)
+        computed as flow / cross-sectional area.  Use ``scale_mode: linear``
+        with velocity for physically meaningful arrow lengths.
     scale_mode : {"linear", "log"}, optional
         Arrow length scaling mode.  ``"linear"`` (default) scales length
-        linearly with ``|flow| / reference_flow``; ``"log"`` uses
-        log10(1 + |flow| / reference_flow).
+        linearly with ``|value| / reference``; ``"log"`` uses
+        log10(1 + |value| / reference).  ``"linear"`` is recommended when
+        *variable* is ``"velocity"``.
     reference_flow : float, optional
         Flow value in cfs that maps to *reference_arrow_length_m* (and
-        *bar_max_height_m*).  Default 10 000 cfs.
+        *bar_max_height_m*) when *variable* is ``"flow"``.  Default 10 000 cfs.
+    reference_velocity : float, optional
+        Velocity in ft/s that maps to *reference_arrow_length_m* when
+        *variable* is ``"velocity"``.  Default 2.5 ft/s.
     reference_arrow_length_m : float, optional
-        Arrow length in EPSG:3857 metres for *reference_flow*.  Default 500 m.
+        Arrow length in EPSG:3857 metres for the reference value.  Default 500 m.
     arrow_width_m : float, optional
         Arrow body half-width in metres.  Default 150 m.
     bar_width_m : float, optional
         Width of each bar side (inflow and outflow are separate sides) in
         metres.  Default 200 m.
     bar_max_height_m : float, optional
-        Bar height in metres for *reference_flow*.  Default 600 m.
+        Bar height in metres for the reference value.  Default 600 m.
     min_flow_cfs : float, optional
-        Flow magnitude (cfs) below which a stub symbol is rendered instead
-        of a full arrow.  Default 10 cfs.
+        Value magnitude below which a stub symbol is rendered instead of a
+        full arrow.  Default 10 (cfs for flow mode, ft/s for velocity mode).
     """
 
     arrows: List[ChannelArrowSpec] = dataclasses.field(default_factory=list)
@@ -239,9 +248,12 @@ class FlowLayerSpec:
     bar_width_m: float = 200.0
     bar_max_height_m: float = 600.0
     min_flow_cfs: float = 10.0
+    min_velocity_fps: float = 0.0    # ft/s — stub threshold in velocity mode (default 0 = no stubs)
     colormap: str = "coolwarm"  # diverging colormap: positive=warm, negative=cool
-    flow_vmin: Optional[float] = None  # colour lower bound (cfs); None = -reference_flow
-    flow_vmax: Optional[float] = None  # colour upper bound (cfs); None = +reference_flow
+    flow_vmin: Optional[float] = None  # colour lower bound; None = -reference value
+    flow_vmax: Optional[float] = None  # colour upper bound; None = +reference value
+    variable: str = "flow"             # "flow" | "velocity"
+    reference_velocity: float = 2.5   # ft/s → reference_arrow_length_m (velocity mode)
 
     @classmethod
     def from_yaml(cls, path: "str | Path") -> "FlowLayerSpec":
@@ -249,8 +261,10 @@ class FlowLayerSpec:
 
         YAML schema::
 
-            scale_mode: linear          # "linear" or "log"
-            reference_flow: 10000       # cfs
+            variable: flow              # "flow" (default) or "velocity"
+            reference_velocity: 2.5    # ft/s → reference_arrow_length_m (velocity mode)
+            scale_mode: linear          # "linear" or "log" ("linear" recommended for velocity)
+            reference_flow: 10000       # cfs (flow mode)
             reference_arrow_length_m: 500
             arrow_width_m: 150
             bar_width_m: 200
@@ -872,16 +886,42 @@ class FlowLayer:
     # Reader (lazy, transform-aware)
     # ----------------------------------------------------------------
 
+    @property
+    def _ref_scale(self) -> float:
+        """Scaling reference value: ``reference_velocity`` (ft/s) for velocity
+        mode or ``reference_flow`` (cfs) for flow mode."""
+        if getattr(self._spec, "variable", "flow") == "velocity":
+            return max(getattr(self._spec, "reference_velocity", 2.5), 1e-6)
+        return max(self._spec.reference_flow, 1.0)
+
+    @property
+    def _min_threshold(self) -> float:
+        """Stub threshold: ``min_velocity_fps`` (ft/s) in velocity mode, else ``min_flow_cfs`` (cfs)."""
+        if getattr(self._spec, "variable", "flow") == "velocity":
+            return getattr(self._spec, "min_velocity_fps", 0.0)
+        return self._spec.min_flow_cfs
+
     def _get_base_reader(self):
-        """Return the raw (untransformed) HydroH5FlowReader, built once."""
+        """Return the raw (untransformed) base reader, built once.
+
+        Creates :class:`~dsm2ui.animate.HydroH5VelocityReader` when
+        ``spec.variable`` is ``'velocity'``, otherwise
+        :class:`~dsm2ui.animate.HydroH5FlowReader`.
+        """
         if self._reader is not None and not hasattr(self, "_base_reader_raw"):
             # Legacy: reader was already built without base/transform split
             return None
         if not hasattr(self, "_base_reader_raw") or self._base_reader_raw is None:
-            from dsm2ui.animate import HydroH5FlowReader
-            self._base_reader_raw = HydroH5FlowReader(
-                self._hydro_h5_path, location="both"
-            )
+            if getattr(self._spec, "variable", "flow") == "velocity":
+                from dsm2ui.animate import HydroH5VelocityReader
+                self._base_reader_raw = HydroH5VelocityReader(
+                    self._hydro_h5_path, location="both"
+                )
+            else:
+                from dsm2ui.animate import HydroH5FlowReader
+                self._base_reader_raw = HydroH5FlowReader(
+                    self._hydro_h5_path, location="both"
+                )
         return self._base_reader_raw
 
     def _get_reader(self):
@@ -983,7 +1023,7 @@ class FlowLayer:
         except (AttributeError, KeyError):
             cmap = matplotlib.cm.get_cmap(self._spec.colormap)
 
-        ref  = max(self._spec.reference_flow, 1.0)
+        ref  = self._ref_scale
         vmin = self._spec.flow_vmin if self._spec.flow_vmin is not None else -ref
         vmax = self._spec.flow_vmax if self._spec.flow_vmax is not None else  ref
 
@@ -993,7 +1033,7 @@ class FlowLayer:
         if inverted:
             vmin, vmax = vmax, vmin   # normalise so TwoSlopeNorm gets valid args
 
-        if abs(flow) < self._spec.min_flow_cfs:
+        if abs(flow) < self._min_threshold:
             mapped = 0.5  # neutral mid-point for sub-threshold stubs
         else:
             try:
@@ -1020,6 +1060,10 @@ class FlowLayer:
         the ``"overlay"`` level so they appear above the channel colour patches.
         """
         # ---- Arrow patches ----
+        _is_vel = getattr(self._spec, "variable", "flow") == "velocity"
+        _val_label = "Velocity" if _is_vel else "Flow"
+        _val_fmt   = "@values{0,0.000} ft/s" if _is_vel else "@values{0,0.} cfs"
+
         self._arrow_source = ColumnDataSource({
             "xs": [], "ys": [],
             "values": [], "channel_ids": [], "labels": [], "directions": [],
@@ -1039,7 +1083,7 @@ class FlowLayer:
             tooltips=[
                 ("Arrow",     "@labels"),
                 ("Ch #",      "@channel_ids"),
-                ("Flow",      "@values{0,0.} cfs"),
+                (_val_label,  _val_fmt),
                 ("Direction", "@directions"),
             ],
         ))
@@ -1082,7 +1126,7 @@ class FlowLayer:
                 ("Node",      "@node_labels"),
                 ("Channel",   "ch @channel_ids"),
                 ("Direction", "@sides"),
-                ("Flow",      "@values{0,0.} cfs"),
+                (_val_label,  _val_fmt),
             ],
         ))
 
@@ -1105,7 +1149,7 @@ class FlowLayer:
                 renderers=[ext_renderer],
                 tooltips=[
                     ("Source",    "@labels"),
-                    ("Flow",      "@values{0,0.} cfs"),
+                    (_val_label,  _val_fmt),
                     ("Direction", "@directions"),
                 ],
             ))
@@ -1162,23 +1206,25 @@ class FlowLayer:
         # ---- Arrow update ----
         arr_xs, arr_ys, arr_vals, arr_chs, arr_labels, arr_dirs = [], [], [], [], [], []
         spec = self._spec
+        _ref = self._ref_scale
+        _min = self._min_threshold
         for ag in self._arrow_geoms:
             flow = flow_dict.get(ag.channel, 0.0)
             xs, ys, fval = _arrow_polygon(
                 ag.cx, ag.cy, ag.tx, ag.ty,
                 flow,
-                spec.reference_flow,
+                _ref,
                 spec.reference_arrow_length_m,
                 spec.arrow_width_m,
                 spec.scale_mode,
-                spec.min_flow_cfs,
+                _min,
             )
             arr_xs.append(xs)
             arr_ys.append(ys)
             arr_vals.append(round(fval, 1))
             arr_chs.append(ag.channel)
             arr_labels.append(ag.label or f"Ch {ag.channel}")
-            if abs(fval) < spec.min_flow_cfs:
+            if abs(fval) < _min:
                 arr_dirs.append("~ 0")
             elif fval > 0:
                 arr_dirs.append("\u2192 downstream")
@@ -1202,7 +1248,7 @@ class FlowLayer:
             for ag, fval in zip(self._arrow_geoms, arr_vals):
                 abs_f = abs(fval)
                 # Compact label: sub-1k shows integer, ≥1k shows "N.Nk"
-                if abs_f < spec.min_flow_cfs:
+                if abs_f < _min:
                     txt_texts.append("")
                     txt_xs.append(ag.cx)
                     txt_ys.append(ag.cy)
@@ -1218,7 +1264,7 @@ class FlowLayer:
                 # is clear space (head starts at 0.65L, tip at L).
                 L = _scaled_arrow_length(
                     abs_f,
-                    spec.reference_flow,
+                    _ref,
                     spec.reference_arrow_length_m,
                     spec.scale_mode,
                 )
@@ -1254,18 +1300,18 @@ class FlowLayer:
                 xs, ys, fval = _arrow_polygon(
                     eg.cx, eg.cy, eg.tx, eg.ty,
                     flow,
-                    spec.reference_flow,
+                    _ref,
                     spec.reference_arrow_length_m,
                     spec.arrow_width_m,
                     spec.scale_mode,
-                    spec.min_flow_cfs,
+                    _min,
                 )
                 ext_xs.append(xs)
                 ext_ys.append(ys)
                 ext_vals.append(round(fval, 1))
                 ext_labels.append(eg.label)
                 abs_f = abs(fval)
-                if abs_f < spec.min_flow_cfs:
+                if abs_f < _min:
                     ext_dirs.append("~ 0")
                 elif fval > 0:
                     ext_dirs.append("\u2192 outflow" if eg.source_type == "qext" else "\u2192 into reservoir")
@@ -1274,7 +1320,7 @@ class FlowLayer:
 
                 # Text label inside arrowhead
                 sign_d = 1.0 if fval >= 0.0 else -1.0
-                if abs_f < spec.min_flow_cfs:
+                if abs_f < _min:
                     ext_txt_texts.append("")
                     ext_txt_xs.append(eg.cx)
                     ext_txt_ys.append(eg.cy)
@@ -1284,7 +1330,7 @@ class FlowLayer:
                         f"{abs_f:.0f}" if abs_f < 1_000 else f"{abs_f / 1_000:.1f}k"
                     )
                     L = _scaled_arrow_length(
-                        abs_f, spec.reference_flow,
+                        abs_f, _ref,
                         spec.reference_arrow_length_m, spec.scale_mode,
                     )
                     ext_txt_xs.append(eg.cx + 0.15 * L * sign_d * eg.tx)
@@ -1314,9 +1360,8 @@ class FlowLayer:
             ch_flows = {conn.channel: flow_dict.get(conn.channel, 0.0) for conn in bg.connections}
             xs_l, ys_l, c_l, ch_l, v_l, s_l = _bar_segments(
                 bg.bx, bg.by, bg.connections, ch_flows,
-                spec.reference_flow, spec.bar_width_m, spec.bar_max_height_m,
+                _ref, spec.bar_width_m, spec.bar_max_height_m,
             )
-            n = len(xs_l)
             node_label = bg.label or f"Node {bg.node}"
             bar_xs.extend(xs_l)
             bar_ys.extend(ys_l)
@@ -1359,7 +1404,8 @@ class FlowLayer:
             value=self._spec.colormap,
             sizing_mode="stretch_width",
         )
-        ref = max(self._spec.reference_flow, 1.0)
+        _is_velocity = getattr(self._spec, "variable", "flow") == "velocity"
+        ref = self._ref_scale
         _vmin = self._spec.flow_vmin if self._spec.flow_vmin is not None else -ref
         _vmax = self._spec.flow_vmax if self._spec.flow_vmax is not None else  ref
         self._w_clim = pn.widgets.TextInput(
@@ -1374,8 +1420,8 @@ class FlowLayer:
             sizing_mode="stretch_width",
         )
         self._w_ref_flow = pn.widgets.FloatInput(
-            name="Reference flow (cfs)",
-            value=self._spec.reference_flow,
+            name="Reference velocity (ft/s)" if _is_velocity else "Reference flow (cfs)",
+            value=self._spec.reference_velocity if _is_velocity else self._spec.reference_flow,
             step=1_000.0,
             start=1.0,
             sizing_mode="stretch_width",
@@ -1402,9 +1448,9 @@ class FlowLayer:
             sizing_mode="stretch_width",
         )
         self._w_min_flow = pn.widgets.FloatInput(
-            name="Min flow stub (cfs)",
-            value=self._spec.min_flow_cfs,
-            step=10.0,
+            name="Min velocity stub (ft/s)" if _is_velocity else "Min flow stub (cfs)",
+            value=getattr(self._spec, "min_velocity_fps", 0.0) if _is_velocity else self._spec.min_flow_cfs,
+            step=0.1 if _is_velocity else 10.0,
             start=0.0,
             sizing_mode="stretch_width",
         )
@@ -1426,7 +1472,7 @@ class FlowLayer:
             pn.layout.Divider(margin=(2, 0, 2, 0)),
             self._w_bar_height,
             self._w_min_flow,
-            title="\U0001f9ed Flow Layer",
+            title="\U0001f9ed Velocity Layer" if _is_velocity else "\U0001f9ed Flow Layer",
             collapsed=True,
             sizing_mode="stretch_width",
         )
@@ -1437,11 +1483,17 @@ class FlowLayer:
             return
         self._spec.colormap             = self._w_colormap.value
         self._spec.scale_mode           = self._w_scale.value
-        self._spec.reference_flow       = float(self._w_ref_flow.value or 1)
+        if getattr(self._spec, "variable", "flow") == "velocity":
+            self._spec.reference_velocity   = float(self._w_ref_flow.value or 1)
+        else:
+            self._spec.reference_flow       = float(self._w_ref_flow.value or 1)
         self._spec.reference_arrow_length_m = float(self._w_arrow_length.value or 10)
         self._spec.arrow_width_m        = float(self._w_arrow_width.value or 10)
         self._spec.bar_max_height_m     = float(self._w_bar_height.value or 10)
-        self._spec.min_flow_cfs         = float(self._w_min_flow.value or 0)
+        if getattr(self._spec, "variable", "flow") == "velocity":
+            self._spec.min_velocity_fps = float(self._w_min_flow.value or 0)
+        else:
+            self._spec.min_flow_cfs     = float(self._w_min_flow.value or 0)
         # Parse "min, max" color range — reversed order (e.g. "1000, -1000") inverts
         # the colourmap, identical to the channel appearance colour range behaviour.
         try:

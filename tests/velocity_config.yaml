@@ -1,0 +1,187 @@
+# DSM2 Velocity Arrow Configuration
+# ====================================
+# Used with --velocity-config (mutually exclusive with --flow-config):
+#   dsm2ui animate hydro hydro.h5 --velocity-config velocity_config.yaml
+#   dsm2ui animate qual  ec.h5    --velocity-config velocity_config.yaml --hydro-h5 hydro.h5
+#
+# variable: velocity  — arrows are scaled by channel velocity (ft/s) = flow / area
+# scale_mode: linear  — arrow length is directly proportional to velocity
+# reference_velocity  — velocity (ft/s) that maps to reference_arrow_length_m
+#
+# When used with --velocity-config, the 'variable' field here is redundant but
+
+# ---- Variable ---------------------------------------------------------------
+variable: velocity            # dispatch HydroH5VelocityReader instead of FlowReader
+
+# ---- Scaling ----------------------------------------------------------------
+scale_mode: linear            # proportional: 1 ft/s shows at 1/3 of reference size
+reference_velocity: 3.0       # ft/s — velocity that maps to reference_arrow_length_m
+reference_arrow_length_m: 4000  # metres (EPSG:3857): arrow length at reference_velocity
+arrow_width_m: 900            # arrow body half-width in metres
+bar_max_height_m: 5000        # bar height at reference_velocity (junction bars)
+bar_width_m: 600              # each bar side width in metres
+
+# ---- Colour mapping ---------------------------------------------------------
+# Diverging colormap: positive (ebb) → warm end, negative (flood) → cool end.
+colormap: coolwarm
+
+# Colour range in ft/s.  Values outside this range saturate at the extremes.
+# Zero is pinned to the neutral midpoint (TwoSlopeNorm).
+flow_vmin: -3.0               # flood (negative) saturation threshold in ft/s
+flow_vmax:  3.0               # ebb  (positive) saturation threshold in ft/s
+
+# ---- Velocity arrows (one per channel) -------------------------------------
+# position: 0.0 = upstream end, 0.5 = midpoint, 1.0 = downstream end
+# Arrow direction flips automatically with tidal sign.
+arrows:
+  - channel: 17
+    position: 0.0
+    label: "Vernalis"
+
+  - channel: 6
+    position: 0.15
+    label: "San Joaquin River @ Mossdale"
+
+  - channel: 11
+    position: 0.5
+    label: "San Joaquin River @ Brandt Bridge"
+
+  - channel: 56
+    position: 1.0
+    label: "Old River @ Head of Old River"
+
+  - channel: 8
+    position: 0.99
+    label: "San Joaquin River downstream of Head of Old River"
+
+  - channel: 209
+    position: 0.5
+    label: "Grantline Canal"
+
+  - channel: 228
+    position: 0.5
+    label: "Victoria Canal"
+
+  - channel: 279
+    position: 0.5
+    label: "False River"
+
+  - channel: 437
+    position: 0.5
+    label: "Chipps Island"
+
+  - channel: 513
+    position: 0.3
+    label: "Montezuma Slough @ National Steel"
+
+  - channel: 523
+    position: 0.5
+    label: "Montezuma Slough @ Beldons Landing"
+
+  - channel: 414
+    position: 0.5
+    label: "Freeport"
+
+  - channel: 420
+    position: 0.8
+    label: "Sacramento Above Cross Channel"
+
+  - channel: 426
+    position: 1.0
+    label: "Sacramento River past Cross Channel"
+
+  - channel: 386
+    position: 0.0
+    label: "Sutter and Steamboat Slough"
+
+  - channel: 398
+    position: 0.0
+    label: "Yolo Bypass below Cache Slough"
+
+  - channel: 409
+    position: 0.0
+    label: "Cache Slough"
+
+  - channel: 430
+    position: 0.5
+    label: "Sacramento River @ Rio Vista"
+
+  - channel: 372
+    position: 0.05
+    label: "Georgiana Slough"
+
+  - channel: 362
+    position: 0.95
+    label: "Mokelumne River below Cross Channel"
+
+  - channel: 341
+    position: 0.5
+    label: "South Mokelumne River below Cross Channel"
+
+  - channel: 247
+    position: 0.5
+    label: "Rock Slough"
+
+  - channel: 159
+    position: 0.5
+    label: "San Joaquin River To Middle River"
+
+  - channel: 124
+    position: 0.5
+    label: "San Joaquin River To Franks Tract"
+
+  - channel: 348
+    position: 0.5
+    label: "Cross Delta Flow"
+
+  - channel: 434
+    position: 0.5
+    label: "Sacramento River @ Emmaton"
+
+  - channel: 49
+    position: 0.5
+    label: "San Joaquin River @ Jersey Point"
+
+  - channel: 310
+    position: 1.0
+    label: "Three Mile Slough"
+
+  - channel: 441
+    position: 0.5
+    label: "Martinez"
+
+  - channel: 21
+    position: 0.5
+    label: "San Joaquin River @ Stockton"
+
+  - channel: 117
+    position: 0.5
+    label: "Franks Tract to Old River"
+
+  - channel: 119
+    position: 0.8
+    label: "Franks Tract to Middle River"
+
+  - channel: 96
+    position: 0.05
+    label: "Old River @ OMR"
+
+  - channel: 143
+    position: 0.1
+    label: "Middle River @ OMR"
+
+  - channel: 173
+    position: 0.5
+    label: "Turner Cut"
+
+  - channel: 196
+    position: 0.1
+    label: "Paradise Cut"
+
+  - channel: 71
+    position: 0.75
+    label: "Old River @ Tracy"
+
+  - channel: 126
+    position: 0.9
+    label: "Middle River @ Undine"

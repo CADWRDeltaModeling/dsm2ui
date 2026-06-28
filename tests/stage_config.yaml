@@ -1,0 +1,232 @@
+# DSM2 Stage Deviation Bar Configuration
+# =======================================
+# Used with:
+#   dsm2ui animate hydro hydro.h5 --variable stage --stage-config stage_config.yaml
+#   dsm2ui animate qual  ec.h5    --stage-config stage_config.yaml --hydro-h5 hydro.h5
+#
+# Each bar shows the deviation of instantaneous stage from a user-supplied mean.
+# Bars above mean are steelblue (high water), below mean are crimson (low water).
+# Bar height is proportional to deviation; reference_stage_range_ft sets the
+# deviation that fills bar_max_height_m.
+#
+# NOTE ON mean_stage_ft UNITS
+# ============================
+# The --variable stage reader returns WATER-SURFACE ELEVATION in feet
+# above datum (ft NAVD88), NOT depth above the channel bottom.
+# (The raw HDF5 "channel stage" dataset stores depth; dsm2ui automatically
+# corrects it by adding /hydro/geometry/channel_bottom.  See DSM2 issue #164.)
+#
+# mean_stage_ft MUST be a datum-referenced elevation (ft NAVD88 or NGVD29),
+# not a depth.  Compute it as the temporal mean of the corrected stage over
+# your calibration period using e.g.:
+#
+#   from pydsm.output.hydroh5 import HydroH5
+#   h5 = HydroH5("hydro.h5")
+#   s = h5.get_channel_stage(channel_id="17", location_id="upstream",
+#                             timewindow="01OCT2014 - 30SEP2017")
+#   mean_stage_ft = float(s.mean())
+#
+# Placeholder values below are approximate NAVD88 means for the FC/MSS grid.
+# Replace with values computed from your actual HDF5 file.
+
+# ---- Scaling ----------------------------------------------------------------
+bar_width_m: 300                 # bar width in metres (EPSG:3857)
+bar_max_height_m: 600            # bar height at ±reference_stage_range_ft
+reference_stage_range_ft: 3.0    # stage deviation (ft) that fills bar_max_height_m
+show_labels: true
+
+# ---- Stage bars (one per channel) ------------------------------------------
+# position: 0.0 = upstream end, 0.5 = midpoint, 1.0 = downstream end
+# mean_stage_ft: reference water-surface ELEVATION in ft NAVD88
+#   (computed as temporal mean of HydroH5StageReader output over first ~42 days
+#    of hist_fc_mss.h5; replace with your period-of-interest mean)
+bars:
+  - channel: 17
+    position: 0.0
+    label: "Vernalis"
+    mean_stage_ft: 5.78
+
+  - channel: 6
+    position: 0.15
+    label: "San Joaquin River @ Mossdale"
+    mean_stage_ft: 4.62
+
+  - channel: 11
+    position: 0.5
+    label: "San Joaquin River @ Brandt Bridge"
+    mean_stage_ft: 4.48
+
+  - channel: 56
+    position: 1.0
+    label: "Old River @ Head of Old River"
+    mean_stage_ft: 4.58
+
+  - channel: 8
+    position: 0.99
+    label: "San Joaquin River downstream of Head of Old River"
+    mean_stage_ft: 4.59
+
+  - channel: 209
+    position: 0.5
+    label: "Grantline Canal"
+    mean_stage_ft: 4.22
+
+  - channel: 228
+    position: 0.5
+    label: "Victoria Canal"
+    mean_stage_ft: 4.28
+
+  - channel: 279
+    position: 0.5
+    label: "False River"
+    mean_stage_ft: 4.40
+
+  - channel: 437
+    position: 0.5
+    label: "Chipps Island"
+    mean_stage_ft: 4.33
+
+  - channel: 513
+    position: 0.3
+    label: "Montezuma Slough @ National Steel"
+    mean_stage_ft: 4.43
+
+  - channel: 523
+    position: 0.5
+    label: "Montezuma Slough @ Beldons Landing"
+    mean_stage_ft: 4.28
+
+  - channel: 414
+    position: 0.5
+    label: "Freeport"
+    mean_stage_ft: 5.40
+
+  - channel: 420
+    position: 0.8
+    label: "Sacramento Above Cross Channel"
+    mean_stage_ft: 4.77
+
+  - channel: 426
+    position: 1.0
+    label: "Sacramento River past Cross Channel"
+    mean_stage_ft: 4.52
+
+  - channel: 386
+    position: 0.0
+    label: "Sutter and Steamboat Slough"
+    mean_stage_ft: 4.54
+
+  - channel: 398
+    position: 0.0
+    label: "Yolo Bypass below Cache Slough"
+    mean_stage_ft: 4.37
+
+  - channel: 409
+    position: 0.0
+    label: "Cache Slough"
+    mean_stage_ft: 4.37
+
+  - channel: 430
+    position: 0.5
+    label: "Sacramento River @ Rio Vista"
+    mean_stage_ft: 4.37
+
+  - channel: 372
+    position: 0.05
+    label: "Georgiana Slough"
+    mean_stage_ft: 4.51
+
+  - channel: 362
+    position: 0.95
+    label: "Mokelumne River below Cross Channel"
+    mean_stage_ft: 4.49
+
+  - channel: 341
+    position: 0.5
+    label: "South Mokelumne River below Cross Channel"
+    mean_stage_ft: 4.44
+
+  - channel: 247
+    position: 0.5
+    label: "Rock Slough"
+    mean_stage_ft: 4.38
+
+  - channel: 159
+    position: 0.5
+    label: "San Joaquin River To Middle River"
+    mean_stage_ft: 4.39
+
+  - channel: 124
+    position: 0.5
+    label: "San Joaquin River To Franks Tract"
+    mean_stage_ft: 4.40
+
+  - channel: 348
+    position: 0.5
+    label: "Cross Delta Flow"
+    mean_stage_ft: 4.45
+
+  - channel: 434
+    position: 0.5
+    label: "Sacramento River @ Emmaton"
+    mean_stage_ft: 4.33
+
+  - channel: 49
+    position: 0.5
+    label: "San Joaquin River @ Jersey Point"
+    mean_stage_ft: 4.40
+
+  - channel: 310
+    position: 1.0
+    label: "Three Mile Slough"
+    mean_stage_ft: 4.40
+
+  - channel: 441
+    position: 0.5
+    label: "Martinez"
+    mean_stage_ft: 4.22
+
+  - channel: 21
+    position: 0.5
+    label: "San Joaquin River @ Stockton"
+    mean_stage_ft: 4.40
+
+  - channel: 117
+    position: 0.5
+    label: "Franks Tract to Old River"
+    mean_stage_ft: 4.40
+
+  - channel: 119
+    position: 0.8
+    label: "Franks Tract to Middle River"
+    mean_stage_ft: 4.40
+
+  - channel: 96
+    position: 0.05
+    label: "Old River @ OMR"
+    mean_stage_ft: 4.36
+
+  - channel: 143
+    position: 0.1
+    label: "Middle River @ OMR"
+    mean_stage_ft: 4.36
+
+  - channel: 173
+    position: 0.5
+    label: "Turner Cut"
+    mean_stage_ft: 4.39
+
+  - channel: 196
+    position: 0.1
+    label: "Paradise Cut"
+    mean_stage_ft: 4.55
+
+  - channel: 71
+    position: 0.75
+    label: "Old River @ Tracy"
+    mean_stage_ft: 4.52
+
+  - channel: 126
+    position: 0.9
+    label: "Middle River @ Undine"
+    mean_stage_ft: 4.51

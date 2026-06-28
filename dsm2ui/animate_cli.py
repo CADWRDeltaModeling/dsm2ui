@@ -193,6 +193,17 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
     diff = cfg.get("diff", {})
     if hasattr(mgr, "_show_diff_check") and diff.get("show"):
         mgr._show_diff_check.value = True
+    # Layout orientation (MultiGeoAnimatorManager only)
+    if hasattr(mgr, "_orientation_select") and "layout_orientation" in cfg:
+        val = str(cfg["layout_orientation"]).capitalize()
+        if val in ("Horizontal", "Vertical"):
+            mgr._orientation_select.value = val
+    # Sidebar collapsed state (both single and multi managers)
+    if hasattr(mgr, "_sidebar_toggle") and "sidebar_collapsed" in cfg:
+        collapsed = bool(cfg["sidebar_collapsed"])
+        mgr._sidebar_toggle.value = not collapsed
+        mgr._controls.visible = not collapsed
+        mgr._sidebar_toggle.name = "\u25ba" if collapsed else "\u25c4"
 
 
 @click.group(name="animate", context_settings=CONTEXT_SETTINGS)
@@ -216,8 +227,11 @@ def animate():
 @click.argument("h5files", nargs=-1, required=False,
                 type=click.Path(exists=True, dir_okay=False, readable=True))
 @click.option("--variable", default="flow", show_default=True,
-              type=click.Choice(["flow", "stage", "velocity"], case_sensitive=False),
-              help="Tidefile variable to animate.")
+              type=click.Choice(["flow", "stage", "depth", "velocity"], case_sensitive=False),
+              help="Tidefile variable to animate.  "
+                   "'stage' = water-surface elevation (ft NAVD, depth + channel bottom). "
+                   "'depth' = raw water depth above channel bottom (ft, from HDF5 directly). "
+                   "See DSM2 issue #164.")
 @click.option("--location", default="both", show_default=True,
               type=click.Choice(["both", "upstream", "downstream"], case_sensitive=False),
               help="Channel location ('both' averages upstream and downstream).")
@@ -243,17 +257,26 @@ def animate():
                    "H5FILES and other options are not required when --config is used.")
 @click.option("--flow-config", "flow_config_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
-              help="YAML file defining flow arrows and junction bars to overlay. "
+              help="YAML file defining flow (cfs) arrows and junction bars to overlay. "
                    "See FlowLayerSpec.from_yaml() for the schema.  "
                    "The flow layer reads flow from the first H5FILE and mirrors "
-                   "the active transform.")
+                   "the active transform.  Mutually exclusive with --velocity-config.")
+@click.option("--velocity-config", "velocity_config_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="YAML file defining velocity (ft/s) arrows to overlay. "
+                   "Equivalent to --flow-config but automatically sets variable=velocity. "
+                   "Mutually exclusive with --flow-config.")
 @click.option("--nodes-file", "flow_nodes_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
-              help="Override bundled nodes GeoJSON/shapefile for flow bars.")
+              help="Override bundled nodes GeoJSON/shapefile for flow/velocity bars.")
+@click.option("--stage-config", "stage_config_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="YAML file defining stage deviation bars to overlay. "
+                   "See StageLayerSpec.from_yaml() for the schema.")
 @_add_common_options
 def hydro_cmd(
     h5files, variable, location, show_diff, transform, config_file,
-    flow_config_file, flow_nodes_file,
+    flow_config_file, velocity_config_file, flow_nodes_file, stage_config_file,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
@@ -295,10 +318,18 @@ def hydro_cmd(
         raise click.UsageError("At most 2 H5FILE arguments are supported.")
     multi = len(h5files) == 2
 
-    # Validate flow overlay options (single-file only)
-    if flow_config_file and multi:
+    # Resolve --flow-config / --velocity-config (mutually exclusive)
+    if flow_config_file and velocity_config_file:
         raise click.UsageError(
-            "Flow overlay (--flow-config) is only supported with a single HYDRO file."
+            "--flow-config and --velocity-config are mutually exclusive."
+        )
+    _overlay_config_file = velocity_config_file or flow_config_file
+    _overlay_is_velocity = velocity_config_file is not None
+
+    # Validate flow overlay options (single-file only)
+    if _overlay_config_file and multi:
+        raise click.UsageError(
+            "Flow/velocity overlay is only supported with a single HYDRO file."
         )
 
     effective_title = title or (
@@ -328,9 +359,15 @@ def hydro_cmd(
         else:
             from dsm2ui.animate import animate_hydro
             _flow_spec = None
-            if flow_config_file:
+            if _overlay_config_file:
                 from dsm2ui.flow_layer import FlowLayerSpec
-                _flow_spec = FlowLayerSpec.from_yaml(flow_config_file)
+                _flow_spec = FlowLayerSpec.from_yaml(_overlay_config_file)
+                if _overlay_is_velocity:
+                    _flow_spec.variable = "velocity"
+            _stage_spec = None
+            if stage_config_file:
+                from dsm2ui.stage_layer import StageLayerSpec
+                _stage_spec = StageLayerSpec.from_yaml(stage_config_file)
             mgr = animate_hydro(
                 h5files[0],
                 variable=variable, location=location,
@@ -339,6 +376,7 @@ def hydro_cmd(
                 channel_id_column=channel_id_column,
                 flow_spec=_flow_spec,
                 nodes_file=flow_nodes_file,
+                stage_spec=_stage_spec,
                 vmin=vmin, vmax=vmax, colormap=colormap,
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
@@ -419,19 +457,28 @@ def hydro_cmd(
               help="Load all settings from a YAML config file saved by the UI.")
 @click.option("--flow-config", "flow_config_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
-              help="YAML file defining flow arrows and junction bars to overlay. "
+              help="YAML file defining flow (cfs) arrows and junction bars to overlay. "
                    "See FlowLayerSpec.from_yaml() for the schema.  "
-                   "Requires --hydro-h5.  The flow config is shared between both "
-                   "panels when animating two QUAL files.")
+                   "Requires --hydro-h5.  Mutually exclusive with --velocity-config.")
+@click.option("--velocity-config", "velocity_config_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="YAML file defining velocity (ft/s) arrows to overlay. "
+                   "Equivalent to --flow-config but automatically sets variable=velocity. "
+                   "Requires --hydro-h5.  Mutually exclusive with --flow-config.")
 @click.option("--hydro-h5", "flow_hydro_h5", multiple=True,
               type=click.Path(exists=True, dir_okay=False),
-              help="HYDRO HDF5 tidefile(s) for the flow overlay layer. "
+              help="HYDRO HDF5 tidefile(s) for the flow/velocity overlay layer. "
                    "Pass once for a single QUAL file, or twice (in the same order "
                    "as the QUAL files) when animating two QUAL files side-by-side. "
-                   "Required when --flow-config is given.")
+                   "Required when --flow-config or --velocity-config is given.")
 @click.option("--nodes-file", "flow_nodes_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
-              help="Override bundled nodes GeoJSON/shapefile for flow bars.")
+              help="Override bundled nodes GeoJSON/shapefile for flow/velocity bars.")
+@click.option("--stage-config", "stage_config_file", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="YAML file defining stage deviation bars to overlay. "
+                   "See StageLayerSpec.from_yaml() for the schema. "
+                   "Requires --hydro-h5.")
 @_add_common_options
 def qual_cmd(
     h5files, constituent, x2_threshold, show_diff, transform,
@@ -441,7 +488,7 @@ def qual_cmd(
     compare_correction,
     resample_freq, resample_agg,
     config_file,
-    flow_config_file, flow_hydro_h5, flow_nodes_file,
+    flow_config_file, velocity_config_file, flow_hydro_h5, flow_nodes_file, stage_config_file,
     port, desktop, shapefile, vmin, vmax, colormap, title, size, simplify,
     channel_id_column, log_level,
 ):
@@ -522,19 +569,27 @@ def qual_cmd(
         raise click.UsageError("At most 2 H5FILE arguments are supported.")
     multi = len(h5files) == 2
 
-    # Validate flow overlay options
-    if flow_config_file and not flow_hydro_h5:
+    # Resolve --flow-config / --velocity-config (mutually exclusive)
+    if flow_config_file and velocity_config_file:
         raise click.UsageError(
-            "--hydro-h5 is required when --flow-config is given."
+            "--flow-config and --velocity-config are mutually exclusive."
         )
-    if flow_hydro_h5 and not flow_config_file:
+    _overlay_config_file = velocity_config_file or flow_config_file
+    _overlay_is_velocity = velocity_config_file is not None
+
+    # Validate overlay options
+    if _overlay_config_file and not flow_hydro_h5:
         raise click.UsageError(
-            "--flow-config is required when --hydro-h5 is given."
+            "--hydro-h5 is required when --flow-config or --velocity-config is given."
         )
-    if flow_config_file and multi and len(flow_hydro_h5) not in (1, 2):
+    if flow_hydro_h5 and not _overlay_config_file:
+        raise click.UsageError(
+            "--flow-config or --velocity-config is required when --hydro-h5 is given."
+        )
+    if _overlay_config_file and multi and len(flow_hydro_h5) not in (1, 2):
         raise click.UsageError(
             "Pass --hydro-h5 twice (once per QUAL file) when animating two "
-            "QUAL files with a flow overlay."
+            "QUAL files with a flow/velocity overlay."
         )
 
     # ------------------------------------------------------------------
@@ -649,9 +704,11 @@ def qual_cmd(
             from dsm2ui.animate import animate_qual_multi
             _flow_spec_multi = None
             _hydro_paths_multi = None
-            if flow_config_file:
+            if _overlay_config_file:
                 from dsm2ui.flow_layer import FlowLayerSpec
-                _flow_spec_multi = FlowLayerSpec.from_yaml(flow_config_file)
+                _flow_spec_multi = FlowLayerSpec.from_yaml(_overlay_config_file)
+                if _overlay_is_velocity:
+                    _flow_spec_multi.variable = "velocity"
                 # Accept 1 shared hydro h5 (applied to both panels) or 2 separate ones.
                 if len(flow_hydro_h5) == 1:
                     _hydro_paths_multi = [flow_hydro_h5[0], flow_hydro_h5[0]]
@@ -671,9 +728,9 @@ def qual_cmd(
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
             # Patch collect_state to persist the flow config path in saved YAML
-            if flow_config_file:
+            if _overlay_config_file:
                 import os as _os
-                _fc_multi = _os.path.abspath(flow_config_file)
+                _fc_multi = _os.path.abspath(_overlay_config_file)
                 _nf_multi = _os.path.abspath(flow_nodes_file) if flow_nodes_file else None
                 _orig_cs_multi = mgr.collect_state
                 def _cs_with_flow_multi(
@@ -688,9 +745,16 @@ def qual_cmd(
         else:
             from dsm2ui.animate import animate_qual
             _flow_spec = None
-            if flow_config_file:
+            if _overlay_config_file:
                 from dsm2ui.flow_layer import FlowLayerSpec
-                _flow_spec = FlowLayerSpec.from_yaml(flow_config_file)
+                _flow_spec = FlowLayerSpec.from_yaml(_overlay_config_file)
+                if _overlay_is_velocity:
+                    _flow_spec.variable = "velocity"
+            _stage_spec = None
+            if stage_config_file:
+                from dsm2ui.stage_layer import StageLayerSpec
+                _stage_spec = StageLayerSpec.from_yaml(stage_config_file)
+            _hydro_h5 = flow_hydro_h5[0] if flow_hydro_h5 else None
             mgr = animate_qual(
                 h5files[0],
                 constituent=constituent,
@@ -699,16 +763,17 @@ def qual_cmd(
                 channel_id_column=channel_id_column,
                 x2_threshold=x2_threshold,
                 flow_spec=_flow_spec,
-                hydro_h5_path=flow_hydro_h5[0] if flow_hydro_h5 else None,
+                hydro_h5_path=_hydro_h5,
                 nodes_file=flow_nodes_file,
+                stage_spec=_stage_spec,
                 vmin=vmin, vmax=vmax, colormap=colormap,
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
             # Patch collect_state() to persist the flow layer paths in saved YAML
-            if flow_config_file:
+            if _overlay_config_file:
                 import os as _os
-                _fc = _os.path.abspath(flow_config_file)
+                _fc = _os.path.abspath(_overlay_config_file)
                 _hh = _os.path.abspath(flow_hydro_h5[0])
                 _nf = _os.path.abspath(flow_nodes_file) if flow_nodes_file else None
                 _orig_cs = mgr.collect_state

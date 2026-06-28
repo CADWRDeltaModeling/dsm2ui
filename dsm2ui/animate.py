@@ -307,13 +307,72 @@ class HydroH5FlowReader(_DSM2BaseH5Reader):
         return pd.DataFrame(values, index=timestamps, columns=self._channel_numbers)
 
 
-class HydroH5StageReader(HydroH5FlowReader):
-    """SlicingReader for DSM2 HYDRO tidefile channel stage (water depth, ft).
+class HydroH5DepthReader(HydroH5FlowReader):
+    """SlicingReader for DSM2 HYDRO tidefile channel **depth** above channel bottom (ft).
 
-    Same interface as :class:`HydroH5FlowReader` but reads stage data.
+    Reads ``/hydro/data/channel stage`` which — despite the dataset name — stores
+    water depth above the channel bottom, **not** stage (elevation above datum).
+    See DSM2 issue #164.  Use :class:`HydroH5StageReader` for true water-surface
+    elevation above datum.
     """
 
     _DATASET = "/hydro/data/channel stage"
+
+
+class HydroH5StageReader(HydroH5DepthReader):
+    """SlicingReader for true DSM2 channel stage = depth + channel bottom elevation (ft NAVD).
+
+    ``/hydro/data/channel stage`` stores water **depth** above the channel bottom
+    (DSM2 issue #164).  This reader corrects for that by adding the per-channel,
+    per-location minimum bed elevation from ``/hydro/geometry/channel_bottom``,
+    yielding water-surface elevation above datum (ft NAVD88 or NGVD29).
+
+    Use :class:`HydroH5DepthReader` if you want the raw depth values instead.
+    """
+
+    def __init__(
+        self,
+        filepath: "str | Path",
+        location: str = "both",
+    ) -> None:
+        super().__init__(filepath, location)
+        # channel_bottom shape: (n_locations=2, n_channels)
+        # Transpose to (n_channels, n_locations=2) to match per-timestep slice layout
+        cb_raw = self._h5["/hydro/geometry/channel_bottom"][:]  # (2, n_ch)
+        self._channel_bottom: np.ndarray = cb_raw.T.astype(float)  # (n_ch, 2)
+        # Recompute vmin/vmax using corrected values (base class used raw depth)
+        n = min(20, self._ds.shape[0])
+        data = self._ds[:n].astype(float)
+        data[data < -1e20] = np.nan
+        data += self._channel_bottom[np.newaxis, :, :]   # broadcast: (1, n_ch, 2)
+        if not np.all(np.isnan(data)):
+            self._vmin = float(np.nanmin(data))
+            self._vmax = float(np.nanmax(data))
+
+    def _bottom_correction(self) -> np.ndarray:
+        """Return 1-D correction array of shape (n_channels,) for the active location."""
+        loc_idx = self._location_index()
+        if loc_idx is None:
+            return np.nanmean(self._channel_bottom, axis=1)  # average u/d
+        return self._channel_bottom[:, loc_idx]
+
+    def get_slice(self, timestamp: pd.Timestamp) -> pd.Series:
+        depth_series = super().get_slice(timestamp)
+        correction = pd.Series(
+            self._bottom_correction(),
+            index=self._channel_numbers,
+            dtype=float,
+        )
+        return depth_series + correction
+
+    def get_slice_range(self, start_idx: int, end_idx: int) -> pd.DataFrame:
+        depth_df = super().get_slice_range(start_idx, end_idx)
+        correction = pd.Series(
+            self._bottom_correction(),
+            index=self._channel_numbers,
+            dtype=float,
+        )
+        return depth_df + correction
 
 
 class HydroH5VelocityReader(_DSM2BaseH5Reader):
@@ -1976,6 +2035,7 @@ def animate_hydro(
     channel_id_column: "str | None" = None,
     flow_spec: "Optional[dsm2ui.flow_layer.FlowLayerSpec]" = None,
     nodes_file: "str | Path | None" = None,
+    stage_spec: "Optional[dsm2ui.stage_layer.StageLayerSpec]" = None,
     **mgr_kwargs,
 ) -> "dvue.animator.GeoAnimatorManager":
     """Create a :class:`~dvue.animator.GeoAnimatorManager` for HYDRO channel data.
@@ -1997,6 +2057,9 @@ def animate_hydro(
     nodes_file : str or Path or None, optional
         Alternative nodes GeoJSON/shapefile for the flow overlay.  Defaults to
         the bundled DSM2 8.2 nodes GeoJSON.
+    stage_spec : StageLayerSpec or None, optional
+        When provided, a :class:`~dsm2ui.stage_layer.StageLayer` is overlaid
+        showing per-channel stage deviation bars.  Reads stage from *h5file*.
     **mgr_kwargs
         Forwarded to :class:`~dvue.animator.GeoAnimatorManager`.
     """
@@ -2007,10 +2070,12 @@ def animate_hydro(
         reader = HydroH5FlowReader(h5file, location=location)
     elif variable == "stage":
         reader = HydroH5StageReader(h5file, location=location)
+    elif variable == "depth":
+        reader = HydroH5DepthReader(h5file, location=location)
     elif variable == "velocity":
         reader = HydroH5VelocityReader(h5file, location=location)
     else:
-        raise ValueError(f"variable must be 'flow', 'stage', or 'velocity', got {variable!r}")
+        raise ValueError(f"variable must be 'flow', 'stage', 'depth', or 'velocity', got {variable!r}")
 
     gdf = load_dsm2_channel_gdf(
         shapefile,
@@ -2050,6 +2115,15 @@ def animate_hydro(
         mgr.add_transform_callback(flow_layer.set_transform)
         flow_layer.update_frame(mgr._reader.time_index[0])
         mgr._controls.append(flow_layer.create_control_card())
+
+    # ---- Optional stage bars overlay ----
+    if stage_spec is not None:
+        from dsm2ui.stage_layer import StageLayer
+        stage_layer = StageLayer(h5file, stage_spec, gdf)
+        stage_layer.setup_on_figure(mgr._bk_figure)
+        mgr.add_frame_callback(stage_layer.update_frame)
+        stage_layer.update_frame(mgr._reader.time_index[0])
+        mgr._controls.append(stage_layer.create_control_card())
 
     return mgr
 
@@ -2176,6 +2250,7 @@ def animate_qual(
     flow_spec: "Optional[dsm2ui.flow_layer.FlowLayerSpec]" = None,
     hydro_h5_path: "str | Path | None" = None,
     nodes_file: "str | Path | None" = None,
+    stage_spec: "Optional[dsm2ui.stage_layer.StageLayerSpec]" = None,
     **mgr_kwargs,
 ) -> "dvue.animator.GeoAnimatorManager":
     """Create a :class:`~dvue.animator.GeoAnimatorManager` for QUAL/GTM concentrations.
@@ -2204,6 +2279,9 @@ def animate_qual(
     nodes_file : str or Path or None, optional
         Alternative nodes GeoJSON/shapefile for the flow overlay.  Defaults to
         the bundled DSM2 8.2 nodes GeoJSON.
+    stage_spec : StageLayerSpec or None, optional
+        When provided, a :class:`~dsm2ui.stage_layer.StageLayer` is overlaid
+        showing per-channel stage deviation bars.  Requires *hydro_h5_path*.
     **mgr_kwargs
         Forwarded to :class:`~dvue.animator.GeoAnimatorManager`.
     """
@@ -2212,6 +2290,10 @@ def animate_qual(
     if flow_spec is not None and hydro_h5_path is None:
         raise ValueError(
             "hydro_h5_path is required when flow_spec is provided."
+        )
+    if stage_spec is not None and hydro_h5_path is None:
+        raise ValueError(
+            "hydro_h5_path is required when stage_spec is provided."
         )
 
     reader = QualH5ConcentrationReader(h5file, constituent=constituent)
@@ -2257,6 +2339,15 @@ def animate_qual(
         # Trigger the first frame so arrows/bars appear immediately
         flow_layer.update_frame(mgr._reader.time_index[0])
         mgr._controls.append(flow_layer.create_control_card())
+
+    # ---- Optional stage bars overlay ----
+    if stage_spec is not None:
+        from dsm2ui.stage_layer import StageLayer
+        stage_layer = StageLayer(hydro_h5_path, stage_spec, gdf)
+        stage_layer.setup_on_figure(mgr._bk_figure)
+        mgr.add_frame_callback(stage_layer.update_frame)
+        stage_layer.update_frame(mgr._reader.time_index[0])
+        mgr._controls.append(stage_layer.create_control_card())
 
     # Attach metadata so the Save config card can write a complete YAML.
     h5abs = str(Path(h5file).absolute())
@@ -2947,9 +3038,11 @@ def animate_hydro_multi(
             return HydroH5FlowReader(h5, location=location)
         if variable == "stage":
             return HydroH5StageReader(h5, location=location)
+        if variable == "depth":
+            return HydroH5DepthReader(h5, location=location)
         if variable == "velocity":
             return HydroH5VelocityReader(h5, location=location)
-        raise ValueError(f"variable must be flow/stage/velocity, got {variable!r}")
+        raise ValueError(f"variable must be flow/stage/depth/velocity, got {variable!r}")
 
     reader_a = _make_reader(h5file_a)
     reader_b = _make_reader(h5file_b)
