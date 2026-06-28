@@ -421,10 +421,13 @@ def hydro_cmd(
               type=click.Path(exists=True, dir_okay=False),
               help="YAML file defining flow arrows and junction bars to overlay. "
                    "See FlowLayerSpec.from_yaml() for the schema.  "
-                   "Requires --hydro-h5.")
-@click.option("--hydro-h5", "flow_hydro_h5", default=None,
+                   "Requires --hydro-h5.  The flow config is shared between both "
+                   "panels when animating two QUAL files.")
+@click.option("--hydro-h5", "flow_hydro_h5", multiple=True,
               type=click.Path(exists=True, dir_okay=False),
-              help="HYDRO HDF5 tidefile for the flow overlay layer. "
+              help="HYDRO HDF5 tidefile(s) for the flow overlay layer. "
+                   "Pass once for a single QUAL file, or twice (in the same order "
+                   "as the QUAL files) when animating two QUAL files side-by-side. "
                    "Required when --flow-config is given.")
 @click.option("--nodes-file", "flow_nodes_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
@@ -495,8 +498,18 @@ def qual_cmd(
         _flow_cfg = cfg.get("flow", {})
         if not flow_config_file and _flow_cfg.get("flow_config") and _flow_cfg.get("hydro_h5"):
             flow_config_file = _flow_cfg["flow_config"]
-            flow_hydro_h5    = _flow_cfg["hydro_h5"]
+            flow_hydro_h5    = (_flow_cfg["hydro_h5"],)
             flow_nodes_file  = _flow_cfg.get("nodes_file") or flow_nodes_file
+        # Restore hydro_h5_paths for multi-qual flow overlay from config
+        if not flow_hydro_h5 and cfg.get("hydro_h5_paths"):
+            _paths = [p for p in cfg["hydro_h5_paths"] if p]
+            if _paths:
+                flow_hydro_h5 = tuple(_paths)
+        # Restore flow_config for multi-qual case (saved as top-level key)
+        if not flow_config_file and cfg.get("flow_config"):
+            flow_config_file = cfg["flow_config"]
+            if not flow_nodes_file:
+                flow_nodes_file = cfg.get("flow_nodes_file") or flow_nodes_file
         log.info("Loaded config from %s (%d file(s))", config_file, len(h5files))
     elif not h5files:
         raise click.UsageError(
@@ -518,9 +531,10 @@ def qual_cmd(
         raise click.UsageError(
             "--flow-config is required when --hydro-h5 is given."
         )
-    if flow_config_file and multi:
+    if flow_config_file and multi and len(flow_hydro_h5) not in (1, 2):
         raise click.UsageError(
-            "Flow overlay (--flow-config) is only supported with a single QUAL file."
+            "Pass --hydro-h5 twice (once per QUAL file) when animating two "
+            "QUAL files with a flow overlay."
         )
 
     # ------------------------------------------------------------------
@@ -633,6 +647,16 @@ def qual_cmd(
                 )
         elif multi:
             from dsm2ui.animate import animate_qual_multi
+            _flow_spec_multi = None
+            _hydro_paths_multi = None
+            if flow_config_file:
+                from dsm2ui.flow_layer import FlowLayerSpec
+                _flow_spec_multi = FlowLayerSpec.from_yaml(flow_config_file)
+                # Accept 1 shared hydro h5 (applied to both panels) or 2 separate ones.
+                if len(flow_hydro_h5) == 1:
+                    _hydro_paths_multi = [flow_hydro_h5[0], flow_hydro_h5[0]]
+                else:
+                    _hydro_paths_multi = list(flow_hydro_h5)
             mgr = animate_qual_multi(
                 h5files[0], h5files[1],
                 constituent=constituent,
@@ -640,9 +664,27 @@ def qual_cmd(
                 simplify_tolerance=simplify,
                 channel_id_column=channel_id_column,
                 show_diff=show_diff,
+                hydro_h5_paths=_hydro_paths_multi,
+                flow_spec=_flow_spec_multi,
+                nodes_file=flow_nodes_file or None,
                 vmin=vmin, vmax=vmax, colormap=colormap, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
+            # Patch collect_state to persist the flow config path in saved YAML
+            if flow_config_file:
+                import os as _os
+                _fc_multi = _os.path.abspath(flow_config_file)
+                _nf_multi = _os.path.abspath(flow_nodes_file) if flow_nodes_file else None
+                _orig_cs_multi = mgr.collect_state
+                def _cs_with_flow_multi(
+                    _ocs=_orig_cs_multi, _fc=_fc_multi, _nf=_nf_multi,
+                ):
+                    state = _ocs()
+                    state["flow_config"] = _fc
+                    if _nf:
+                        state["flow_nodes_file"] = _nf
+                    return state
+                mgr.collect_state = _cs_with_flow_multi
         else:
             from dsm2ui.animate import animate_qual
             _flow_spec = None
@@ -657,7 +699,7 @@ def qual_cmd(
                 channel_id_column=channel_id_column,
                 x2_threshold=x2_threshold,
                 flow_spec=_flow_spec,
-                hydro_h5_path=flow_hydro_h5,
+                hydro_h5_path=flow_hydro_h5[0] if flow_hydro_h5 else None,
                 nodes_file=flow_nodes_file,
                 vmin=vmin, vmax=vmax, colormap=colormap,
                 title=effective_title, size=size,
@@ -667,7 +709,7 @@ def qual_cmd(
             if flow_config_file:
                 import os as _os
                 _fc = _os.path.abspath(flow_config_file)
-                _hh = _os.path.abspath(flow_hydro_h5)
+                _hh = _os.path.abspath(flow_hydro_h5[0])
                 _nf = _os.path.abspath(flow_nodes_file) if flow_nodes_file else None
                 _orig_cs = mgr.collect_state
                 def _cs_with_flow(

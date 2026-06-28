@@ -1462,10 +1462,23 @@ class FlowLayer:
         else:
             self.update_frame(ts)
 
+    def trigger_redraw(self, event=None) -> None:
+        """Re-render the current frame using the current spec.
 
-# ===========================================================================
-# FlowAnimatorManager — standalone Panel Viewer
-# ===========================================================================
+        Useful when an external actor updates ``_spec`` (e.g. a shared
+        control card) and needs to force a visual refresh without touching
+        widget state on this instance.
+        """
+        if self._last_ts is None or self._arrow_source is None:
+            return
+        ts = self._last_ts
+        doc = self._arrow_source.document
+        if doc is not None:
+            doc.add_next_tick_callback(lambda: self.update_frame(ts))
+        else:
+            self.update_frame(ts)
+
+
 
 class FlowAnimatorManager(pn.viewable.Viewer):
     """Standalone Panel Viewer for DSM2 flow arrows and junction bars.

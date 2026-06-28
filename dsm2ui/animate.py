@@ -1742,6 +1742,38 @@ def _make_resample_card(mgr) -> "pn.Card":
     )
 
 
+def _make_shared_flow_card(flow_a, flow_b) -> "pn.Card":
+    """Create one flow control card shared by two :class:`~dsm2ui.flow_layer.FlowLayer` instances.
+
+    *flow_a* hosts the Panel widgets.  Both layers share the same
+    :class:`~dsm2ui.flow_layer.FlowLayerSpec` object (passed as a common
+    *flow_spec* argument), so when a widget changes and *flow_a._on_spec_change*
+    mutates the spec, *flow_b* automatically uses the updated values —
+    it only needs to be told to re-render.
+
+    Parameters
+    ----------
+    flow_a, flow_b : FlowLayer
+        The two flow overlay instances.  Both must have been initialised with
+        the *same* ``FlowLayerSpec`` object.
+
+    Returns
+    -------
+    pn.Card
+        The control card; append it to ``mgr._controls``.
+    """
+    card = flow_a.create_control_card()
+    # After flow_a._on_spec_change fires and mutates the shared spec object,
+    # each widget watcher below fires and triggers a redraw on flow_b.
+    for w in (
+        flow_a._w_colormap, flow_a._w_clim, flow_a._w_scale, flow_a._w_ref_flow,
+        flow_a._w_arrow_length, flow_a._w_arrow_width,
+        flow_a._w_bar_height, flow_a._w_min_flow,
+    ):
+        w.param.watch(flow_b.trigger_redraw, "value")
+    return card
+
+
 def _add_resample_card_to_manager(mgr) -> None:
     """Patch ``collect_state`` so custom resample settings survive a
     Save Config → reload cycle.  The Resample card is intentionally not
@@ -2978,6 +3010,9 @@ def animate_qual_multi(
     show_diff: bool = False,
     title_a: "str | None" = None,
     title_b: "str | None" = None,
+    hydro_h5_paths: "list[str | Path | None] | None" = None,
+    flow_spec: "Optional[dsm2ui.flow_layer.FlowLayerSpec]" = None,
+    nodes_file: "str | Path | None" = None,
     **mgr_kwargs,
 ) -> "dvue.animator.MultiGeoAnimatorManager":
     """Create a :class:`~dvue.animator.MultiGeoAnimatorManager` for two QUAL files.
@@ -2993,11 +3028,31 @@ def animate_qual_multi(
     show_diff : bool, optional
         Start in diff (A − B) mode.  Default ``False``.
     title_a, title_b : str or None, optional
+    hydro_h5_paths : list of 2 paths or None, optional
+        HYDRO HDF5 tidefiles for the flow overlay, in the same order as
+        *h5file_a* / *h5file_b*.  Both elements may be ``None`` to skip the
+        overlay for that panel.  Ignored when *flow_spec* is ``None``.
+    flow_spec : FlowLayerSpec or None, optional
+        Common flow-layer configuration shared by both panels.  Requires
+        *hydro_h5_paths*.
+    nodes_file : str or Path or None, optional
+        Alternative nodes GeoJSON/shapefile for the flow overlay.  Defaults
+        to the bundled DSM2 8.2 nodes GeoJSON.
     **mgr_kwargs
         Forwarded to :class:`~dvue.animator.MultiGeoAnimatorManager`.
     """
     from dvue.animator import MultiGeoAnimatorManager
     from pathlib import Path as _Path
+
+    if flow_spec is not None and not hydro_h5_paths:
+        raise ValueError(
+            "hydro_h5_paths is required when flow_spec is provided."
+        )
+    if hydro_h5_paths is not None and len(hydro_h5_paths) != 2:
+        raise ValueError(
+            "hydro_h5_paths must be a list of exactly 2 elements "
+            "(one per qual h5 file), use None to skip a panel."
+        )
 
     reader_a = QualH5ConcentrationReader(h5file_a, constituent=constituent)
     reader_b = QualH5ConcentrationReader(h5file_b, constituent=constituent)
@@ -3022,9 +3077,48 @@ def animate_qual_multi(
         show_diff=show_diff,
         **mgr_kwargs,
     )
+
+    # ---- Optional flow overlays (one per panel) -------------------------
+    if flow_spec is not None:
+        from dsm2ui.flow_layer import FlowLayer
+        nodes_gdf = load_dsm2_nodes_gdf(nodes_file)
+        hydro_a, hydro_b = hydro_h5_paths[0], hydro_h5_paths[1]
+
+        flow_a_inst = None
+        flow_b_inst = None
+        for hydro_path, fig, panel_gdf, attr in (
+            (hydro_a, mgr._fig_a, gdf_a, "a"),
+            (hydro_b, mgr._fig_b, gdf_b, "b"),
+        ):
+            if hydro_path is None:
+                continue
+            fl = FlowLayer(hydro_path, flow_spec, panel_gdf, nodes_gdf)
+            fl.setup_on_figure(fig)
+            mgr.add_frame_callback(fl.update_frame)
+            mgr.add_transform_callback(fl.set_transform)
+            fl.update_frame(reader_a.time_index[0])
+            if attr == "a":
+                flow_a_inst = fl
+            else:
+                flow_b_inst = fl
+
+        # One shared control card regardless of how many panels are active.
+        if flow_a_inst is not None and flow_b_inst is not None:
+            mgr._controls.append(_make_shared_flow_card(flow_a_inst, flow_b_inst))
+        elif flow_a_inst is not None:
+            mgr._controls.append(flow_a_inst.create_control_card())
+        elif flow_b_inst is not None:
+            mgr._controls.append(flow_b_inst.create_control_card())
+
     # Attach metadata for the Save config card.
     sf_a_abs = str(_Path(sf_a).absolute()) if sf_a else None
     sf_b_abs = str(_Path(sf_b).absolute()) if sf_b and sf_b != sf_a else None
+    hydro_meta = None
+    if hydro_h5_paths is not None:
+        hydro_meta = [
+            str(_Path(p).absolute()) if p else None
+            for p in hydro_h5_paths
+        ]
     mgr._animate_meta = {
         "mode": "multi",
         "file_type": "qual",
@@ -3037,6 +3131,7 @@ def animate_qual_multi(
         "shapefile": sf_a_abs,
         "shapefile_b": sf_b_abs,
         "channel_id_column": channel_id_column,
+        "hydro_h5_paths": hydro_meta,
         "_transform_cli_keys": _dsm2_transform_cli_keys(),
     }
     mgr._config_path_input.value = str(
