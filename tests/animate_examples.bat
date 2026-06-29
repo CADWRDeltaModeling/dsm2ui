@@ -92,7 +92,7 @@ SET "VELOCITY_CONFIG=D:\dev\dsm2ui\tests\velocity_config.yaml"
 :: --- Stage overlay config ---------------------------------------------------
 ::   Schema: bar_width_m, bar_max_height_m, reference_stage_range_ft,
 ::           show_labels, bars:[{channel, position, label, mean_stage_ft}]
-SET "STAGE_CONFIG=D:\delta\stage_config.yaml"
+SET "STAGE_CONFIG=D:\dev\dsm2ui\tests\stage_config.yaml"
 :: --- Saved UI configs (YAML written by the browser UI's "Save config" button)
 SET "FC_ANIM_CFG=%FC_DIR%\hist_fc_mss_qual_EC_animate.yml"
 SET "FC_ANIM_OBS_CFG=%FC_DIR%\hist_fc_mss_qual_EC_animate_obs.yml"
@@ -417,7 +417,8 @@ dsm2ui animate qual "%FC_EC_H5%" --constituent ec ^
 ::   bar_width_m: 150                    # bar width in EPSG:3857 metres
 ::   bar_max_height_m: 600               # max bar height for reference deviation
 ::   reference_stage_range_ft: 3.0       # stage deviation (ft) that maps to max bar height
-::   show_labels: true
+::   show_range_box: true                # semi-transparent band showing ±reference_stage_range_ft
+::   show_labels: false                  # channel labels below reference tick (default: hidden)
 ::   bars:
 ::     - channel: 17                     # DSM2 channel number
 ::       position: 0.5                   # fractional position (0=upstream, 1=downstream)
@@ -432,8 +433,8 @@ dsm2ui animate qual "%FC_EC_H5%" --constituent ec ^
 :: /hydro/data/channel stage over the calibration period from the HDF5).
 :: Bars above the reference line are rendered blue; below are rendered red.
 ::
-:: NOTE: --stage-config requires --hydro-h5 and is only supported with a
-::       single QUAL or HYDRO file; two-file comparison mode does not support it.
+:: NOTE: --stage-config requires --hydro-h5.  For two-file QUAL comparison,
+::       pass --hydro-h5 twice (once per file); see Section 15 for examples.
 
 :: EC colours + flow arrows/bars + stage deviation bars — fullest single-file view:
 dsm2ui animate qual "%FC_EC_H5%" --constituent ec ^
@@ -472,13 +473,19 @@ dsm2ui animate qual "%FC_EC_H5%" --constituent ec --x2-threshold 2700 ^
 ::   YAML key:  layout_orientation: Horizontal   (panels left | right, default)
 ::              layout_orientation: Vertical      (panels top / bottom)
 ::
-:: NOTE: --stage-config is NOT supported with two QUAL files.
-::       For stage bars alongside a comparison use the single-file IDW workflow
-::       (Section 13) or the pre-corrected H5 pair approach (Section 10).
+:: Stage bars are supported with two QUAL files — pass --stage-config and --hydro-h5.
+:: The same StageLayerSpec is applied to both panels, each reading from its own HYDRO H5.
 
 :: Side-by-side with independent flow overlay per panel (most complete two-file view):
 dsm2ui animate qual "%FC_EC_H5%" "%V821_EC_H5%" --constituent ec ^
     --flow-config "%FLOW_CONFIG%" ^
+    --hydro-h5 "%FC_HYDRO_H5%" ^
+    --hydro-h5 "%V821_HYDRO_H5%"
+
+:: Side-by-side with independent flow and stage overlay per panel (most complete two-file view):
+dsm2ui animate qual "%FC_EC_H5%" "%V821_EC_H5%" --constituent ec ^
+    --flow-config "%FLOW_CONFIG%" ^
+    --stage-config "%STAGE_CONFIG%" ^
     --hydro-h5 "%FC_HYDRO_H5%" ^
     --hydro-h5 "%V821_HYDRO_H5%"
 
@@ -632,6 +639,8 @@ dsm2ui animate hydro "%FC_HYDRO_H5%" --variable stage --transform godin-daily ^
 ::
 :: NOTE: --stage-config is only supported with a single HYDRO file.
 
+:: Compute mean stage for each bar in the stage_config.yaml and write it back to the YAML (overwrites mean_stage_ft values):
+dsm2ui animate compute-stage-means "%FC_HYDRO_H5%" --stage-config "%STAGE_CONFIG%"
 :: Stage colour map + stage deviation bars (dual-view of the stage signal):
 dsm2ui animate hydro "%FC_HYDRO_H5%" --variable stage ^
     --stage-config "%STAGE_CONFIG%"

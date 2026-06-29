@@ -1824,12 +1824,19 @@ def _make_shared_flow_card(flow_a, flow_b) -> "pn.Card":
     card = flow_a.create_control_card()
     # After flow_a._on_spec_change fires and mutates the shared spec object,
     # each widget watcher below fires and triggers a redraw on flow_b.
+    # Alpha is a special case: it is applied directly to renderers, not via
+    # update_frame, so we need a dedicated sync callback.
+    def _sync_flow_alpha_b(event, _fb=flow_b):
+        _fb._spec.alpha = event.new / 100.0
+        _fb._apply_alpha(_fb._spec.alpha)
+
     for w in (
         flow_a._w_colormap, flow_a._w_clim, flow_a._w_scale, flow_a._w_ref_flow,
         flow_a._w_arrow_length, flow_a._w_arrow_width,
         flow_a._w_bar_height, flow_a._w_min_flow,
     ):
         w.param.watch(flow_b.trigger_redraw, "value")
+    flow_a._w_alpha.param.watch(_sync_flow_alpha_b, "value")
     return card
 
 
@@ -2115,6 +2122,7 @@ def animate_hydro(
         mgr.add_transform_callback(flow_layer.set_transform)
         flow_layer.update_frame(mgr._reader.time_index[0])
         mgr._controls.append(flow_layer.create_control_card())
+        mgr._flow_layer = flow_layer
 
     # ---- Optional stage bars overlay ----
     if stage_spec is not None:
@@ -2124,6 +2132,16 @@ def animate_hydro(
         mgr.add_frame_callback(stage_layer.update_frame)
         stage_layer.update_frame(mgr._reader.time_index[0])
         mgr._controls.append(stage_layer.create_control_card())
+        # Store on mgr so config save/load can access it
+        mgr._stage_layer = stage_layer
+        _orig_cs = mgr.collect_state
+
+        def _patched_cs_stage():
+            state = _orig_cs()
+            state["stage_bars"] = stage_layer.get_state_dict()
+            return state
+
+        mgr.collect_state = _patched_cs_stage
 
     return mgr
 
@@ -2339,6 +2357,7 @@ def animate_qual(
         # Trigger the first frame so arrows/bars appear immediately
         flow_layer.update_frame(mgr._reader.time_index[0])
         mgr._controls.append(flow_layer.create_control_card())
+        mgr._flow_layer = flow_layer
 
     # ---- Optional stage bars overlay ----
     if stage_spec is not None:
@@ -2348,6 +2367,16 @@ def animate_qual(
         mgr.add_frame_callback(stage_layer.update_frame)
         stage_layer.update_frame(mgr._reader.time_index[0])
         mgr._controls.append(stage_layer.create_control_card())
+        # Store on mgr so config save/load can access it
+        mgr._stage_layer = stage_layer
+        _orig_cs_qual = mgr.collect_state
+
+        def _patched_cs_stage_qual():
+            state = _orig_cs_qual()
+            state["stage_bars"] = stage_layer.get_state_dict()
+            return state
+
+        mgr.collect_state = _patched_cs_stage_qual
 
     # Attach metadata so the Save config card can write a complete YAML.
     h5abs = str(Path(h5file).absolute())
@@ -3106,6 +3135,7 @@ def animate_qual_multi(
     hydro_h5_paths: "list[str | Path | None] | None" = None,
     flow_spec: "Optional[dsm2ui.flow_layer.FlowLayerSpec]" = None,
     nodes_file: "str | Path | None" = None,
+    stage_spec: "Optional[dsm2ui.stage_layer.StageLayerSpec]" = None,
     **mgr_kwargs,
 ) -> "dvue.animator.MultiGeoAnimatorManager":
     """Create a :class:`~dvue.animator.MultiGeoAnimatorManager` for two QUAL files.
@@ -3131,6 +3161,11 @@ def animate_qual_multi(
     nodes_file : str or Path or None, optional
         Alternative nodes GeoJSON/shapefile for the flow overlay.  Defaults
         to the bundled DSM2 8.2 nodes GeoJSON.
+    stage_spec : StageLayerSpec or None, optional
+        Stage-bar configuration shared by both panels.  One
+        :class:`~dsm2ui.stage_layer.StageLayer` is created per panel using
+        the corresponding element of *hydro_h5_paths*.  Requires
+        *hydro_h5_paths*.
     **mgr_kwargs
         Forwarded to :class:`~dvue.animator.MultiGeoAnimatorManager`.
     """
@@ -3140,6 +3175,10 @@ def animate_qual_multi(
     if flow_spec is not None and not hydro_h5_paths:
         raise ValueError(
             "hydro_h5_paths is required when flow_spec is provided."
+        )
+    if stage_spec is not None and not hydro_h5_paths:
+        raise ValueError(
+            "hydro_h5_paths is required when stage_spec is provided."
         )
     if hydro_h5_paths is not None and len(hydro_h5_paths) != 2:
         raise ValueError(
@@ -3202,6 +3241,49 @@ def animate_qual_multi(
             mgr._controls.append(flow_a_inst.create_control_card())
         elif flow_b_inst is not None:
             mgr._controls.append(flow_b_inst.create_control_card())
+        mgr._flow_layer = flow_a_inst or flow_b_inst
+
+    # ---- Optional stage bars overlays (one per panel) -------------------
+    if stage_spec is not None:
+        from dsm2ui.stage_layer import StageLayer
+        hydro_a, hydro_b = hydro_h5_paths[0], hydro_h5_paths[1]
+        stage_a_inst = None
+        stage_b_inst = None
+        for hydro_path, fig, panel_gdf, attr in (
+            (hydro_a, mgr._fig_a, gdf_a, "a"),
+            (hydro_b, mgr._fig_b, gdf_b, "b"),
+        ):
+            if hydro_path is None:
+                continue
+            sl = StageLayer(hydro_path, stage_spec, panel_gdf)
+            sl.setup_on_figure(fig)
+            mgr.add_frame_callback(sl.update_frame)
+            sl.update_frame(reader_a.time_index[0])
+            if attr == "a":
+                stage_a_inst = sl
+            else:
+                stage_b_inst = sl
+
+        # One shared control card; widgets live on stage_a_inst.
+        primary = stage_a_inst or stage_b_inst
+        secondary = stage_b_inst if stage_a_inst is not None else None
+        if primary is not None:
+            card = primary.create_control_card()
+            # Propagate ALL widget changes (visibility, alpha, sizing, labels,
+            # range-box) from the primary card to the secondary panel.
+            if secondary is not None:
+                primary.link_to_secondary(secondary)
+            mgr._controls.append(card)
+            # Store primary on mgr for config save/load
+            mgr._stage_layer = primary
+            _orig_cs_ms = mgr.collect_state
+
+            def _patched_cs_stage_multi(_ocs=_orig_cs_ms, _sl=primary):
+                state = _ocs()
+                state["stage_bars"] = _sl.get_state_dict()
+                return state
+
+            mgr.collect_state = _patched_cs_stage_multi
 
     # Attach metadata for the Save config card.
     sf_a_abs = str(_Path(sf_a).absolute()) if sf_a else None

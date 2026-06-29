@@ -30,9 +30,10 @@
 # Replace with values computed from your actual HDF5 file.
 
 # ---- Scaling ----------------------------------------------------------------
-bar_width_m: 300                 # bar width in metres (EPSG:3857)
-bar_max_height_m: 600            # bar height at ±reference_stage_range_ft
-reference_stage_range_ft: 3.0    # stage deviation (ft) that fills bar_max_height_m
+bar_width_m: 600                 # bar width in metres (EPSG:3857)
+bar_max_height_m: 1100            # bar height at ±reference_stage_range_ft
+reference_stage_range_ft: 2.0    # stage deviation (ft) that fills bar_max_height_m
+show_range_box: true             # draw a semi-transparent band showing ±reference_stage_range_ft
 show_labels: true
 
 # ---- Stage bars (one per channel) ------------------------------------------
@@ -44,189 +45,189 @@ bars:
   - channel: 17
     position: 0.0
     label: "Vernalis"
-    mean_stage_ft: 5.78
+    mean_stage_ft: 10.1998
 
   - channel: 6
     position: 0.15
     label: "San Joaquin River @ Mossdale"
-    mean_stage_ft: 4.62
+    mean_stage_ft: 6.0894
 
   - channel: 11
     position: 0.5
     label: "San Joaquin River @ Brandt Bridge"
-    mean_stage_ft: 4.48
+    mean_stage_ft: 4.9441
 
   - channel: 56
     position: 1.0
     label: "Old River @ Head of Old River"
-    mean_stage_ft: 4.58
+    mean_stage_ft: 5.3784
 
   - channel: 8
     position: 0.99
     label: "San Joaquin River downstream of Head of Old River"
-    mean_stage_ft: 4.59
+    mean_stage_ft: 5.6137
 
   - channel: 209
     position: 0.5
     label: "Grantline Canal"
-    mean_stage_ft: 4.22
+    mean_stage_ft: 4.3635
 
   - channel: 228
     position: 0.5
     label: "Victoria Canal"
-    mean_stage_ft: 4.28
+    mean_stage_ft: 4.2699
 
   - channel: 279
     position: 0.5
     label: "False River"
-    mean_stage_ft: 4.40
+    mean_stage_ft: 4.3874
 
   - channel: 437
     position: 0.5
     label: "Chipps Island"
-    mean_stage_ft: 4.33
+    mean_stage_ft: 4.2507
 
   - channel: 513
     position: 0.3
     label: "Montezuma Slough @ National Steel"
-    mean_stage_ft: 4.43
+    mean_stage_ft: 4.2512
 
   - channel: 523
     position: 0.5
     label: "Montezuma Slough @ Beldons Landing"
-    mean_stage_ft: 4.28
+    mean_stage_ft: 4.1671
 
   - channel: 414
     position: 0.5
     label: "Freeport"
-    mean_stage_ft: 5.40
+    mean_stage_ft: 7.3368
 
   - channel: 420
     position: 0.8
     label: "Sacramento Above Cross Channel"
-    mean_stage_ft: 4.77
+    mean_stage_ft: 5.5801
 
   - channel: 426
     position: 1.0
     label: "Sacramento River past Cross Channel"
-    mean_stage_ft: 4.52
+    mean_stage_ft: 4.8584
 
   - channel: 386
     position: 0.0
     label: "Sutter and Steamboat Slough"
-    mean_stage_ft: 4.54
+    mean_stage_ft: 4.7866
 
   - channel: 398
     position: 0.0
     label: "Yolo Bypass below Cache Slough"
-    mean_stage_ft: 4.37
+    mean_stage_ft: 4.4373
 
   - channel: 409
     position: 0.0
     label: "Cache Slough"
-    mean_stage_ft: 4.37
+    mean_stage_ft: 4.4508
 
   - channel: 430
     position: 0.5
     label: "Sacramento River @ Rio Vista"
-    mean_stage_ft: 4.37
+    mean_stage_ft: 4.4118
 
   - channel: 372
     position: 0.05
     label: "Georgiana Slough"
-    mean_stage_ft: 4.51
+    mean_stage_ft: 4.6973
 
   - channel: 362
     position: 0.95
     label: "Mokelumne River below Cross Channel"
-    mean_stage_ft: 4.49
+    mean_stage_ft: 4.5058
 
   - channel: 341
     position: 0.5
     label: "South Mokelumne River below Cross Channel"
-    mean_stage_ft: 4.44
+    mean_stage_ft: 4.4631
 
   - channel: 247
     position: 0.5
     label: "Rock Slough"
-    mean_stage_ft: 4.38
+    mean_stage_ft: 4.3847
 
   - channel: 159
     position: 0.5
     label: "San Joaquin River To Middle River"
-    mean_stage_ft: 4.39
+    mean_stage_ft: 4.4012
 
   - channel: 124
     position: 0.5
     label: "San Joaquin River To Franks Tract"
-    mean_stage_ft: 4.40
+    mean_stage_ft: 4.4024
 
   - channel: 348
     position: 0.5
     label: "Cross Delta Flow"
-    mean_stage_ft: 4.45
+    mean_stage_ft: 4.4540
 
   - channel: 434
     position: 0.5
     label: "Sacramento River @ Emmaton"
-    mean_stage_ft: 4.33
+    mean_stage_ft: 4.2855
 
   - channel: 49
     position: 0.5
     label: "San Joaquin River @ Jersey Point"
-    mean_stage_ft: 4.40
+    mean_stage_ft: 4.3684
 
   - channel: 310
     position: 1.0
     label: "Three Mile Slough"
-    mean_stage_ft: 4.40
+    mean_stage_ft: 4.3846
 
   - channel: 441
     position: 0.5
     label: "Martinez"
-    mean_stage_ft: 4.22
+    mean_stage_ft: 4.0995
 
   - channel: 21
     position: 0.5
     label: "San Joaquin River @ Stockton"
-    mean_stage_ft: 4.40
+    mean_stage_ft: 4.4276
 
   - channel: 117
     position: 0.5
     label: "Franks Tract to Old River"
-    mean_stage_ft: 4.40
+    mean_stage_ft: 4.4007
 
   - channel: 119
     position: 0.8
     label: "Franks Tract to Middle River"
-    mean_stage_ft: 4.40
+    mean_stage_ft: 4.4027
 
   - channel: 96
     position: 0.05
     label: "Old River @ OMR"
-    mean_stage_ft: 4.36
+    mean_stage_ft: 4.3709
 
   - channel: 143
     position: 0.1
     label: "Middle River @ OMR"
-    mean_stage_ft: 4.36
+    mean_stage_ft: 4.3755
 
   - channel: 173
     position: 0.5
     label: "Turner Cut"
-    mean_stage_ft: 4.39
+    mean_stage_ft: 4.4064
 
   - channel: 196
     position: 0.1
     label: "Paradise Cut"
-    mean_stage_ft: 4.55
+    mean_stage_ft: 4.9630
 
   - channel: 71
     position: 0.75
     label: "Old River @ Tracy"
-    mean_stage_ft: 4.52
+    mean_stage_ft: 4.4688
 
   - channel: 126
     position: 0.9
     label: "Middle River @ Undine"
-    mean_stage_ft: 4.51
+    mean_stage_ft: 4.7753

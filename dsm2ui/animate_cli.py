@@ -204,6 +204,72 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
         mgr._sidebar_toggle.value = not collapsed
         mgr._controls.visible = not collapsed
         mgr._sidebar_toggle.name = "\u25ba" if collapsed else "\u25c4"
+    # Stage bars settings (added after construction by animate_hydro / animate_qual)
+    stage_cfg = cfg.get("stage_bars", {})
+    if hasattr(mgr, "_stage_layer") and stage_cfg:
+        sl = mgr._stage_layer
+        if hasattr(sl, "_w_bar_width") and sl._w_bar_width is not None:
+            if "bar_width_m" in stage_cfg:
+                sl._w_bar_width.value = float(stage_cfg["bar_width_m"])
+            if "bar_max_height_m" in stage_cfg:
+                sl._w_bar_height.value = float(stage_cfg["bar_max_height_m"])
+            if "reference_stage_range_ft" in stage_cfg:
+                sl._w_ref_range.value = float(stage_cfg["reference_stage_range_ft"])
+            if "show_labels" in stage_cfg:
+                sl._w_show_labels.value = bool(stage_cfg["show_labels"])
+            if "show_range_box" in stage_cfg:
+                sl._w_show_range_box.value = bool(stage_cfg["show_range_box"])
+            if "alpha" in stage_cfg:
+                sl._w_alpha.value = int(stage_cfg["alpha"])
+
+    # Flow layer settings (opacity etc. changed via UI controls)
+    flow_state = cfg.get("flow_state", {})
+    if hasattr(mgr, "_flow_layer") and flow_state:
+        fl = mgr._flow_layer
+        if hasattr(fl, "_w_colormap") and fl._w_colormap is not None:
+            if "colormap" in flow_state:
+                fl._w_colormap.value = str(flow_state["colormap"])
+            if "alpha" in flow_state:
+                fl._w_alpha.value = int(round(float(flow_state["alpha"]) * 100))
+            if "scale_mode" in flow_state:
+                fl._w_scale.value = str(flow_state["scale_mode"])
+            if "reference_arrow_length_m" in flow_state:
+                fl._w_arrow_length.value = float(flow_state["reference_arrow_length_m"])
+            if "arrow_width_m" in flow_state:
+                fl._w_arrow_width.value = float(flow_state["arrow_width_m"])
+            if "bar_max_height_m" in flow_state:
+                fl._w_bar_height.value = float(flow_state["bar_max_height_m"])
+            _is_vel = getattr(fl._spec, "variable", "flow") == "velocity"
+            if _is_vel and "reference_velocity" in flow_state:
+                fl._w_ref_flow.value = float(flow_state["reference_velocity"])
+            elif not _is_vel and "reference_flow" in flow_state:
+                fl._w_ref_flow.value = float(flow_state["reference_flow"])
+            if _is_vel and "min_velocity_fps" in flow_state:
+                fl._w_min_flow.value = float(flow_state["min_velocity_fps"])
+            elif not _is_vel and "min_flow_cfs" in flow_state:
+                fl._w_min_flow.value = float(flow_state["min_flow_cfs"])
+            # flow_vmin / flow_vmax as clim widget string
+            if "flow_vmin" in flow_state and "flow_vmax" in flow_state:
+                fl._w_clim.value = (
+                    f"{flow_state['flow_vmin']:.4g}, {flow_state['flow_vmax']:.4g}"
+                )
+
+    # Map viewport / zoom extents
+    extents = cfg.get("map_extents", {})
+    if extents:
+        try:
+            if hasattr(mgr, "_bk_figure"):          # single-panel manager
+                mgr._bk_figure.x_range.start = float(extents["x_start"])
+                mgr._bk_figure.x_range.end   = float(extents["x_end"])
+                mgr._bk_figure.y_range.start = float(extents["y_start"])
+                mgr._bk_figure.y_range.end   = float(extents["y_end"])
+            elif hasattr(mgr, "_shared_x_range"):   # multi-panel manager (shared viewport)
+                mgr._shared_x_range.start = float(extents["x_start"])
+                mgr._shared_x_range.end   = float(extents["x_end"])
+                mgr._shared_y_range.start = float(extents["y_start"])
+                mgr._shared_y_range.end   = float(extents["y_end"])
+        except (KeyError, TypeError, ValueError):
+            pass
 
 
 @click.group(name="animate", context_settings=CONTEXT_SETTINGS)
@@ -381,6 +447,22 @@ def hydro_cmd(
                 title=effective_title, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
+            # Persist flow layer paths + current widget state in saved YAML
+            if _overlay_config_file:
+                import os as _os_h
+                _fc_h = _os_h.path.abspath(_overlay_config_file)
+                _hh_h = _os_h.path.abspath(flow_hydro_h5[0]) if flow_hydro_h5 else None
+                _nf_h = _os_h.path.abspath(flow_nodes_file) if flow_nodes_file else None
+                _orig_cs_h = mgr.collect_state
+                def _cs_with_flow_hydro(
+                    _ocs=_orig_cs_h, _fc=_fc_h, _hh=_hh_h, _nf=_nf_h, _mgr=mgr,
+                ):
+                    state = _ocs()
+                    state["flow"] = {"flow_config": _fc, "hydro_h5": _hh, "nodes_file": _nf}
+                    if hasattr(_mgr, "_flow_layer"):
+                        state["flow_state"] = _mgr._flow_layer.get_state_dict()
+                    return state
+                mgr.collect_state = _cs_with_flow_hydro
         if cfg:
             _apply_config_to_manager(mgr, cfg)
         log.info("Reader time_index: %d steps",
@@ -714,6 +796,17 @@ def qual_cmd(
                     _hydro_paths_multi = [flow_hydro_h5[0], flow_hydro_h5[0]]
                 else:
                     _hydro_paths_multi = list(flow_hydro_h5)
+            _stage_spec_multi = None
+            if stage_config_file:
+                from dsm2ui.stage_layer import StageLayerSpec
+                _stage_spec_multi = StageLayerSpec.from_yaml(stage_config_file)
+                # Hydro paths needed for stage too; reuse flow paths if already set,
+                # otherwise build from flow_hydro_h5 directly.
+                if _hydro_paths_multi is None and flow_hydro_h5:
+                    if len(flow_hydro_h5) == 1:
+                        _hydro_paths_multi = [flow_hydro_h5[0], flow_hydro_h5[0]]
+                    else:
+                        _hydro_paths_multi = list(flow_hydro_h5)
             mgr = animate_qual_multi(
                 h5files[0], h5files[1],
                 constituent=constituent,
@@ -724,6 +817,7 @@ def qual_cmd(
                 hydro_h5_paths=_hydro_paths_multi,
                 flow_spec=_flow_spec_multi,
                 nodes_file=flow_nodes_file or None,
+                stage_spec=_stage_spec_multi,
                 vmin=vmin, vmax=vmax, colormap=colormap, size=size,
                 initial_transform=_CLI_TRANSFORM_MAP.get(transform.lower(), "none"),
             )
@@ -734,14 +828,28 @@ def qual_cmd(
                 _nf_multi = _os.path.abspath(flow_nodes_file) if flow_nodes_file else None
                 _orig_cs_multi = mgr.collect_state
                 def _cs_with_flow_multi(
-                    _ocs=_orig_cs_multi, _fc=_fc_multi, _nf=_nf_multi,
+                    _ocs=_orig_cs_multi, _fc=_fc_multi, _nf=_nf_multi, _mgr=mgr,
                 ):
                     state = _ocs()
                     state["flow_config"] = _fc
                     if _nf:
                         state["flow_nodes_file"] = _nf
+                    if hasattr(_mgr, "_flow_layer"):
+                        state["flow_state"] = _mgr._flow_layer.get_state_dict()
                     return state
                 mgr.collect_state = _cs_with_flow_multi
+            # Patch collect_state to persist the stage config path in saved YAML
+            if stage_config_file:
+                import os as _os_s
+                _sc_multi = _os_s.path.abspath(stage_config_file)
+                _orig_cs_sc_multi = mgr.collect_state
+                def _cs_with_stage_multi(
+                    _ocs=_orig_cs_sc_multi, _sc=_sc_multi,
+                ):
+                    state = _ocs()
+                    state["stage_config"] = _sc
+                    return state
+                mgr.collect_state = _cs_with_stage_multi
         else:
             from dsm2ui.animate import animate_qual
             _flow_spec = None
@@ -778,7 +886,7 @@ def qual_cmd(
                 _nf = _os.path.abspath(flow_nodes_file) if flow_nodes_file else None
                 _orig_cs = mgr.collect_state
                 def _cs_with_flow(
-                    _ocs=_orig_cs, _fc=_fc, _hh=_hh, _nf=_nf,
+                    _ocs=_orig_cs, _fc=_fc, _hh=_hh, _nf=_nf, _mgr=mgr,
                 ):
                     state = _ocs()
                     state["flow"] = {
@@ -786,6 +894,8 @@ def qual_cmd(
                         "hydro_h5":    _hh,
                         "nodes_file":  _nf,
                     }
+                    if hasattr(_mgr, "_flow_layer"):
+                        state["flow_state"] = _mgr._flow_layer.get_state_dict()
                     return state
                 mgr.collect_state = _cs_with_flow
         # Apply custom resample on top of the primary transform if requested.
@@ -981,3 +1091,111 @@ def export_corrected_cmd(
         end=_parse(end),
         chunk_size=chunk_size,
     )
+
+
+# ---------------------------------------------------------------------------
+# compute-stage-means
+# ---------------------------------------------------------------------------
+
+@animate.command(name="compute-stage-means", context_settings=CONTEXT_SETTINGS)
+@click.argument("hydro_h5", type=click.Path(exists=True, dir_okay=False, readable=True))
+@click.option("--stage-config", "stage_config_file", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="stage_config.yaml to read channels from (and update in-place unless --dry-run).")
+@click.option("--start", type=str, default=None,
+              help="Start of averaging window: ISO (2014-10-01) or DSM2 military (01OCT2014). "
+                   "Default: start of run.")
+@click.option("--end", type=str, default=None,
+              help="End of averaging window: ISO or DSM2 military. Default: end of run.")
+@click.option("--location", default="both", show_default=True,
+              type=click.Choice(["both", "upstream", "downstream"], case_sensitive=False),
+              help="Which channel end to use for the stage reading.")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print computed means without modifying the YAML file.")
+@click.option("--chunk-size", default=5000, show_default=True, type=int,
+              help="HDF5 timesteps read per chunk (reduce if memory is limited).")
+def compute_stage_means_cmd(
+    hydro_h5, stage_config_file, start, end, location, dry_run, chunk_size,
+):
+    """Compute mean water-surface stage for each bar in a stage_config.yaml.
+
+    Reads the HYDRO HDF5 tidefile over the specified time window, averages the
+    datum-corrected stage (ft NAVD88) for every channel listed in the YAML, and
+    either prints the results (--dry-run) or writes them back into the YAML,
+    preserving all comments and other content.
+
+    \b
+    Typical usage:
+
+        # Compute from the full run and update the YAML in-place:
+        dsm2ui animate compute-stage-means hydro.h5 --stage-config stage_config.yaml
+
+        # Restrict to a calibration window:
+        dsm2ui animate compute-stage-means hydro.h5 \\
+            --stage-config stage_config.yaml \\
+            --start 01OCT2014 --end 30SEP2017
+
+        # Preview without writing:
+        dsm2ui animate compute-stage-means hydro.h5 \\
+            --stage-config stage_config.yaml --dry-run
+
+    The mean is the temporal mean of the corrected water-surface elevation
+    (depth + channel_bottom from /hydro/geometry/channel_bottom), matching the
+    datum convention required by mean_stage_ft in the YAML.
+    """
+    import pandas as _pd
+    from pydsm.analysis.dsm2study import parse_military_date
+
+    def _parse(s):
+        if s is None:
+            return None
+        try:
+            return parse_military_date(s)
+        except Exception:
+            return _pd.Timestamp(s)
+
+    t_start = _parse(start)
+    t_end = _parse(end)
+
+    # Load the stage config to get channel list
+    from dsm2ui.stage_layer import StageLayerSpec, compute_stage_means, _update_yaml_means
+    spec = StageLayerSpec.from_yaml(stage_config_file)
+
+    if not spec.bars:
+        raise SystemExit("No bars defined in the stage config — nothing to compute.")
+
+    channels = [b.channel for b in spec.bars]
+
+    click.echo(f"Computing mean stage for {len(channels)} channel(s) ...")
+    click.echo(f"  File    : {hydro_h5}")
+    click.echo(f"  Window  : {t_start or 'start'} — {t_end or 'end'}")
+    click.echo(f"  Location: {location}")
+
+    means = compute_stage_means(
+        hydro_h5_path=hydro_h5,
+        channels=channels,
+        location=location,
+        start=t_start,
+        end=t_end,
+        chunk_size=chunk_size,
+    )
+
+    # Report results
+    click.echo("")
+    click.echo(f"{'Channel':>8}  {'Label':<40}  {'Mean stage (ft NAVD88)':>22}")
+    click.echo("-" * 78)
+    for bar in spec.bars:
+        val = means.get(bar.channel, float("nan"))
+        flag = "  (not found in H5)" if val != val else ""  # NaN check
+        click.echo(f"{bar.channel:>8}  {bar.label:<40}  {val:>22.4f}{flag}")
+
+    if dry_run:
+        click.echo("\n(--dry-run: YAML not modified)")
+        return
+
+    # Update the YAML file in-place, preserving comments
+    yaml_text = open(stage_config_file, encoding="utf-8").read()
+    updated = _update_yaml_means(yaml_text, means)
+    with open(stage_config_file, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    click.echo(f"\nUpdated {stage_config_file}")

@@ -254,6 +254,7 @@ class FlowLayerSpec:
     flow_vmax: Optional[float] = None  # colour upper bound; None = +reference value
     variable: str = "flow"             # "flow" | "velocity"
     reference_velocity: float = 2.5   # ft/s → reference_arrow_length_m (velocity mode)
+    alpha: float = 1.0                 # overall opacity of all arrow/bar renderers (0–1)
 
     @classmethod
     def from_yaml(cls, path: "str | Path") -> "FlowLayerSpec":
@@ -1078,6 +1079,7 @@ class FlowLayer:
             line_width=0.8,
             level="overlay",
         )
+        self._arrow_renderer = arrow_renderer
         figure.add_tools(HoverTool(
             renderers=[arrow_renderer],
             tooltips=[
@@ -1120,6 +1122,7 @@ class FlowLayer:
             line_width=0.7,
             level="overlay",
         )
+        self._bar_renderer = bar_renderer
         figure.add_tools(HoverTool(
             renderers=[bar_renderer],
             tooltips=[
@@ -1145,6 +1148,7 @@ class FlowLayer:
                 line_width=0.8,
                 level="overlay",
             )
+            self._ext_arrow_renderer = ext_renderer
             figure.add_tools(HoverTool(
                 renderers=[ext_renderer],
                 tooltips=[
@@ -1168,6 +1172,42 @@ class FlowLayer:
                 text_font_style="bold",
                 level="overlay",
             )
+
+        # Apply initial alpha from spec (allows YAML to control default opacity)
+        if self._spec.alpha < 1.0:
+            self._apply_alpha(self._spec.alpha)
+
+    def _apply_alpha(self, alpha: float) -> None:
+        """Set fill alpha on all flow renderers without touching line outlines."""
+        for r in (
+            getattr(self, "_arrow_renderer", None),
+            getattr(self, "_bar_renderer", None),
+            getattr(self, "_ext_arrow_renderer", None),
+        ):
+            if r is not None:
+                r.glyph.fill_alpha = alpha
+
+    def get_state_dict(self) -> dict:
+        """Return current widget/spec settings as a serialisable dict."""
+        state = {
+            "colormap":               self._spec.colormap,
+            "scale_mode":             self._spec.scale_mode,
+            "reference_arrow_length_m": self._spec.reference_arrow_length_m,
+            "arrow_width_m":          self._spec.arrow_width_m,
+            "bar_max_height_m":       self._spec.bar_max_height_m,
+            "alpha":                  self._spec.alpha,
+        }
+        if self._spec.flow_vmin is not None:
+            state["flow_vmin"] = self._spec.flow_vmin
+        if self._spec.flow_vmax is not None:
+            state["flow_vmax"] = self._spec.flow_vmax
+        if getattr(self._spec, "variable", "flow") == "velocity":
+            state["reference_velocity"] = self._spec.reference_velocity
+            state["min_velocity_fps"]    = getattr(self._spec, "min_velocity_fps", 0.0)
+        else:
+            state["reference_flow"]  = self._spec.reference_flow
+            state["min_flow_cfs"]    = self._spec.min_flow_cfs
+        return state
 
     # ----------------------------------------------------------------
     # Per-frame update
@@ -1404,6 +1444,12 @@ class FlowLayer:
             value=self._spec.colormap,
             sizing_mode="stretch_width",
         )
+        self._w_alpha = pn.widgets.IntSlider(
+            name="Opacity %",
+            value=int(round(getattr(self._spec, "alpha", 1.0) * 100)),
+            start=0, end=100, step=5,
+            sizing_mode="stretch_width",
+        )
         _is_velocity = getattr(self._spec, "variable", "flow") == "velocity"
         ref = self._ref_scale
         _vmin = self._spec.flow_vmin if self._spec.flow_vmin is not None else -ref
@@ -1454,6 +1500,11 @@ class FlowLayer:
             start=0.0,
             sizing_mode="stretch_width",
         )
+        def _on_alpha_flow(event):
+            self._spec.alpha = event.new / 100.0
+            self._apply_alpha(self._spec.alpha)
+
+        self._w_alpha.param.watch(_on_alpha_flow, "value")
         for w in (
             self._w_colormap, self._w_clim, self._w_scale, self._w_ref_flow,
             self._w_arrow_length, self._w_arrow_width,
@@ -1463,6 +1514,7 @@ class FlowLayer:
 
         return pn.Card(
             self._w_colormap,
+            self._w_alpha,
             self._w_clim,
             self._w_scale,
             pn.layout.Divider(margin=(2, 0, 2, 0)),
