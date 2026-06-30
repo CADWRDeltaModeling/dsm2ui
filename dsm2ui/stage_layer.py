@@ -240,6 +240,7 @@ class StageLayer:
         # Extra renderers for additional figures (e.g. diff map).
         self._extra_bar_renderers: list = []
         self._extra_range_box_renderers: list = []
+        self._extra_label_sets: list = []
 
         # UI widgets — created lazily in create_control_card()
         self._w_visible = None
@@ -439,6 +440,7 @@ class StageLayer:
                 visible=self._spec.show_labels,
             )
             bk_fig.add_layout(lbl)
+            self._extra_label_sets.append(lbl)
 
     # ----------------------------------------------------------------
     # Frame update
@@ -580,6 +582,8 @@ class StageLayer:
             self._spec.show_labels = bool(event.new)
             if self._label_set is not None:
                 self._label_set.visible = bool(event.new)
+            for lbl in self._extra_label_sets:
+                lbl.visible = bool(event.new)
             self._w_show_labels.name = "Show labels" if event.new else "Hide labels"
 
         def _on_show_range_box(event):
@@ -676,6 +680,8 @@ class StageLayer:
         def _sync_show_labels(event):
             if secondary._label_set is not None:
                 secondary._label_set.visible = bool(event.new)
+            for lbl in secondary._extra_label_sets:
+                lbl.visible = bool(event.new)
 
         def _sync_show_range_box(event):
             if secondary._range_box_renderer is not None:
