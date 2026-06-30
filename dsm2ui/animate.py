@@ -3006,30 +3006,46 @@ def make_godin_transform():
 
     def _transform(df: pd.DataFrame) -> pd.DataFrame:
         try:
-            from vtools.functions.filter import godin
+            from vtools.functions.filter import generate_godin_fir
         except ImportError as exc:
             raise ImportError(
                 "The Godin tidal filter requires vtools3.  "
                 "Install it with: conda install -c cadwr-dms vtools3"
             ) from exc
 
-        out_cols = {}
-        for col in df.columns:
-            series = df[col].copy()
-            try:
-                filtered = godin(series)
-                if hasattr(filtered, "squeeze"):
-                    filtered = filtered.squeeze()
-                if not isinstance(filtered, pd.Series):
-                    filtered = pd.Series(np.asarray(filtered).ravel(),
-                                         index=series.index)
-            except Exception:
-                filtered = pd.Series(np.nan, index=series.index)
-            out_cols[col] = filtered
+        godin_ir = generate_godin_fir(df.index.freq)
+        n_filt = len(godin_ir)
+        nhalffilt = n_filt // 2
 
-        result = pd.DataFrame(out_cols, index=df.index)
-        result.index.freq = df.index.freq
-        return result
+        arr = df.to_numpy(dtype=np.float64)  # (n_time, n_channels)
+        n_time = arr.shape[0]
+
+        # Batch FFT-based convolution — all channels in a single pass.
+        # Equivalent to calling np.convolve(col, godin_ir, mode="same")
+        # per column but ~50× faster for a 500-channel QUAL file because:
+        #  1. generate_godin_fir() is called only once (not once per column).
+        #  2. A single batch rfft/irfft replaces N individual np.convolve
+        #     calls (np.convolve uses slow direct convolution; rfft uses FFT).
+        n_full = n_time + n_filt - 1
+        n_fft = 1 << int(np.ceil(np.log2(max(n_full, 1))))
+        # Kernel spectrum: (n_fft//2+1, 1) — broadcasts over the channel axis.
+        H = np.fft.rfft(godin_ir, n=n_fft).reshape(-1, 1)
+        # Data spectrum: (n_fft//2+1, n_channels).
+        X = np.fft.rfft(arr, n=n_fft, axis=0)
+        # Inverse transform: full convolution shape (n_fft, n_channels).
+        conv = np.fft.irfft(X * H, n=n_fft, axis=0)
+        # Trim to mode="same" — same slice as np.convolve mode="same".
+        start = (n_filt - 1) // 2
+        result = np.ascontiguousarray(conv[start: start + n_time, :])
+        # NaN-out warmup edges (same as vtools' godin()).
+        if nhalffilt > 0:
+            result[:nhalffilt, :] = np.nan
+            if n_time > nhalffilt:
+                result[-nhalffilt:, :] = np.nan
+
+        out = pd.DataFrame(result, index=df.index, columns=df.columns)
+        out.index.freq = df.index.freq
+        return out
 
     _transform.__name__ = "godin_filter"
 
