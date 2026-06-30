@@ -1340,6 +1340,7 @@ class FlowLayer:
             "arrow_width_m":          self._spec.arrow_width_m,
             "bar_max_height_m":       self._spec.bar_max_height_m,
             "alpha":                  self._spec.alpha,
+            "visible":                self._w_visible.value if hasattr(self, "_w_visible") else True,
         }
         if self._spec.flow_vmin is not None:
             state["flow_vmin"] = self._spec.flow_vmin
@@ -1644,10 +1645,33 @@ class FlowLayer:
             start=0.0,
             sizing_mode="stretch_width",
         )
+        _show_label = "Show velocity arrows" if _is_velocity else "Show flow arrows"
+        _hide_label = "Velocity arrows hidden" if _is_velocity else "Flow arrows hidden"
+        self._w_visible = pn.widgets.Toggle(
+            name=_show_label, value=True,
+            button_type="success", sizing_mode="stretch_width",
+        )
+
+        def _on_visible_flow(event):
+            visible = bool(event.new)
+            for r in (
+                getattr(self, "_arrow_renderer", None),
+                getattr(self, "_bar_renderer", None),
+                getattr(self, "_ext_arrow_renderer", None),
+            ):
+                if r is not None:
+                    r.visible = visible
+            for extra in self._extra_renderers:
+                for r in extra.values():
+                    if r is not None:
+                        r.visible = visible
+            self._w_visible.name = _show_label if visible else _hide_label
+
         def _on_alpha_flow(event):
             self._spec.alpha = event.new / 100.0
             self._apply_alpha(self._spec.alpha)
 
+        self._w_visible.param.watch(_on_visible_flow, "value")
         self._w_alpha.param.watch(_on_alpha_flow, "value")
         for w in (
             self._w_colormap, self._w_clim, self._w_scale, self._w_ref_flow,
@@ -1657,8 +1681,10 @@ class FlowLayer:
             w.param.watch(self._on_spec_change, "value")
 
         return pn.Card(
-            self._w_colormap,
+            self._w_visible,
             self._w_alpha,
+            pn.layout.Divider(margin=(2, 0, 2, 0)),
+            self._w_colormap,
             self._w_clim,
             self._w_scale,
             pn.layout.Divider(margin=(2, 0, 2, 0)),

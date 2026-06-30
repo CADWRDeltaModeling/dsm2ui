@@ -1824,11 +1824,25 @@ def _make_shared_flow_card(flow_a, flow_b) -> "pn.Card":
     card = flow_a.create_control_card()
     # After flow_a._on_spec_change fires and mutates the shared spec object,
     # each widget watcher below fires and triggers a redraw on flow_b.
-    # Alpha is a special case: it is applied directly to renderers, not via
-    # update_frame, so we need a dedicated sync callback.
+    # Alpha and visibility are applied directly to renderers (not via update_frame),
+    # so they need dedicated sync callbacks.
     def _sync_flow_alpha_b(event, _fb=flow_b):
         _fb._spec.alpha = event.new / 100.0
         _fb._apply_alpha(_fb._spec.alpha)
+
+    def _sync_flow_visible_b(event, _fb=flow_b):
+        visible = bool(event.new)
+        for r in (
+            getattr(_fb, "_arrow_renderer", None),
+            getattr(_fb, "_bar_renderer", None),
+            getattr(_fb, "_ext_arrow_renderer", None),
+        ):
+            if r is not None:
+                r.visible = visible
+        for extra in _fb._extra_renderers:
+            for r in extra.values():
+                if r is not None:
+                    r.visible = visible
 
     for w in (
         flow_a._w_colormap, flow_a._w_clim, flow_a._w_scale, flow_a._w_ref_flow,
@@ -1837,6 +1851,7 @@ def _make_shared_flow_card(flow_a, flow_b) -> "pn.Card":
     ):
         w.param.watch(flow_b.trigger_redraw, "value")
     flow_a._w_alpha.param.watch(_sync_flow_alpha_b, "value")
+    flow_a._w_visible.param.watch(_sync_flow_visible_b, "value")
     return card
 
 
