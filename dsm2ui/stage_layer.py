@@ -236,6 +236,10 @@ class StageLayer:
         self._range_box_source = None
         self._range_box_renderer = None
         self._label_set = None
+        self._label_src = None
+        # Extra renderers for additional figures (e.g. diff map).
+        self._extra_bar_renderers: list = []
+        self._extra_range_box_renderers: list = []
 
         # UI widgets — created lazily in create_control_card()
         self._w_visible = None
@@ -347,7 +351,7 @@ class StageLayer:
         ))
 
         # ---- Labels below the reference tick (always created, visibility controlled) ----
-        label_src = ColumnDataSource({
+        self._label_src = ColumnDataSource({
             "x":    [g.cx     for g in self._bar_geoms],
             "y":    [g.base_y for g in self._bar_geoms],
             "text": [g.label  for g in self._bar_geoms],
@@ -355,13 +359,86 @@ class StageLayer:
         self._label_set = LabelSet(
             x="x", y="y",
             text="text",
-            source=label_src,
+            source=self._label_src,
             text_font_size="9px",
             x_offset=-25, y_offset=-14,
             level="overlay",
             visible=self._spec.show_labels,
         )
         bk_fig.add_layout(self._label_set)
+
+    def setup_on_additional_figure(self, bk_fig) -> None:
+        """Mirror this layer's renderers onto *bk_fig* using the same data sources.
+
+        Call this **after** :meth:`setup_on_figure` to add the stage-bar overlay
+        to an extra Bokeh figure (e.g. the diff map).  The shared
+        ``ColumnDataSource`` objects mean every :meth:`update_frame` call
+        automatically updates all figures.
+
+        Parameters
+        ----------
+        bk_fig : bokeh.plotting.figure
+            Additional Bokeh figure to receive the overlay renderers.
+        """
+        if self._bar_source is None:
+            raise RuntimeError(
+                "Call setup_on_figure() before setup_on_additional_figure()."
+            )
+        from bokeh.models import HoverTool, LabelSet
+
+        # Static range box (same source, new renderer)
+        r_range_box = bk_fig.patches(
+            xs="xs", ys="ys",
+            fill_color="#aaaaaa", fill_alpha=0.18,
+            line_color="#888888", line_width=1,
+            source=self._range_box_source,
+            level="overlay",
+            visible=self._spec.show_range_box,
+        )
+        self._extra_range_box_renderers.append(r_range_box)
+
+        # Static reference line (same source, new renderer)
+        bk_fig.multi_line(
+            xs="xs", ys="ys",
+            source=self._ref_source,
+            line_color="#444444", line_width=2, line_dash="dashed",
+            level="overlay",
+        )
+
+        # Dynamic bar rectangles (same source, new renderer)
+        alpha = self._w_alpha.value / 100.0 if self._w_alpha is not None else 0.75
+        visible = self._w_visible.value if self._w_visible is not None else True
+        r_bar = bk_fig.patches(
+            xs="xs", ys="ys",
+            fill_color="color", fill_alpha=alpha,
+            line_color="#333333", line_width=1,
+            source=self._bar_source,
+            level="overlay",
+            visible=visible,
+        )
+        bk_fig.add_tools(HoverTool(
+            renderers=[r_bar],
+            tooltips=[
+                ("Station",        "@labels"),
+                ("Stage (ft)",     "@stages{0.00}"),
+                ("Mean (ft)",      "@means{0.00}"),
+                ("Deviation (ft)", "@devs{+0.00}"),
+            ],
+        ))
+        self._extra_bar_renderers.append(r_bar)
+
+        # Labels (new LabelSet sharing the same label source)
+        if self._label_src is not None:
+            lbl = LabelSet(
+                x="x", y="y",
+                text="text",
+                source=self._label_src,
+                text_font_size="9px",
+                x_offset=-25, y_offset=-14,
+                level="overlay",
+                visible=self._spec.show_labels,
+            )
+            bk_fig.add_layout(lbl)
 
     # ----------------------------------------------------------------
     # Frame update
@@ -485,6 +562,10 @@ class StageLayer:
                 self._range_box_renderer.visible = (
                     visible and self._spec.show_range_box
                 )
+            for r in self._extra_bar_renderers:
+                r.visible = visible
+            for r in self._extra_range_box_renderers:
+                r.visible = visible and self._spec.show_range_box
             self._w_visible.name = (
                 "Show stage bars" if visible else "Stage bars hidden"
             )
@@ -492,6 +573,8 @@ class StageLayer:
         def _on_alpha(event):
             if self._bar_renderer is not None:
                 self._bar_renderer.glyph.fill_alpha = event.new / 100.0
+            for r in self._extra_bar_renderers:
+                r.glyph.fill_alpha = event.new / 100.0
 
         def _on_show_labels(event):
             self._spec.show_labels = bool(event.new)
@@ -579,10 +662,16 @@ class StageLayer:
                 secondary._range_box_renderer.visible = (
                     visible and secondary._spec.show_range_box
                 )
+            for r in secondary._extra_bar_renderers:
+                r.visible = visible
+            for r in secondary._extra_range_box_renderers:
+                r.visible = visible and secondary._spec.show_range_box
 
         def _sync_alpha(event):
             if secondary._bar_renderer is not None:
                 secondary._bar_renderer.glyph.fill_alpha = event.new / 100.0
+            for r in secondary._extra_bar_renderers:
+                r.glyph.fill_alpha = event.new / 100.0
 
         def _sync_show_labels(event):
             if secondary._label_set is not None:

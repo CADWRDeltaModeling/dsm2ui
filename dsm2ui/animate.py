@@ -3243,6 +3243,11 @@ def animate_qual_multi(
             mgr._controls.append(flow_b_inst.create_control_card())
         mgr._flow_layer = flow_a_inst or flow_b_inst
 
+        # Mirror study-A overlay onto the diff figure so it is visible in diff mode.
+        primary_flow = flow_a_inst or flow_b_inst
+        if primary_flow is not None:
+            primary_flow.setup_on_additional_figure(mgr._fig_diff)
+
     # ---- Optional stage bars overlays (one per panel) -------------------
     if stage_spec is not None:
         from dsm2ui.stage_layer import StageLayer
@@ -3276,6 +3281,9 @@ def animate_qual_multi(
             mgr._controls.append(card)
             # Store primary on mgr for config save/load
             mgr._stage_layer = primary
+
+            # Mirror study-A stage bars onto the diff figure.
+            primary.setup_on_additional_figure(mgr._fig_diff)
             _orig_cs_ms = mgr.collect_state
 
             def _patched_cs_stage_multi(_ocs=_orig_cs_ms, _sl=primary):

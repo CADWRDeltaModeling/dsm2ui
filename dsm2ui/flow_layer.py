@@ -882,6 +882,9 @@ class FlowLayer:
         self._bar_source: Optional[ColumnDataSource] = None
         self._ext_arrow_source: Optional[ColumnDataSource] = None
         self._ext_arrow_text_source: Optional[ColumnDataSource] = None
+        # Extra renderers added to additional figures (e.g. diff map).
+        # Each entry is a dict with keys "arrow", "bar", "ext" (may be None).
+        self._extra_renderers: list = []
 
     # ----------------------------------------------------------------
     # Reader (lazy, transform-aware)
@@ -1177,6 +1180,117 @@ class FlowLayer:
         if self._spec.alpha < 1.0:
             self._apply_alpha(self._spec.alpha)
 
+    def setup_on_additional_figure(self, figure) -> None:
+        """Mirror this layer's renderers onto *figure* using the same data sources.
+
+        Call this **after** :meth:`setup_on_figure` to add the flow overlay to
+        an extra Bokeh figure (e.g. the diff map in
+        :class:`~dvue.animator.MultiGeoAnimatorManager`).  Because the same
+        ``ColumnDataSource`` objects are shared, every :meth:`update_frame`
+        call automatically propagates to all figures.
+
+        Parameters
+        ----------
+        figure : bokeh.plotting.figure
+            An additional Bokeh figure to receive the overlay renderers.
+        """
+        if self._arrow_source is None:
+            raise RuntimeError(
+                "Call setup_on_figure() before setup_on_additional_figure()."
+            )
+        _is_vel = getattr(self._spec, "variable", "flow") == "velocity"
+        _val_label = "Velocity" if _is_vel else "Flow"
+        _val_fmt   = "@values{0,0.000} ft/s" if _is_vel else "@values{0,0.} cfs"
+
+        # Arrow patches — shared source
+        r_arrow = figure.patches(
+            xs="xs", ys="ys",
+            source=self._arrow_source,
+            fill_color="color",
+            fill_alpha=self._spec.alpha * 0.88,
+            line_color="white",
+            line_width=0.8,
+            level="overlay",
+        )
+        figure.add_tools(HoverTool(
+            renderers=[r_arrow],
+            tooltips=[
+                ("Arrow",     "@labels"),
+                ("Ch #",      "@channel_ids"),
+                (_val_label,  _val_fmt),
+                ("Direction", "@directions"),
+            ],
+        ))
+
+        # Arrow text labels — shared source
+        figure.text(
+            x="x", y="y",
+            text="text",
+            angle="angle",
+            source=self._arrow_text_source,
+            text_color="white",
+            text_align="center",
+            text_baseline="middle",
+            text_font_size="10px",
+            text_font_style="bold",
+            level="overlay",
+        )
+
+        # Bar patches — shared source
+        r_bar = figure.patches(
+            xs="xs", ys="ys",
+            fill_color="colors",
+            source=self._bar_source,
+            fill_alpha=self._spec.alpha * 0.80,
+            line_color="black",
+            line_width=0.7,
+            level="overlay",
+        )
+        figure.add_tools(HoverTool(
+            renderers=[r_bar],
+            tooltips=[
+                ("Node",      "@node_labels"),
+                ("Channel",   "ch @channel_ids"),
+                ("Direction", "@sides"),
+                (_val_label,  _val_fmt),
+            ],
+        ))
+
+        # Ext arrow patches — shared source (only if ext arrows were configured)
+        r_ext = None
+        if self._ext_arrow_source is not None:
+            r_ext = figure.patches(
+                xs="xs", ys="ys",
+                source=self._ext_arrow_source,
+                fill_color="color",
+                fill_alpha=self._spec.alpha * 0.88,
+                line_color="white",
+                line_width=0.8,
+                level="overlay",
+            )
+            figure.add_tools(HoverTool(
+                renderers=[r_ext],
+                tooltips=[
+                    ("Source",    "@labels"),
+                    (_val_label,  _val_fmt),
+                    ("Direction", "@directions"),
+                ],
+            ))
+            figure.text(
+                x="x", y="y",
+                text="text",
+                angle="angle",
+                source=self._ext_arrow_text_source,
+                text_color="white",
+                text_align="center",
+                text_baseline="middle",
+                text_font_size="10px",
+                text_font_style="bold",
+                level="overlay",
+            )
+
+        self._extra_renderers.append({"arrow": r_arrow, "bar": r_bar, "ext": r_ext})
+
     def _apply_alpha(self, alpha: float) -> None:
         """Set fill alpha on all flow renderers without touching line outlines."""
         for r in (
@@ -1186,6 +1300,10 @@ class FlowLayer:
         ):
             if r is not None:
                 r.glyph.fill_alpha = alpha
+        for extra in self._extra_renderers:
+            for r in extra.values():
+                if r is not None:
+                    r.glyph.fill_alpha = alpha
 
     def get_state_dict(self) -> dict:
         """Return current widget/spec settings as a serialisable dict."""
