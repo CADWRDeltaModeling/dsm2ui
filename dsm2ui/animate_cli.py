@@ -179,10 +179,12 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
         mgr._channels_alpha_slider.value = _to_alpha(cfg.get("show_channels", 100))
     if hasattr(mgr, "_basemap_alpha_slider"):
         mgr._basemap_alpha_slider.value  = _to_alpha(cfg.get("show_basemap", 100))
-    # Observation station opacity (added after construction by _add_obs_station_overlay)
+    # Observation station opacity + marker size (added after construction by _add_obs_station_overlay)
     obs_cfg = cfg.get("observations", {})
     if hasattr(mgr, "_obs_alpha_slider") and "opacity" in obs_cfg:
         mgr._obs_alpha_slider.value = int(obs_cfg["opacity"])
+    if hasattr(mgr, "_obs_size_slider") and "marker_size" in obs_cfg:
+        mgr._obs_size_slider.value = int(obs_cfg["marker_size"])
     # X2 (GeoAnimatorManager only)
     x2 = cfg.get("x2", {})
     if hasattr(mgr, "_x2_check") and x2.get("enabled"):

@@ -1898,8 +1898,6 @@ def _add_obs_station_overlay(
     """
     import panel as pn
     from bokeh.models import ColumnDataSource, HoverTool
-    from bokeh.transform import linear_cmap as _lc
-    from dvue.animator.ui import _cmap_to_palette
 
     # ------------------------------------------------------------------ #
     # 1. Load and reproject station locations to EPSG:3857 (Bokeh web map) #
@@ -1935,17 +1933,19 @@ def _add_obs_station_overlay(
     })
 
     # ------------------------------------------------------------------ #
-    # 3. Colormap matching the channel display                             #
+    # 3. Reuse the manager's existing LinearColorMapper so obs circles     #
+    #    automatically track Appearance-panel clim and colormap changes.   #
     # ------------------------------------------------------------------ #
-    vmin = (mgr.vmin if mgr.vmin is not None else 0.0)
-    vmax = (mgr.vmax if mgr.vmax is not None else 5000.0)
-    pal = _cmap_to_palette(getattr(mgr, "colormap", "turbo"))
-    fill_cmap = _lc("value", pal, low=vmin, high=vmax, nan_color="grey")
+    is_multi = hasattr(mgr, "_fig_a")
+    # For side-by-side correction view the corrected panel uses _mapper_b.
+    fill_mapper = mgr._mapper_b if is_multi else mgr._bk_mapper
+    fill_cmap = {"field": "value", "transform": fill_mapper}
+
+    _OBS_DEFAULT_SIZE = 14
 
     # ------------------------------------------------------------------ #
     # 4. Add circle markers to all relevant figures                        #
     # ------------------------------------------------------------------ #
-    is_multi = hasattr(mgr, "_fig_a")
     # For side-by-side correction view show stations only on the corrected panel
     # (panel B) so the raw model panel remains uncluttered.
     figs = ([mgr._fig_b] if is_multi else [mgr._bk_figure])
@@ -1953,7 +1953,7 @@ def _add_obs_station_overlay(
     renderers = []
     for fig in figs:
         r = fig.circle(
-            x="x", y="y", size=12,
+            x="x", y="y", size=_OBS_DEFAULT_SIZE,
             fill_color=fill_cmap, line_color="black",
             line_width=1.2, fill_alpha=0.9, line_alpha=0.0,
             source=src,
@@ -1968,12 +1968,26 @@ def _add_obs_station_overlay(
         renderers.append(r)
 
     # ------------------------------------------------------------------ #
-    # 5. Opacity slider → Observations card                                #
+    # 5. Register renderers so _apply_bokeh_style won't stomp their size  #
+    # ------------------------------------------------------------------ #
+    # dvue's _apply_bokeh_style skips any renderer whose id is in
+    # mgr._obs_renderers, giving the Observations size slider full control.
+    mgr._obs_renderers = list(renderers)
+
+    # ------------------------------------------------------------------ #
+    # 6. Opacity + Marker-size sliders → Observations card                 #
     # ------------------------------------------------------------------ #
     alpha_slider = pn.widgets.IntSlider(
         name="Obs. stations opacity", start=0, end=100, value=90, step=5,
         sizing_mode="stretch_width",
     )
+    size_slider = pn.widgets.IntSlider(
+        name="Marker size", start=4, end=40, value=_OBS_DEFAULT_SIZE, step=1,
+        sizing_mode="stretch_width",
+    )
+
+    def _get_doc():
+        return mgr._active_doc() if is_multi else mgr._bk_figure.document
 
     def _on_alpha(event):
         a = event.new / 100.0
@@ -1983,40 +1997,60 @@ def _add_obs_station_overlay(
                 r.glyph.fill_alpha = a
                 # line_alpha stays 0 — circles are fill-only
 
-        if is_multi:
-            doc = mgr._active_doc()
+        doc = _get_doc()
+        if doc is not None:
+            doc.add_next_tick_callback(_apply)
         else:
-            doc = mgr._bk_figure.document
+            _apply()
+
+    def _on_size(event):
+        s = event.new
+
+        def _apply():
+            for r in renderers:
+                r.glyph.size = s
+
+        doc = _get_doc()
         if doc is not None:
             doc.add_next_tick_callback(_apply)
         else:
             _apply()
 
     alpha_slider.param.watch(_on_alpha, "value")
+    size_slider.param.watch(_on_size, "value")
 
-    # Store on mgr so config save/load can access it
+    # Store on mgr so config save/load can access them
     mgr._obs_alpha_slider = alpha_slider
+    mgr._obs_size_slider = size_slider
 
     mgr._controls.insert(-1, pn.Card(
         alpha_slider,
+        size_slider,
         title="Observations",
         collapsed=False,
         sizing_mode="stretch_width",
     ))
 
-    # Patch collect_state to persist the obs opacity in the YAML
+    # Patch collect_state to persist opacity and marker size in the YAML
     _orig_cs = mgr.collect_state
 
     def _patched_cs_obs():
         state = _orig_cs()
-        state["observations"] = {"opacity": mgr._obs_alpha_slider.value}
+        state["observations"] = {
+            "opacity": mgr._obs_alpha_slider.value,
+            "marker_size": mgr._obs_size_slider.value,
+        }
         return state
 
     mgr.collect_state = _patched_cs_obs
 
     # ------------------------------------------------------------------ #
-    # 6. Dynamic update — patch _apply_frame to update marker colours      #
+    # 6. Dynamic update — register a frame callback to update marker vals  #
     # ------------------------------------------------------------------ #
+    # NOTE: mgr._apply_frame is only called in tests/Jupyter (no document).
+    # In Panel serve mode the server goes through _render_frame_data which
+    # runs mgr._extra_frame_callbacks under the document lock.  Always use
+    # add_frame_callback() so the update fires in both contexts.
     def _update_obs(timestamp: pd.Timestamp) -> None:
         if obs_aligned.empty or not obs_cols:
             return
@@ -2035,17 +2069,7 @@ def _add_obs_station_overlay(
             labels.append(f"{v:.0f}" if not np.isnan(v) else "N/A")
         src.data = dict(src.data, value=vals, label=labels)
 
-    _orig_apply = mgr._apply_frame
-
-    def _patched_apply(idx: int, ts_str: str) -> None:
-        _orig_apply(idx, ts_str)
-        if is_multi:
-            ts = mgr._reader_a.time_index[idx]
-        else:
-            ts = mgr._reader.time_index[idx]
-        _update_obs(ts)
-
-    mgr._apply_frame = _patched_apply
+    mgr.add_frame_callback(_update_obs)
 
 
 def animate_hydro(
