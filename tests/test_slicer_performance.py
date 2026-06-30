@@ -184,6 +184,60 @@ def _build_qual_stack(
     return BufferedSlicingReader(streaming, chunk_size=chunk, prefetch=prefetch)
 
 
+def _build_hydro_stack_rsb(
+    h5path: Path,
+    spec_fn: Callable,
+    chunk: int = _CHUNK,
+    prefetch: bool = True,
+):
+    """New production stack: inserts RawSequentialBuffer between raw reader and
+    StreamingTransformedSlicingReader to cache overlapping HDF5 windows."""
+    from dsm2ui.animate import HydroH5FlowReader
+    from dvue.animator import (
+        StreamingTransformedSlicingReader, BufferedSlicingReader, RawSequentialBuffer,
+    )
+    spec = spec_fn()
+    raw = HydroH5FlowReader(str(h5path))
+    # Only insert RSB when there is raw overlap (convolution-type transforms).
+    freq_nanos = raw.time_index.freq.nanos if hasattr(raw.time_index.freq, 'nanos') else int(raw.time_index.freq.delta.total_seconds() * 1e9)
+    raw_overlap = spec.get_overlap(freq_nanos)
+    if raw_overlap > 0:
+        inner = RawSequentialBuffer(raw, prefetch_enabled=prefetch)
+    else:
+        inner = raw
+    streaming = StreamingTransformedSlicingReader(inner, spec)
+    return BufferedSlicingReader(
+        streaming, chunk_size=chunk, prefetch=prefetch,
+        adaptive=True, min_chunk_size=50, max_chunk_size=2000,
+    )
+
+
+def _build_qual_stack_rsb(
+    h5path: Path,
+    spec_fn: Callable,
+    chunk: int = _CHUNK,
+    prefetch: bool = True,
+):
+    """New production stack for QUAL: inserts RawSequentialBuffer."""
+    from dsm2ui.animate import QualH5ConcentrationReader
+    from dvue.animator import (
+        StreamingTransformedSlicingReader, BufferedSlicingReader, RawSequentialBuffer,
+    )
+    spec = spec_fn()
+    raw = QualH5ConcentrationReader(str(h5path), constituent="ec")
+    freq_nanos = raw.time_index.freq.nanos if hasattr(raw.time_index.freq, 'nanos') else int(raw.time_index.freq.delta.total_seconds() * 1e9)
+    raw_overlap = spec.get_overlap(freq_nanos)
+    if raw_overlap > 0:
+        inner = RawSequentialBuffer(raw, prefetch_enabled=prefetch)
+    else:
+        inner = raw
+    streaming = StreamingTransformedSlicingReader(inner, spec)
+    return BufferedSlicingReader(
+        streaming, chunk_size=chunk, prefetch=prefetch,
+        adaptive=True, min_chunk_size=50, max_chunk_size=2000,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Correctness / smoke tests
 # (functional — skipped only if files absent, NOT gated on `performance`)
@@ -895,4 +949,230 @@ class TestChunkBoundaryCrossing:
         assert mean_boundary < mean_interior * 5, (
             f"Prefetch mode: boundary frames ({mean_boundary:.1f} ms) should not be "
             f"> 5× interior frames ({mean_interior:.1f} ms) — prefetch is not working"
+        )
+
+
+# ---------------------------------------------------------------------------
+# RawSequentialBuffer improvement benchmarks
+# Compares the new RSB stack (production default) vs the old stack (no RSB)
+# for Godin-based transforms, which benefit most from raw-level caching.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.performance
+@pytest.mark.integration
+@skip_no_hydro
+class TestRSBImprovementHydro:
+    """Quantify the RawSequentialBuffer improvement on the HYDRO reader stack.
+
+    Each test builds the old stack (no RSB) and the new stack (with RSB),
+    runs a forward sweep and random seeks on each, and prints a side-by-side
+    comparison.  Assertions require the RSB stack to be no *slower* than the
+    old stack; improvement is reported but not enforced beyond a small margin
+    to keep the test machine-speed agnostic.
+
+    Run with::
+
+        pytest -m "performance and integration" -v -s
+    """
+
+    _CHUNK = 90
+    _N_SWEEP = 150
+    _N_SEEK = 20
+    _FRAME_INTERVAL = 0.04   # 40 ms — realistic playback pace
+
+    @staticmethod
+    def _spec_fn():
+        from dsm2ui.animate import (
+            make_godin_transform, make_resample_transform, make_composed_transform,
+        )
+        return make_composed_transform(make_godin_transform(), make_resample_transform("D"))
+
+    def test_rsb_forward_sweep_no_slower_than_baseline(self):
+        """RSB stack forward-sweep mean latency must not exceed 110% of old stack."""
+        spec_fn = self._spec_fn
+
+        # --- old stack (sync, no RSB) ---
+        buf_old = _build_hydro_stack(HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False)
+        try:
+            lats_old = _forward_sweep(buf_old, self._N_SWEEP)
+        finally:
+            buf_old.close()
+
+        # --- new stack (sync, with RSB) ---
+        buf_rsb = _build_hydro_stack_rsb(HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False)
+        try:
+            lats_rsb = _forward_sweep(buf_rsb, self._N_SWEEP)
+        finally:
+            buf_rsb.close()
+
+        mean_old = statistics.mean(lats_old) * 1000
+        mean_rsb = statistics.mean(lats_rsb) * 1000
+        p95_old  = sorted(lats_old)[int(len(lats_old) * 0.95)] * 1000
+        p95_rsb  = sorted(lats_rsb)[int(len(lats_rsb) * 0.95)] * 1000
+        print(
+            f"\n  [hydro/godin_daily/sync/forward]"
+            f"\n    old stack : mean={mean_old:.1f} ms  p95={p95_old:.1f} ms  worst={max(lats_old)*1000:.1f} ms"
+            f"\n    RSB stack : mean={mean_rsb:.1f} ms  p95={p95_rsb:.1f} ms  worst={max(lats_rsb)*1000:.1f} ms"
+            f"\n    delta mean: {mean_rsb - mean_old:+.1f} ms  ({(mean_rsb/mean_old - 1)*100:+.1f}%)",
+            file=sys.stdout,
+        )
+        sys.stdout.flush()
+        # In sync mode RSB uses prefetch_enabled=False (no async thread), so overhead
+        # should be negligible.  The 1.10 tolerance catches any future regressions.
+        assert mean_rsb <= mean_old * 1.10, (
+            f"RSB mean ({mean_rsb:.1f} ms) should not exceed 110% of old-stack mean ({mean_old:.1f} ms)"
+        )
+
+    def test_rsb_prefetch_forward_sweep_vs_old_prefetch(self):
+        """RSB + prefetch vs old + prefetch: worst-frame should be ≤ old worst-frame."""
+        spec_fn = self._spec_fn
+
+        # --- old stack (prefetch, no RSB) ---
+        buf_old = _build_hydro_stack(HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=True)
+        try:
+            buf_old.get_slice(buf_old.time_index[0])  # warm
+            lats_old = _forward_sweep(buf_old, self._N_SWEEP, frame_interval_s=self._FRAME_INTERVAL)
+        finally:
+            buf_old.close()
+
+        # --- new stack (prefetch + RSB) ---
+        buf_rsb = _build_hydro_stack_rsb(HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=True)
+        try:
+            buf_rsb.get_slice(buf_rsb.time_index[0])  # warm
+            lats_rsb = _forward_sweep(buf_rsb, self._N_SWEEP, frame_interval_s=self._FRAME_INTERVAL)
+        finally:
+            buf_rsb.close()
+
+        mean_old  = statistics.mean(lats_old) * 1000
+        mean_rsb  = statistics.mean(lats_rsb) * 1000
+        worst_old = max(lats_old) * 1000
+        worst_rsb = max(lats_rsb) * 1000
+        print(
+            f"\n  [hydro/godin_daily/prefetch/forward+{self._FRAME_INTERVAL*1000:.0f}ms]"
+            f"\n    old stack : mean={mean_old:.1f} ms  worst={worst_old:.1f} ms"
+            f"\n    RSB stack : mean={mean_rsb:.1f} ms  worst={worst_rsb:.1f} ms"
+            f"\n    delta worst: {worst_rsb - worst_old:+.1f} ms  ({(worst_rsb/max(worst_old, 1) - 1)*100:+.1f}%)",
+            file=sys.stdout,
+        )
+        sys.stdout.flush()
+        # RSB must not make the worst-frame more than 20% worse.
+        assert worst_rsb <= worst_old * 1.20, (
+            f"RSB prefetch worst-frame ({worst_rsb:.1f} ms) must not exceed 120% of "
+            f"old-stack worst-frame ({worst_old:.1f} ms)"
+        )
+
+    def test_rsb_random_seeks_no_slower_than_baseline(self):
+        """Random seeks must not be slower with RSB (seeks bypass the RSB cache)."""
+        spec_fn = self._spec_fn
+
+        buf_old = _build_hydro_stack(HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False)
+        try:
+            lats_old = _random_seeks(buf_old, self._N_SEEK)
+        finally:
+            buf_old.close()
+
+        buf_rsb = _build_hydro_stack_rsb(HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False)
+        try:
+            lats_rsb = _random_seeks(buf_rsb, self._N_SEEK)
+        finally:
+            buf_rsb.close()
+
+        mean_old = statistics.mean(lats_old) * 1000
+        mean_rsb = statistics.mean(lats_rsb) * 1000
+        print(
+            f"\n  [hydro/godin_daily/sync/seek]"
+            f"\n    old stack : mean={mean_old:.1f} ms  worst={max(lats_old)*1000:.1f} ms"
+            f"\n    RSB stack : mean={mean_rsb:.1f} ms  worst={max(lats_rsb)*1000:.1f} ms"
+            f"\n    delta mean: {mean_rsb - mean_old:+.1f} ms",
+            file=sys.stdout,
+        )
+        sys.stdout.flush()
+        assert mean_rsb <= mean_old * 1.25, (
+            f"RSB seek mean ({mean_rsb:.1f} ms) must not exceed 125% of old stack ({mean_old:.1f} ms)"
+        )
+
+
+@pytest.mark.performance
+@pytest.mark.integration
+@skip_no_qual
+class TestRSBImprovementQual:
+    """Quantify the RawSequentialBuffer improvement on the QUAL EC reader stack."""
+
+    _CHUNK = 90
+    _N_SWEEP = 150
+    _FRAME_INTERVAL = 0.04
+
+    @staticmethod
+    def _spec_fn():
+        from dsm2ui.animate import (
+            make_godin_transform, make_resample_transform, make_composed_transform,
+        )
+        return make_composed_transform(make_godin_transform(), make_resample_transform("D"))
+
+    def test_rsb_forward_sweep_no_slower_than_baseline(self):
+        spec_fn = self._spec_fn
+
+        buf_old = _build_qual_stack(QUAL_H5, spec_fn, chunk=self._CHUNK, prefetch=False)
+        try:
+            lats_old = _forward_sweep(buf_old, self._N_SWEEP)
+        finally:
+            buf_old.close()
+
+        buf_rsb = _build_qual_stack_rsb(QUAL_H5, spec_fn, chunk=self._CHUNK, prefetch=False)
+        try:
+            lats_rsb = _forward_sweep(buf_rsb, self._N_SWEEP)
+        finally:
+            buf_rsb.close()
+
+        mean_old = statistics.mean(lats_old) * 1000
+        mean_rsb = statistics.mean(lats_rsb) * 1000
+        p95_old  = sorted(lats_old)[int(len(lats_old) * 0.95)] * 1000
+        p95_rsb  = sorted(lats_rsb)[int(len(lats_rsb) * 0.95)] * 1000
+        print(
+            f"\n  [qual/godin_daily/sync/forward]"
+            f"\n    old stack : mean={mean_old:.1f} ms  p95={p95_old:.1f} ms  worst={max(lats_old)*1000:.1f} ms"
+            f"\n    RSB stack : mean={mean_rsb:.1f} ms  p95={p95_rsb:.1f} ms  worst={max(lats_rsb)*1000:.1f} ms"
+            f"\n    delta mean: {mean_rsb - mean_old:+.1f} ms  ({(mean_rsb/mean_old - 1)*100:+.1f}%)",
+            file=sys.stdout,
+        )
+        sys.stdout.flush()
+        # In sync mode RSB uses prefetch_enabled=False (no async thread), so overhead
+        # should be negligible.  The 1.10 tolerance catches any future regressions.
+        assert mean_rsb <= mean_old * 1.10, (
+            f"QUAL RSB mean ({mean_rsb:.1f} ms) must not exceed 110% of old-stack mean ({mean_old:.1f} ms)"
+        )
+
+    def test_rsb_prefetch_forward_sweep_vs_old_prefetch(self):
+        spec_fn = self._spec_fn
+
+        buf_old = _build_qual_stack(QUAL_H5, spec_fn, chunk=self._CHUNK, prefetch=True)
+        try:
+            buf_old.get_slice(buf_old.time_index[0])
+            lats_old = _forward_sweep(buf_old, self._N_SWEEP, frame_interval_s=self._FRAME_INTERVAL)
+        finally:
+            buf_old.close()
+
+        buf_rsb = _build_qual_stack_rsb(QUAL_H5, spec_fn, chunk=self._CHUNK, prefetch=True)
+        try:
+            buf_rsb.get_slice(buf_rsb.time_index[0])
+            lats_rsb = _forward_sweep(buf_rsb, self._N_SWEEP, frame_interval_s=self._FRAME_INTERVAL)
+        finally:
+            buf_rsb.close()
+
+        mean_old  = statistics.mean(lats_old) * 1000
+        mean_rsb  = statistics.mean(lats_rsb) * 1000
+        worst_old = max(lats_old) * 1000
+        worst_rsb = max(lats_rsb) * 1000
+        print(
+            f"\n  [qual/godin_daily/prefetch/forward+{self._FRAME_INTERVAL*1000:.0f}ms]"
+            f"\n    old stack : mean={mean_old:.1f} ms  worst={worst_old:.1f} ms"
+            f"\n    RSB stack : mean={mean_rsb:.1f} ms  worst={worst_rsb:.1f} ms"
+            f"\n    delta worst: {worst_rsb - worst_old:+.1f} ms",
+            file=sys.stdout,
+        )
+        sys.stdout.flush()
+        assert worst_rsb <= worst_old * 1.20, (
+            f"QUAL RSB prefetch worst-frame ({worst_rsb:.1f} ms) must not exceed 120% of "
+            f"old-stack worst-frame ({worst_old:.1f} ms)"
         )

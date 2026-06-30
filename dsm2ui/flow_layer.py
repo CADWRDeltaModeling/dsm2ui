@@ -934,7 +934,10 @@ class FlowLayer:
             from dvue.animator import BufferedSlicingReader
             self._base_reader_raw = None  # trigger creation in _get_base_reader
             base = self._get_base_reader()
-            self._reader = BufferedSlicingReader(base, chunk_size=200, prefetch=True)
+            self._reader = BufferedSlicingReader(
+                base, chunk_size=200, prefetch=True,
+                adaptive=True, min_chunk_size=50, max_chunk_size=2000,
+            )
         return self._reader
 
     def _get_res_reader(self):
@@ -946,7 +949,8 @@ class FlowLayer:
                 self._hydro_h5_path
             )
             self._res_reader = BufferedSlicingReader(
-                self._base_res_reader_raw, chunk_size=200, prefetch=True
+                self._base_res_reader_raw, chunk_size=200, prefetch=True,
+                adaptive=True, min_chunk_size=50, max_chunk_size=2000,
             )
         return self._res_reader
 
@@ -957,20 +961,42 @@ class FlowLayer:
             from dvue.animator import BufferedSlicingReader
             self._base_qext_reader_raw = HydroH5QextReader(self._hydro_h5_path)
             self._qext_reader = BufferedSlicingReader(
-                self._base_qext_reader_raw, chunk_size=200, prefetch=True
+                self._base_qext_reader_raw, chunk_size=200, prefetch=True,
+                adaptive=True, min_chunk_size=50, max_chunk_size=2000,
             )
         return self._qext_reader
 
     def _apply_transform_to_base(self, base_reader, transform_spec_or_none):
-        """Wrap *base_reader* with an optional transform and buffer it."""
-        from dvue.animator import BufferedSlicingReader
+        """Wrap *base_reader* with an optional transform and buffer it.
+
+        When the transform has a non-zero overlap (e.g. Godin filter, rolling
+        average) a :class:`~dvue.animator.RawSequentialBuffer` is inserted
+        between the raw reader and the transform so that HDF5 I/O and the
+        transform computation overlap in time (pipelined).
+        """
+        from dvue.animator import BufferedSlicingReader, RawSequentialBuffer
         if transform_spec_or_none is not None:
             from dvue.animator.reader import StreamingTransformedSlicingReader, TransformSpec
             if isinstance(transform_spec_or_none, TransformSpec):
+                try:
+                    import pandas as _pd
+                    freq_nanos = int(
+                        _pd.tseries.frequencies.to_offset(
+                            base_reader.time_index.freq
+                        ).nanos
+                    )
+                    raw_overlap = transform_spec_or_none.get_overlap(freq_nanos)
+                except (AttributeError, TypeError):
+                    raw_overlap = 0
+                if raw_overlap > 0:
+                    base_reader = RawSequentialBuffer(base_reader)
                 base_reader = StreamingTransformedSlicingReader(
                     base_reader, transform_spec_or_none
                 )
-        return BufferedSlicingReader(base_reader, chunk_size=200, prefetch=True)
+        return BufferedSlicingReader(
+            base_reader, chunk_size=200, prefetch=True,
+            adaptive=True, min_chunk_size=50, max_chunk_size=2000,
+        )
 
     def set_transform(self, transform_spec_or_none) -> None:
         """Rebuild all flow readers to apply (or remove) a time-domain transform.

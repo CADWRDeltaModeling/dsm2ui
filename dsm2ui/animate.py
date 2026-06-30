@@ -2952,11 +2952,9 @@ def make_godin_transform():
     dvue.
 
     The output has the **same time index** as the input but with NaN for the
-    ~33.5 h warmup period at each end.  To remove the NaN edges, pass
-    ``warmup_steps`` to :class:`~dvue.animator.TransformedSlicingReader`.
-
-    The convenience helper :func:`apply_godin` constructs a
-    ``TransformedSlicingReader`` with the correct warmup automatically.
+    ~33.5 h warmup period at each end; :meth:`~dvue.animator.TransformSpec.get_overlap`
+    is set accordingly so that :class:`~dvue.animator.StreamingTransformedSlicingReader`
+    fetches sufficient raw context at each chunk boundary.
 
     Returns
     -------
