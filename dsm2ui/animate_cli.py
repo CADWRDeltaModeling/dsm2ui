@@ -639,6 +639,9 @@ def qual_cmd(
             flow_config_file = cfg["flow_config"]
             if not flow_nodes_file:
                 flow_nodes_file = cfg.get("flow_nodes_file") or flow_nodes_file
+        # Restore stage_config for multi-qual case (saved as top-level key)
+        if not stage_config_file and cfg.get("stage_config"):
+            stage_config_file = cfg["stage_config"]
         log.info("Loaded config from %s (%d file(s))", config_file, len(h5files))
     elif not h5files:
         raise click.UsageError(
