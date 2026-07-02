@@ -1176,3 +1176,497 @@ class TestRSBImprovementQual:
             f"QUAL RSB prefetch worst-frame ({worst_rsb:.1f} ms) must not exceed 120% of "
             f"old-stack worst-frame ({worst_old:.1f} ms)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for chunk_size scaling in _setup_reader
+# No real HDF5 files required — uses InMemorySlicingReader as a mock.
+# ---------------------------------------------------------------------------
+
+class TestChunkSizeScaling:
+    """Verify that _setup_reader scales chunk_size for aggregate transforms.
+
+    These tests do NOT need real HDF5 files — they use InMemorySlicingReader
+    with synthetic data to exercise the exact code path in
+    GeoAnimatorManager._setup_reader that was added to fix the slow cold-start
+    for daily / weekly aggregate transforms.
+
+    Key regression guarded:
+      pandas >= 2.2 raises ValueError from Day.nanos (not a fixed-frequency
+      offset for tz-aware data).  The fix uses a sample-Timedelta fallback.
+      Without it, the except-Exception block silently disabled the scaling and
+      chunk_size stayed at 200, mapping to 200 * 96 = 19 200 raw steps for
+      a daily aggregate from 15-min data.
+    """
+
+    # ------------------------------------------------------------------
+    # Pure-math tests (no readers, no H5 files)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("freq_str,expected_ns", [
+        ("D",  86_400_000_000_000),
+        ("h",   3_600_000_000_000),
+        ("15min",  900_000_000_000),
+    ])
+    def test_offset_ns_fallback(self, freq_str, expected_ns):
+        """The two-attempt nanos lookup returns the correct value for all freqs."""
+        out_offset = pd.tseries.frequencies.to_offset(freq_str)
+        try:
+            out_ns = int(out_offset.nanos)
+        except (ValueError, AttributeError):
+            _t0 = pd.Timestamp("2001-01-01")
+            out_ns = int((_t0 + out_offset - _t0).total_seconds() * 1e9)
+        assert out_ns == expected_ns, (
+            f"freq={freq_str!r}: expected {expected_ns}, got {out_ns}"
+        )
+
+    def test_daily_from_15min_ratio(self):
+        """Daily from 15-min gives ratio=96, chunk_size=5."""
+        freq_nanos = int(pd.tseries.frequencies.to_offset("15min").nanos)
+        out_offset = pd.tseries.frequencies.to_offset("D")
+        try:
+            out_ns = int(out_offset.nanos)
+        except (ValueError, AttributeError):
+            _t0 = pd.Timestamp("2001-01-01")
+            out_ns = int((_t0 + out_offset - _t0).total_seconds() * 1e9)
+        ratio = out_ns // freq_nanos
+        chunk_size = max(5, 200 // ratio)
+        min_chunk  = max(2, 50 // ratio)
+        max_chunk  = max(chunk_size, 2000 // ratio)
+        assert ratio == 96
+        assert chunk_size == 5
+        assert min_chunk == 2
+        assert max_chunk == 20
+
+    def test_hourly_from_15min_ratio(self):
+        """Hourly from 15-min gives ratio=4, chunk_size=50."""
+        freq_nanos = int(pd.tseries.frequencies.to_offset("15min").nanos)
+        out_ns = int(pd.tseries.frequencies.to_offset("h").nanos)
+        ratio = out_ns // freq_nanos
+        chunk_size = max(5, 200 // ratio)
+        assert ratio == 4
+        assert chunk_size == 50
+
+    # ------------------------------------------------------------------
+    # Integration tests via GeoAnimatorManager._setup_reader
+    # Uses InMemorySlicingReader — no H5 files needed.
+    # ------------------------------------------------------------------
+
+    def _make_15min_reader(self, n_steps: int = 1000, n_channels: int = 5):
+        """Return an InMemorySlicingReader with n_channels of fake 15-min data."""
+        from dvue.animator.reader import InMemorySlicingReader
+        idx = pd.date_range("2020-01-01", periods=n_steps, freq="15min")
+        df = pd.DataFrame(
+            {i: range(n_steps) for i in range(n_channels)},
+            index=idx,
+        )
+        return InMemorySlicingReader(df)
+
+    def _make_manager_stub(self, base_reader, buffer_chunk_size: int = 200):
+        """Return a minimal object exposing _setup_reader from GeoAnimatorManager."""
+        from dvue.animator.ui import GeoAnimatorManager
+        # Access _setup_reader as an unbound method to avoid constructing
+        # the full Panel/Bokeh UI (which needs a running event loop).
+        mgr = object.__new__(GeoAnimatorManager)
+        mgr._base_reader = base_reader
+        mgr._buffer_chunk_size = buffer_chunk_size
+        mgr._transform_options = {}
+        return mgr
+
+    @pytest.mark.integration
+    def test_setup_reader_no_transform_uses_default_chunk(self):
+        """No transform → chunk_size unchanged at _buffer_chunk_size."""
+        from dvue.animator.reader import BufferedSlicingReader
+        raw = self._make_15min_reader()
+        mgr = self._make_manager_stub(raw, buffer_chunk_size=200)
+        reader = mgr._setup_reader("none")
+        assert isinstance(reader, BufferedSlicingReader)
+        assert reader._chunk_size == 200
+
+    @pytest.mark.integration
+    def test_setup_reader_daily_aggregate_scales_chunk(self):
+        """Daily aggregate from 15-min must produce chunk_size=5."""
+        from dsm2ui.animate import make_resample_transform
+        from dvue.animator.reader import BufferedSlicingReader
+        raw = self._make_15min_reader()
+        mgr = self._make_manager_stub(raw, buffer_chunk_size=200)
+        mgr._transform_options = {"Daily mean": make_resample_transform("D")}
+        reader = mgr._setup_reader("Daily mean")
+        assert isinstance(reader, BufferedSlicingReader)
+        assert reader._chunk_size == 5, (
+            f"Expected chunk_size=5 for daily aggregate from 15-min, "
+            f"got {reader._chunk_size}"
+        )
+        assert reader._min_chunk_size == 2
+        assert reader._max_chunk_size == 20
+
+    @pytest.mark.integration
+    def test_setup_reader_godin_daily_scales_chunk(self):
+        """Godin → Daily mean (composed) must also produce chunk_size=5."""
+        from dsm2ui.animate import (
+            make_godin_transform, make_resample_transform, make_composed_transform,
+        )
+        from dvue.animator.reader import BufferedSlicingReader
+        raw = self._make_15min_reader()
+        mgr = self._make_manager_stub(raw, buffer_chunk_size=200)
+        spec = make_composed_transform(make_godin_transform(), make_resample_transform("D"))
+        mgr._transform_options = {"Godin → Daily mean": spec}
+        reader = mgr._setup_reader("Godin → Daily mean")
+        assert isinstance(reader, BufferedSlicingReader)
+        assert reader._chunk_size == 5, (
+            f"Expected chunk_size=5 for Godin→Daily from 15-min, "
+            f"got {reader._chunk_size}"
+        )
+
+    @pytest.mark.integration
+    def test_setup_reader_godin_convolution_keeps_default_chunk(self):
+        """Godin alone (convolution, output_freq=None) must NOT scale chunk_size."""
+        from dsm2ui.animate import make_godin_transform
+        from dvue.animator.reader import BufferedSlicingReader, StreamingTransformedSlicingReader
+        raw = self._make_15min_reader()
+        mgr = self._make_manager_stub(raw, buffer_chunk_size=200)
+        mgr._transform_options = {"Godin": make_godin_transform()}
+        reader = mgr._setup_reader("Godin")
+        assert isinstance(reader, BufferedSlicingReader)
+        assert reader._chunk_size == 200, (
+            "Godin (convolution) should keep default chunk_size=200"
+        )
+        # Inner must be STSR, not RSR
+        assert isinstance(reader._inner, StreamingTransformedSlicingReader)
+
+
+# ---------------------------------------------------------------------------
+# ResamplingSlicingReader (RSR) improvement benchmarks
+# Tests the new production stack: STSR(filter) → RSR → BSR
+# and verifies cold-start latency is small even for composed transforms.
+# ---------------------------------------------------------------------------
+
+
+def _build_production_stack(
+    h5path: Path,
+    spec_fn: Callable,
+    h5_type: str = "hydro",
+    chunk: int = 10,
+    prefetch: bool = True,
+):
+    """Build the production reader stack that mirrors GeoAnimatorManager._setup_reader.
+
+    For aggregate specs (kind='aggregate') this creates:
+      BSR(chunk) → RSR(output_freq) → [STSR(filter_spec)] → [RSB] → BaseReader
+
+    For convolution specs (kind='convolution') this creates:
+      BSR(chunk) → STSR(spec) → [RSB] → BaseReader
+    """
+    from dvue.animator import BufferedSlicingReader, RawSequentialBuffer, ResamplingSlicingReader
+    from dvue.animator.reader import StreamingTransformedSlicingReader
+
+    if h5_type == "qual":
+        from dsm2ui.animate import QualH5ConcentrationReader
+        base_reader = QualH5ConcentrationReader(str(h5path), constituent="ec")
+    else:
+        from dsm2ui.animate import HydroH5FlowReader
+        base_reader = HydroH5FlowReader(str(h5path))
+
+    spec = spec_fn()
+    reader = base_reader
+
+    try:
+        freq_nanos = int(
+            pd.tseries.frequencies.to_offset(reader.time_index.freq).nanos
+        )
+    except (AttributeError, TypeError):
+        freq_nanos = 0
+
+    if spec.kind == "aggregate":
+        filter_spec = spec.filter_spec
+        if filter_spec is not None:
+            try:
+                raw_overlap = filter_spec.get_overlap(freq_nanos)
+            except (AttributeError, TypeError):
+                raw_overlap = 0
+            if raw_overlap > 0:
+                reader = RawSequentialBuffer(reader, prefetch_enabled=prefetch)
+            reader = StreamingTransformedSlicingReader(reader, filter_spec)
+        reader = ResamplingSlicingReader(reader, spec.output_freq, spec.resample_agg)
+    else:
+        try:
+            raw_overlap = spec.get_overlap(freq_nanos)
+        except (AttributeError, TypeError):
+            raw_overlap = 0
+        if raw_overlap > 0:
+            reader = RawSequentialBuffer(reader, prefetch_enabled=prefetch)
+        reader = StreamingTransformedSlicingReader(reader, spec)
+
+    return BufferedSlicingReader(
+        reader, chunk_size=chunk, prefetch=prefetch,
+        adaptive=True, min_chunk_size=2, max_chunk_size=100,
+    )
+
+
+@pytest.mark.performance
+@pytest.mark.integration
+@skip_no_hydro
+class TestRSRImprovementHydro:
+    """Verify the ResamplingSlicingReader path is fast on cold start.
+
+    The key regression being guarded: before RSR, the first ``get_slice``
+    after a transform switch triggered ``_load_chunk`` with chunk_size=200
+    *output* days, loading 200 * freq_ratio + 2*overlap raw steps all at
+    once (e.g. 200*24 + 68 = 4868 hourly steps for Godin→Daily, or
+    200*96 + 268 = 19468 fifteen-minute steps).  With RSR, the first chunk
+    is only ``chunk_size`` output days = 10 days worth of raw data.
+
+    Cold-start tolerance: < 5 s (was ~100 s without RSR for flow layer).
+
+    Run with::
+
+        pytest -m "performance and integration" -k TestRSRImprovement -v -s
+    """
+
+    _COLD_START_LIMIT_S = 5.0   # must initialise + serve first frame within 5 s
+    _CHUNK = 10
+    _N_SWEEP = 60
+    _N_SEEK = 10
+
+    # ------------------------------------------------------------------ #
+    #  Daily mean (no filter, just RSR)                                   #
+    # ------------------------------------------------------------------ #
+
+    def test_daily_mean_cold_start_fast(self):
+        """Daily mean cold start must be < 5 s with RSR."""
+        from dsm2ui.animate import make_resample_transform
+        buf = _build_production_stack(
+            HYDRO_H5, lambda: make_resample_transform("D"),
+            chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            ts = buf.time_index[len(buf.time_index) // 2]
+            t0 = time.perf_counter()
+            s = buf.get_slice(ts)
+            cold_start = time.perf_counter() - t0
+        finally:
+            buf.close()
+        print(f"\n  [hydro/daily/RSR] cold start: {cold_start*1000:.0f} ms",
+              file=sys.stdout); sys.stdout.flush()
+        assert cold_start < self._COLD_START_LIMIT_S, (
+            f"Daily mean RSR cold start {cold_start:.2f} s exceeds {self._COLD_START_LIMIT_S} s"
+        )
+        assert s.notna().any()
+
+    def test_daily_mean_forward_sweep(self):
+        from dsm2ui.animate import make_resample_transform
+        buf = _build_production_stack(
+            HYDRO_H5, lambda: make_resample_transform("D"),
+            chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            lats = _forward_sweep(buf, self._N_SWEEP)
+        finally:
+            buf.close()
+        _print_timing("hydro/daily/RSR/forward", lats)
+        assert max(lats) < self._COLD_START_LIMIT_S
+
+    # ------------------------------------------------------------------ #
+    #  Rolling 14D → Daily mean (main regression target)                  #
+    # ------------------------------------------------------------------ #
+
+    def test_rolling14d_daily_cold_start_fast(self):
+        """Rolling 14D → Daily cold start must be < 5 s with RSR."""
+        from dsm2ui.animate import (
+            make_moving_average_transform, make_resample_transform, make_composed_transform,
+        )
+        spec_fn = lambda: make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D"),
+        )
+        buf = _build_production_stack(
+            HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            ts = buf.time_index[len(buf.time_index) // 2]
+            t0 = time.perf_counter()
+            s = buf.get_slice(ts)
+            cold_start = time.perf_counter() - t0
+        finally:
+            buf.close()
+        print(f"\n  [hydro/rolling14d_daily/RSR] cold start: {cold_start*1000:.0f} ms",
+              file=sys.stdout); sys.stdout.flush()
+        assert cold_start < self._COLD_START_LIMIT_S, (
+            f"Rolling14D→Daily RSR cold start {cold_start:.2f} s exceeds {self._COLD_START_LIMIT_S} s"
+        )
+        assert s.notna().any()
+
+    def test_rolling14d_daily_forward_sweep(self):
+        from dsm2ui.animate import (
+            make_moving_average_transform, make_resample_transform, make_composed_transform,
+        )
+        spec_fn = lambda: make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D"),
+        )
+        buf = _build_production_stack(
+            HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            lats = _forward_sweep(buf, self._N_SWEEP)
+        finally:
+            buf.close()
+        _print_timing("hydro/rolling14d_daily/RSR/forward", lats)
+        assert max(lats) < self._COLD_START_LIMIT_S
+
+    def test_rolling14d_daily_output_is_daily(self):
+        """Verify the time index of the production stack is daily-frequency."""
+        from dsm2ui.animate import (
+            make_moving_average_transform, make_resample_transform, make_composed_transform,
+        )
+        spec_fn = lambda: make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D"),
+        )
+        buf = _build_production_stack(
+            HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            assert buf.time_index.freq == pd.tseries.frequencies.to_offset("D"), (
+                f"Expected daily freq, got {buf.time_index.freq!r}"
+            )
+            assert len(buf.time_index) > 0
+        finally:
+            buf.close()
+
+    def test_rolling14d_daily_random_seeks(self):
+        from dsm2ui.animate import (
+            make_moving_average_transform, make_resample_transform, make_composed_transform,
+        )
+        spec_fn = lambda: make_composed_transform(
+            make_moving_average_transform("14D"),
+            make_resample_transform("D"),
+        )
+        buf = _build_production_stack(
+            HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            lats = _random_seeks(buf, self._N_SEEK)
+        finally:
+            buf.close()
+        _print_timing("hydro/rolling14d_daily/RSR/seek", lats)
+        assert max(lats) < self._COLD_START_LIMIT_S
+
+    # ------------------------------------------------------------------ #
+    #  Godin → Daily mean                                                  #
+    # ------------------------------------------------------------------ #
+
+    def test_godin_daily_cold_start_fast(self):
+        """Godin → Daily cold start must be < 5 s with RSR."""
+        from dsm2ui.animate import (
+            make_godin_transform, make_resample_transform, make_composed_transform,
+        )
+        spec_fn = lambda: make_composed_transform(
+            make_godin_transform(), make_resample_transform("D")
+        )
+        buf = _build_production_stack(
+            HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            ts = buf.time_index[len(buf.time_index) // 2]
+            t0 = time.perf_counter()
+            s = buf.get_slice(ts)
+            cold_start = time.perf_counter() - t0
+        finally:
+            buf.close()
+        print(f"\n  [hydro/godin_daily/RSR] cold start: {cold_start*1000:.0f} ms",
+              file=sys.stdout); sys.stdout.flush()
+        assert cold_start < self._COLD_START_LIMIT_S, (
+            f"Godin→Daily RSR cold start {cold_start:.2f} s exceeds {self._COLD_START_LIMIT_S} s"
+        )
+        assert s.notna().any()
+
+    def test_godin_daily_forward_sweep(self):
+        from dsm2ui.animate import (
+            make_godin_transform, make_resample_transform, make_composed_transform,
+        )
+        spec_fn = lambda: make_composed_transform(
+            make_godin_transform(), make_resample_transform("D")
+        )
+        buf = _build_production_stack(
+            HYDRO_H5, spec_fn, chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            lats = _forward_sweep(buf, self._N_SWEEP)
+        finally:
+            buf.close()
+        _print_timing("hydro/godin_daily/RSR/forward", lats)
+        assert max(lats) < self._COLD_START_LIMIT_S
+
+
+@pytest.mark.performance
+@pytest.mark.integration
+@skip_no_qual
+class TestRSRImprovementQual:
+    """Same cold-start regression tests for the QUAL EC reader stack."""
+
+    _COLD_START_LIMIT_S = 5.0
+    _CHUNK = 10
+    _N_SWEEP = 60
+
+    def test_daily_mean_cold_start_fast(self):
+        from dsm2ui.animate import make_resample_transform
+        buf = _build_production_stack(
+            QUAL_H5, lambda: make_resample_transform("D"),
+            h5_type="qual", chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            ts = buf.time_index[len(buf.time_index) // 2]
+            t0 = time.perf_counter()
+            s = buf.get_slice(ts)
+            cold_start = time.perf_counter() - t0
+        finally:
+            buf.close()
+        print(f"\n  [qual/daily/RSR] cold start: {cold_start*1000:.0f} ms",
+              file=sys.stdout); sys.stdout.flush()
+        assert cold_start < self._COLD_START_LIMIT_S
+        assert s.notna().any()
+
+    def test_rolling14d_daily_cold_start_fast(self):
+        from dsm2ui.animate import (
+            make_moving_average_transform, make_resample_transform, make_composed_transform,
+        )
+        spec_fn = lambda: make_composed_transform(
+            make_moving_average_transform("14D"), make_resample_transform("D")
+        )
+        buf = _build_production_stack(
+            QUAL_H5, spec_fn, h5_type="qual", chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            ts = buf.time_index[len(buf.time_index) // 2]
+            t0 = time.perf_counter()
+            s = buf.get_slice(ts)
+            cold_start = time.perf_counter() - t0
+        finally:
+            buf.close()
+        print(f"\n  [qual/rolling14d_daily/RSR] cold start: {cold_start*1000:.0f} ms",
+              file=sys.stdout); sys.stdout.flush()
+        assert cold_start < self._COLD_START_LIMIT_S
+        assert s.notna().any()
+
+    def test_godin_daily_cold_start_fast(self):
+        from dsm2ui.animate import (
+            make_godin_transform, make_resample_transform, make_composed_transform,
+        )
+        spec_fn = lambda: make_composed_transform(
+            make_godin_transform(), make_resample_transform("D")
+        )
+        buf = _build_production_stack(
+            QUAL_H5, spec_fn, h5_type="qual", chunk=self._CHUNK, prefetch=False,
+        )
+        try:
+            ts = buf.time_index[len(buf.time_index) // 2]
+            t0 = time.perf_counter()
+            s = buf.get_slice(ts)
+            cold_start = time.perf_counter() - t0
+        finally:
+            buf.close()
+        print(f"\n  [qual/godin_daily/RSR] cold start: {cold_start*1000:.0f} ms",
+              file=sys.stdout); sys.stdout.flush()
+        assert cold_start < self._COLD_START_LIMIT_S
+        assert s.notna().any()

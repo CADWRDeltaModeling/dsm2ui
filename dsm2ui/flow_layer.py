@@ -969,22 +969,51 @@ class FlowLayer:
     def _apply_transform_to_base(self, base_reader, transform_spec_or_none):
         """Wrap *base_reader* with an optional transform and buffer it.
 
-        When the transform has a non-zero overlap (e.g. Godin filter, rolling
-        average) a :class:`~dvue.animator.RawSequentialBuffer` is inserted
-        between the raw reader and the transform so that HDF5 I/O and the
-        transform computation overlap in time (pipelined).
+        Aggregate (resample) transforms use :class:`~dvue.animator.ResamplingSlicingReader`
+        so that each output-step request fetches only the inner steps needed
+        rather than loading a large overlap-padded chunk.
         """
         from dvue.animator import BufferedSlicingReader, RawSequentialBuffer
-        if transform_spec_or_none is not None:
-            from dvue.animator.reader import StreamingTransformedSlicingReader, TransformSpec
-            if isinstance(transform_spec_or_none, TransformSpec):
+        from dvue.animator.reader import (
+            StreamingTransformedSlicingReader, ResamplingSlicingReader, TransformSpec
+        )
+        chunk_size = 200
+        min_chunk = 50
+        max_chunk = 2000
+        target_buf_s = 10.0
+        if transform_spec_or_none is not None and isinstance(transform_spec_or_none, TransformSpec):
+            import pandas as _pd
+            try:
+                freq_nanos = int(
+                    _pd.tseries.frequencies.to_offset(
+                        base_reader.time_index.freq
+                    ).nanos
+                )
+            except (AttributeError, TypeError):
+                freq_nanos = 0
+
+            if transform_spec_or_none.kind == "aggregate":
+                # Convolution pre-filter (e.g. Godin, rolling 14D)
+                filter_spec = transform_spec_or_none.filter_spec
+                if filter_spec is not None:
+                    try:
+                        raw_overlap = filter_spec.get_overlap(freq_nanos)
+                    except (AttributeError, TypeError):
+                        raw_overlap = 0
+                    if raw_overlap > 0:
+                        base_reader = RawSequentialBuffer(base_reader)
+                    base_reader = StreamingTransformedSlicingReader(base_reader, filter_spec)
+                base_reader = ResamplingSlicingReader(
+                    base_reader,
+                    transform_spec_or_none.output_freq,
+                    transform_spec_or_none.resample_agg,
+                )
+                chunk_size = 10
+                min_chunk = 2
+                max_chunk = 365
+                target_buf_s = 30.0
+            else:
                 try:
-                    import pandas as _pd
-                    freq_nanos = int(
-                        _pd.tseries.frequencies.to_offset(
-                            base_reader.time_index.freq
-                        ).nanos
-                    )
                     raw_overlap = transform_spec_or_none.get_overlap(freq_nanos)
                 except (AttributeError, TypeError):
                     raw_overlap = 0
@@ -994,8 +1023,9 @@ class FlowLayer:
                     base_reader, transform_spec_or_none
                 )
         return BufferedSlicingReader(
-            base_reader, chunk_size=200, prefetch=True,
-            adaptive=True, min_chunk_size=50, max_chunk_size=2000,
+            base_reader, chunk_size=chunk_size, prefetch=True,
+            adaptive=True, min_chunk_size=min_chunk, max_chunk_size=max_chunk,
+            target_buffer_seconds=target_buf_s,
         )
 
     def set_transform(self, transform_spec_or_none) -> None:

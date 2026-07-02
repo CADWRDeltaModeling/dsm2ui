@@ -1604,25 +1604,25 @@ def make_composed_transform(
     spec_b: "TransformSpec",
 ) -> "TransformSpec":
     """Return a :class:`~dvue.animator.TransformSpec` that applies *spec_a*
-    then *spec_b* in sequence.
+    (a convolution filter) then *spec_b* (a resample) in sequence.
 
-    The warmup overlap (``get_overlap``) from *spec_a* is preserved so the
-    streaming reader prefetches enough context for *spec_a*'s window (e.g.
-    Godin's 33.5 h).  The output frequency is taken from *spec_b* (the final
-    resampling step).
+    The result carries ``filter_spec=spec_a`` so that :meth:`_setup_reader`
+    stacks a :class:`~dvue.animator.StreamingTransformedSlicingReader` for the
+    convolution step followed by a :class:`~dvue.animator.ResamplingSlicingReader`
+    for the resample step.  This avoids loading a large overlap-padded raw
+    chunk for every output-step request.
 
     Parameters
     ----------
     spec_a : TransformSpec
-        First transform (e.g. Godin filter).
+        Convolution pre-filter (e.g. Godin, rolling 14D).
     spec_b : TransformSpec
-        Second transform applied to the result of *spec_a*
-        (e.g. daily resample).
+        Aggregate resample applied to the filtered output (e.g. daily mean).
 
     Returns
     -------
     TransformSpec
-        Composed specification.
+        Composed specification with ``kind="aggregate"``.
     """
     from dvue.animator.reader import TransformSpec
 
@@ -1637,15 +1637,12 @@ def make_composed_transform(
     )
 
     return TransformSpec(
-        transform_fn=_composed,
-        # The output kind is determined by the final stage: if spec_b is
-        # aggregate (e.g. daily resample), the composed transform must also be
-        # aggregate so dvue uses the correct code path.  Using spec_a's kind
-        # here would trigger dvue's convolution path which assumes input_len ==
-        # output_len — that assumption is violated when spec_b resamples.
-        kind=spec_b.kind if spec_b.kind == "aggregate" else spec_a.kind,
+        transform_fn=_composed,      # backward compat: STSR aggregate path still works
+        kind="aggregate",
         get_overlap=spec_a.get_overlap,
-        output_freq=spec_b.output_freq or spec_a.output_freq,
+        output_freq=spec_b.output_freq,
+        filter_spec=spec_a,          # new RSR path: STSR(spec_a) → RSR
+        resample_agg=spec_b.resample_agg,
     )
 
 
@@ -2985,10 +2982,9 @@ def make_moving_average_transform(window: str = "24h", min_periods: int = 1):
 def make_godin_transform():
     """Return a transform that applies the Godin tidal filter via vtools3.
 
-    The Godin filter is a cascaded cosine-Lanczos low-pass filter that removes
-    tidal variability (periods < ~25 h) while preserving subtidal signals.  It
-    requires **vtools3** which is a DSM2-specific dependency not bundled with
-    dvue.
+    The Godin filter (A24²A25 cascaded boxcar) removes tidal variability
+    (periods < ~25 h) while preserving subtidal signals.  It requires
+    **vtools3** which is a DSM2-specific dependency not bundled with dvue.
 
     The output has the **same time index** as the input but with NaN for the
     ~33.5 h warmup period at each end; :meth:`~dvue.animator.TransformSpec.get_overlap`
@@ -3013,37 +3009,47 @@ def make_godin_transform():
                 "Install it with: conda install -c cadwr-dms vtools3"
             ) from exc
 
-        godin_ir = generate_godin_fir(df.index.freq)
+        # Ensure index.freq is set so generate_godin_fir can look up its cache.
+        freq = df.index.freq
+        if freq is None:
+            inferred = pd.infer_freq(df.index)
+            if inferred is not None:
+                df = df.copy()
+                df.index.freq = pd.tseries.frequencies.to_offset(inferred)
+                freq = df.index.freq
+
+        godin_ir = generate_godin_fir(freq)
         n_filt = len(godin_ir)
         nhalffilt = n_filt // 2
+        arr = df.to_numpy(dtype=np.float64)          # (n_time, n_channels)
+        n_time, n_cols = arr.shape if arr.ndim == 2 else (len(arr), 1)
+        if arr.ndim == 1:
+            arr = arr[:, None]
 
-        arr = df.to_numpy(dtype=np.float64)  # (n_time, n_channels)
-        n_time = arr.shape[0]
-
-        # Batch FFT-based convolution — all channels in a single pass.
-        # Equivalent to calling np.convolve(col, godin_ir, mode="same")
-        # per column but ~50× faster for a 500-channel QUAL file because:
-        #  1. generate_godin_fir() is called only once (not once per column).
-        #  2. A single batch rfft/irfft replaces N individual np.convolve
-        #     calls (np.convolve uses slow direct convolution; rfft uses FFT).
+        # Batch FFT convolution — one rfft/irfft pass for ALL channels.
+        # Avoids the 551-iteration Python loop from vtools.godin's
+        # df.apply(np.convolve), whose overhead (not arithmetic) dominates
+        # run time for multi-column HDF5 data (e.g. HYDRO flow with 551
+        # channels: df.apply takes ~530 ms, actual compute only ~16 ms).
         n_full = n_time + n_filt - 1
         n_fft = 1 << int(np.ceil(np.log2(max(n_full, 1))))
-        # Kernel spectrum: (n_fft//2+1, 1) — broadcasts over the channel axis.
+        # FIR spectrum: (n_fft//2+1, 1) broadcasts over the channel axis.
         H = np.fft.rfft(godin_ir, n=n_fft).reshape(-1, 1)
-        # Data spectrum: (n_fft//2+1, n_channels).
         X = np.fft.rfft(arr, n=n_fft, axis=0)
-        # Inverse transform: full convolution shape (n_fft, n_channels).
         conv = np.fft.irfft(X * H, n=n_fft, axis=0)
-        # Trim to mode="same" — same slice as np.convolve mode="same".
+        # "same" slice centred on the input (same as np.convolve mode="same"
+        # when n_data >= n_filt, which is guaranteed by the overlap padding).
         start = (n_filt - 1) // 2
-        result = np.ascontiguousarray(conv[start: start + n_time, :])
-        # NaN-out warmup edges (same as vtools' godin()).
+        result_arr = conv[start: start + n_time, :]
         if nhalffilt > 0:
-            result[:nhalffilt, :] = np.nan
+            result_arr[:nhalffilt, :] = np.nan
             if n_time > nhalffilt:
-                result[-nhalffilt:, :] = np.nan
+                result_arr[-nhalffilt:, :] = np.nan
 
-        out = pd.DataFrame(result, index=df.index, columns=df.columns)
+        if arr.ndim == 1 or (df.ndim == 1):
+            out = pd.DataFrame(result_arr[:, 0], index=df.index)
+        else:
+            out = pd.DataFrame(result_arr, index=df.index, columns=df.columns)
         out.index.freq = df.index.freq
         return out
 
