@@ -1,0 +1,128 @@
+# ---------------------------------------------------------------------------
+# map_label examples — copy the map_label block into any animate config
+# ---------------------------------------------------------------------------
+#
+# USAGE — add to an existing qual or hydro animation config file:
+#
+#   dsm2ui animate qual  ec.h5  --config my_qual_config.yaml
+#   dsm2ui animate hydro h.h5   --config my_hydro_config.yaml
+#
+# The map_label block is optional.  Without it the label shows the current
+# timestamp in the format "YYYY-MM-DD HH:MM" at the bottom-left corner.
+#
+# ---------------------------------------------------------------------------
+# Template variables available in the format string
+# ---------------------------------------------------------------------------
+#   {t}        pandas.Timestamp — use strftime specs: {t:%Y-%m-%d %H:%M}
+#   {step}     int   — zero-based frame index
+#   {days}     float — days  elapsed since start_time  (only if start_time set)
+#   {hours}    float — hours elapsed since start_time  (only if start_time set)
+#
+# ---------------------------------------------------------------------------
+# Example 1 — simple timestamp (the default when map_label is omitted)
+# ---------------------------------------------------------------------------
+map_label:
+  corner: bottom_left        # bottom_left | top_left | bottom_right | top_right
+  template: "{t:%Y-%m-%d %H:%M}"
+  font_size: "14px"
+  visible: true
+
+
+---
+# ---------------------------------------------------------------------------
+# Example 2 — integer days since a reference date (e.g. WY start)
+# ---------------------------------------------------------------------------
+map_label:
+  corner: bottom_left
+  template: "Day {days:.0f}"
+  start_time: "2020-10-01"   # Water year start; {days} counts from here
+  font_size: "14px"
+  visible: true
+
+
+---
+# ---------------------------------------------------------------------------
+# Example 3 — combined days + calendar date in a larger font
+# ---------------------------------------------------------------------------
+map_label:
+  corner: top_left
+  template: "Day {days:.1f} — {t:%b %Y}"
+  start_time: "2020-10-01"
+  font_size: "16px"
+  visible: true
+
+
+---
+# ---------------------------------------------------------------------------
+# Example 4 — fractional days + explicit time (top-right placement)
+# ---------------------------------------------------------------------------
+map_label:
+  corner: top_right
+  template: "Day {days:.2f}  ({t:%H:%M})"
+  start_time: "2020-10-01"
+  font_size: "13px"
+  visible: true
+
+
+---
+# ---------------------------------------------------------------------------
+# Example 5 — hours elapsed (useful for short storm runs)
+# ---------------------------------------------------------------------------
+map_label:
+  corner: bottom_left
+  template: "T+{hours:.1f} h  ({t:%Y-%m-%d %H:%M})"
+  start_time: "2020-10-01 00:00"
+  font_size: "13px"
+  visible: true
+
+
+---
+# ---------------------------------------------------------------------------
+# Minimal full qual config showing map_label in context
+# Replace the file path and adjust vmin/vmax for your study.
+# Run with:
+#   dsm2ui animate qual --config map_label_examples.yaml
+# (This document block is the only one that can be used directly as --config.)
+# ---------------------------------------------------------------------------
+version: 1
+mode: single
+files:
+  - path: /path/to/your/ec.h5
+    title: My Study EC
+file_type: qual
+variable: ec
+location: both
+shapefile: null
+channel_id_column: null
+colormap: turbo
+vmin: 200.0
+vmax: 5000.0
+size: 3.0
+show_channels: 100
+show_basemap: 100
+contours:
+  enabled: false
+  n_levels: 8
+  smoothing: 3.0
+  level_mode: nice
+  custom_levels: ''
+  color: true
+  labels: false
+  label_spacing: 150
+  clip_radius_km: 4.0
+diff:
+  show: false
+sidebar_collapsed: false
+x2:
+  enabled: false
+  threshold: 2700.0
+# --- corner label — days since WY start ---
+# start_time sets the reference date (t=0).  {days} is a float, so use
+# :.0f for whole days, :.1f for one decimal place, etc.
+# The fallback when {days} is used without start_time is the plain timestamp.
+map_label:
+  corner: bottom_left
+  template: "Day {days:.0f}"
+  start_time: "2020-10-01"   # change to your study start date
+  font_size: "14px"
+  visible: true

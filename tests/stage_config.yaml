@@ -34,7 +34,7 @@ bar_width_m: 600                 # bar width in metres (EPSG:3857)
 bar_max_height_m: 1100            # bar height at ±reference_stage_range_ft
 reference_stage_range_ft: 2.0    # stage deviation (ft) that fills bar_max_height_m
 show_range_box: true             # draw a semi-transparent band showing ±reference_stage_range_ft
-show_labels: true
+show_labels: false
 
 # ---- Stage bars (one per channel) ------------------------------------------
 # position: 0.0 = upstream end, 0.5 = midpoint, 1.0 = downstream end
