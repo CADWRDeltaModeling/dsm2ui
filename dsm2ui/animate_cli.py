@@ -285,7 +285,7 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
         mgr._map_label_spec.start_time = new_spec.start_time
         mgr._map_label_spec.font_size  = new_spec.font_size
         mgr._map_label_spec.visible    = new_spec.visible
-        # Sync Bokeh Label objects and the checkbox widget.
+        # Sync Bokeh Label objects.
         visible = new_spec.visible
         for _lbl_attr in ("_corner_label",
                           "_corner_label_a", "_corner_label_b", "_corner_label_diff"):
@@ -293,8 +293,22 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
             if lbl is not None:
                 lbl.visible = visible
                 lbl.text_font_size = new_spec.font_size
-        if hasattr(mgr, "_map_label_check"):
-            mgr._map_label_check.value = visible
+        # Sync all sidebar panel widgets without triggering their watchers
+        # (set directly so we don't double-apply the spec fields).
+        _st_str = (
+            new_spec.start_time.strftime("%Y-%m-%d %H:%M")
+            if new_spec.start_time is not None else ""
+        )
+        for _attr, _val in (
+            ("_map_label_check",           visible),
+            ("_map_label_corner_select",   new_spec.corner),
+            ("_map_label_template_input",  new_spec.template),
+            ("_map_label_start_input",     _st_str),
+            ("_map_label_font_input",      new_spec.font_size),
+        ):
+            w = getattr(mgr, _attr, None)
+            if w is not None:
+                w.param.update(value=_val)
 
 
 @click.group(name="animate", context_settings=CONTEXT_SETTINGS)
