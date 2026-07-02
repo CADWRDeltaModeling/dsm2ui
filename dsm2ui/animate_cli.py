@@ -273,6 +273,29 @@ def _apply_config_to_manager(mgr, cfg: dict) -> None:
         except (KeyError, TypeError, ValueError):
             pass
 
+    # Map label spec — restore template, start_time, font_size, corner, visible.
+    # The spec is already embedded in the manager (constructed before this call),
+    # so we patch its fields in-place and refresh the Bokeh label to match.
+    ml_cfg = cfg.get("map_label", {})
+    if ml_cfg and hasattr(mgr, "_map_label_spec"):
+        from dvue.animator import MapLabelSpec
+        new_spec = MapLabelSpec.from_dict(ml_cfg)
+        mgr._map_label_spec.corner     = new_spec.corner
+        mgr._map_label_spec.template   = new_spec.template
+        mgr._map_label_spec.start_time = new_spec.start_time
+        mgr._map_label_spec.font_size  = new_spec.font_size
+        mgr._map_label_spec.visible    = new_spec.visible
+        # Sync Bokeh Label objects and the checkbox widget.
+        visible = new_spec.visible
+        for _lbl_attr in ("_corner_label",
+                          "_corner_label_a", "_corner_label_b", "_corner_label_diff"):
+            lbl = getattr(mgr, _lbl_attr, None)
+            if lbl is not None:
+                lbl.visible = visible
+                lbl.text_font_size = new_spec.font_size
+        if hasattr(mgr, "_map_label_check"):
+            mgr._map_label_check.value = visible
+
 
 @click.group(name="animate", context_settings=CONTEXT_SETTINGS)
 def animate():
