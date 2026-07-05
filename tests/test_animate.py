@@ -8,6 +8,7 @@ files are not present so the CI can run without the full data suite.
 from __future__ import annotations
 
 import os
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -1474,6 +1475,463 @@ class TestConfigSaveLoad:
         result = runner.invoke(animate, ["hydro"])
         # exit code non-zero or error message present
         assert result.exit_code != 0 or "H5FILE" in result.output
+
+
+# ===========================================================================
+# export_corrected_qual_h5 — embedded observations round-trip (no H5 needed)
+# ===========================================================================
+
+class TestExportCorrectedEmbedObs:
+    """Verify that export_corrected_qual_h5 embeds obs data + station locations
+    in the output /correction group.
+
+    Uses --zero-model mode so no real QUAL HDF5 is required.  A minimal
+    synthetic echo .inp with two channels is sufficient for the channel
+    topology step.
+    """
+
+    _ECHO_INP = textwrap.dedent("""\
+        CHANNEL
+        CHAN_NO  LENGTH   MANNING  DISPERSION  UPNODE  DOWNNODE
+        1        19500    0.035    360.0       1       2
+        2        15000    0.030    300.0       2       3
+        END
+    """)
+
+    @pytest.fixture(scope="class")
+    def obs_csv(self, tmp_path_factory):
+        idx = pd.date_range("2020-01-01", periods=24, freq="1h")
+        df = pd.DataFrame({"STA_A": 500.0, "STA_B": 800.0}, index=idx)
+        df.iloc[5:10, 0] = float("nan")  # intentional NaN rows
+        p = tmp_path_factory.mktemp("obs") / "obs.csv"
+        df.to_csv(p)
+        return p
+
+    @pytest.fixture(scope="class")
+    def stations_csv(self, tmp_path_factory):
+        df = pd.DataFrame({
+            "station_id": ["STA_A", "STA_B"],
+            "lat": [38.03, 38.10],
+            "lon": [-122.13, -121.90],
+        })
+        p = tmp_path_factory.mktemp("stations") / "stations.csv"
+        df.to_csv(p, index=False)
+        return p
+
+    @pytest.fixture(scope="class")
+    def echo_inp(self, tmp_path_factory):
+        p = tmp_path_factory.mktemp("inp") / "echo.inp"
+        p.write_text(self._ECHO_INP)
+        return p
+
+    @pytest.fixture(scope="class")
+    def corrected_h5(self, tmp_path_factory, obs_csv, stations_csv, echo_inp):
+        import warnings
+        from dsm2ui.animate import export_corrected_qual_h5
+        out = tmp_path_factory.mktemp("h5") / "corrected.h5"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            export_corrected_qual_h5(
+                input_h5=None,
+                output_h5=out,
+                observations_csv=obs_csv,
+                stations_csv=stations_csv,
+                echo_inp_file=echo_inp,
+                zero_model=True,
+                interval="1h",
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # observations sub-group
+    # ------------------------------------------------------------------
+
+    def test_observations_group_exists(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            assert "/correction/observations" in f
+
+    def test_timestamps_shape(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            ts = f["/correction/observations/timestamps"][:]
+        assert ts.shape == (24,)
+
+    def test_timestamps_dtype_int64(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            ts = f["/correction/observations/timestamps"][:]
+        assert ts.dtype == np.int64
+
+    def test_timestamps_round_trip(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            ts_ns = f["/correction/observations/timestamps"][:]
+        idx = pd.to_datetime(ts_ns, unit="ns")
+        expected = pd.date_range("2020-01-01", periods=24, freq="1h")
+        # Compare as Python datetimes to avoid pandas resolution differences
+        assert list(idx.to_pydatetime()) == list(expected.to_pydatetime())
+
+    def test_station_ids_round_trip(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            raw = f["/correction/observations/station_ids"][:]
+        ids = [s.decode("utf-8") if isinstance(s, bytes) else s for s in raw]
+        assert ids == ["STA_A", "STA_B"]
+
+    def test_values_shape(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            vals = f["/correction/observations/values"][:]
+        assert vals.shape == (24, 2)
+
+    def test_values_dtype_float32(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            vals = f["/correction/observations/values"][:]
+        assert vals.dtype == np.float32
+
+    def test_values_nan_preserved(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            vals = f["/correction/observations/values"][:]
+        # With linear interpolation and max_obs_age=2h (default), the edges
+        # of the 5-hour gap in STA_A (rows 5-9) fill in — only the centre
+        # row (7) is more than 2h from both the left obs (row 4) and the
+        # right obs (row 10), so it stays NaN.
+        assert np.isnan(vals[7, 0])          # centre of gap: NaN
+        assert not np.isnan(vals[5, 0])      # 1h from row 4: filled
+        assert not np.isnan(vals[9, 0])      # 1h from row 10: filled
+        # STA_B column has no NaN
+        assert not np.isnan(vals[:, 1]).any()
+
+    def test_values_non_nan_correct(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            vals = f["/correction/observations/values"][:]
+        # STA_A non-NaN rows should be approx 500.0 (float32 precision)
+        np.testing.assert_allclose(vals[0, 0], 500.0, rtol=1e-5)
+        # STA_B should be approx 800.0
+        np.testing.assert_allclose(vals[0, 1], 800.0, rtol=1e-5)
+
+    # ------------------------------------------------------------------
+    # stations sub-group
+    # ------------------------------------------------------------------
+
+    def test_stations_group_exists(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            assert "/correction/stations" in f
+
+    def test_stations_ids_round_trip(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            raw = f["/correction/stations/station_id"][:]
+        ids = [s.decode("utf-8") if isinstance(s, bytes) else s for s in raw]
+        assert ids == ["STA_A", "STA_B"]
+
+    def test_stations_lat_lon(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            lat = f["/correction/stations/lat"][:]
+            lon = f["/correction/stations/lon"][:]
+        np.testing.assert_allclose(lat, [38.03, 38.10])
+        np.testing.assert_allclose(lon, [-122.13, -121.90])
+
+    def test_stations_crs_attr(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            crs = f["/correction/stations"].attrs["crs"]
+        assert crs == "EPSG:4326"
+
+    # ------------------------------------------------------------------
+    # Existing provenance attrs must still be present
+    # ------------------------------------------------------------------
+
+    def test_provenance_attrs_intact(self, corrected_h5):
+        import h5py
+        with h5py.File(corrected_h5, "r") as f:
+            grp = f["/correction"]
+            for attr in ("method", "power", "constituent", "zero_model", "created"):
+                assert attr in grp.attrs, f"Missing provenance attr: {attr!r}"
+            assert grp.attrs["method"] == "IDW"
+            assert grp.attrs["zero_model"] == "True"
+
+
+# ===========================================================================
+# _read_obs_from_correction_group — round-trip from embedded H5 data
+# ===========================================================================
+
+class TestReadObsFromCorrectionGroup:
+    """Tests for _read_obs_from_correction_group.
+
+    Builds its own corrected H5 using export_corrected_qual_h5 with
+    zero_model=True so no external data files are needed.
+    """
+
+    _ECHO_INP = textwrap.dedent("""\
+        CHANNEL
+        CHAN_NO  LENGTH   MANNING  DISPERSION  UPNODE  DOWNNODE
+        1        19500    0.035    360.0       1       2
+        2        15000    0.030    300.0       2       3
+        END
+    """)
+
+    @pytest.fixture(scope="class")
+    def corrected_h5(self, tmp_path_factory):
+        import warnings
+        from dsm2ui.animate import export_corrected_qual_h5
+
+        base = tmp_path_factory.mktemp("readobs")
+        idx = pd.date_range("2020-06-01", periods=48, freq="1h")
+        obs_df = pd.DataFrame({"A": 300.0, "B": 600.0, "C": float("nan")}, index=idx)
+        obs_df.iloc[10:15, 1] = float("nan")   # B rows 10-14 become NaN
+
+        obs_csv = base / "obs.csv"
+        obs_df.to_csv(obs_csv)
+
+        sta_df = pd.DataFrame({
+            "station_id": ["A", "B", "C"],
+            "lat": [37.8, 38.0, 38.2],
+            "lon": [-122.4, -122.1, -121.8],
+        })
+        sta_csv = base / "sta.csv"
+        sta_df.to_csv(sta_csv, index=False)
+
+        echo_inp = base / "echo.inp"
+        echo_inp.write_text(self._ECHO_INP)
+
+        out = base / "corrected.h5"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            export_corrected_qual_h5(
+                input_h5=None, output_h5=out,
+                observations_csv=obs_csv, stations_csv=sta_csv,
+                echo_inp_file=echo_inp, zero_model=True, interval="1h",
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # Return type and basic structure
+    # ------------------------------------------------------------------
+
+    def test_returns_tuple_when_data_present(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        result = _read_obs_from_correction_group(corrected_h5)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_returns_none_for_plain_h5(self, tmp_path):
+        import h5py
+        from dsm2ui.animate import _read_obs_from_correction_group
+        plain = tmp_path / "plain.h5"
+        with h5py.File(plain, "w") as f:
+            f.create_dataset("dummy", data=np.zeros(5))
+        assert _read_obs_from_correction_group(plain) is None
+
+    def test_returns_none_for_nonexistent_file(self, tmp_path):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        assert _read_obs_from_correction_group(tmp_path / "missing.h5") is None
+
+    # ------------------------------------------------------------------
+    # obs_aligned DataFrame
+    # ------------------------------------------------------------------
+
+    def test_obs_index_length(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        obs, _ = _read_obs_from_correction_group(corrected_h5)
+        assert len(obs) == 48
+
+    def test_obs_columns(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        obs, _ = _read_obs_from_correction_group(corrected_h5)
+        assert list(obs.columns) == ["A", "B", "C"]
+
+    def test_obs_values_non_nan(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        obs, _ = _read_obs_from_correction_group(corrected_h5)
+        assert obs.iloc[0, 0] == pytest.approx(300.0, abs=0.1)  # A
+        assert obs.iloc[0, 1] == pytest.approx(600.0, abs=0.1)  # B row 0
+
+    def test_obs_nan_preserved(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        obs, _ = _read_obs_from_correction_group(corrected_h5)
+        # C is all-NaN (no valid obs at all) — stays NaN regardless
+        assert np.isnan(obs.iloc[:, 2]).all()
+        # B has NaN at rows 10-14 (5-hour gap).  With max_obs_age=2h (default)
+        # the centre of that gap (row 12, which is 3h from both row 9 and row 15)
+        # stays NaN; the edges (rows 10, 11, 13, 14) are filled by interpolation.
+        assert np.isnan(obs.iloc[12, 1])        # gap centre: NaN
+        assert not np.isnan(obs.iloc[0, 1])     # far from gap: valid
+        assert not np.isnan(obs.iloc[10, 1])    # 1h from row 9: filled
+
+    # ------------------------------------------------------------------
+    # stations_df DataFrame
+    # ------------------------------------------------------------------
+
+    def test_stations_has_required_columns(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        _, sta = _read_obs_from_correction_group(corrected_h5)
+        assert "station_id" in sta.columns
+        assert "lat" in sta.columns
+        assert "lon" in sta.columns
+
+    def test_stations_ids(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        _, sta = _read_obs_from_correction_group(corrected_h5)
+        assert list(sta["station_id"]) == ["A", "B", "C"]
+
+    def test_stations_coords(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        _, sta = _read_obs_from_correction_group(corrected_h5)
+        np.testing.assert_allclose(sta["lat"].values, [37.8, 38.0, 38.2])
+        np.testing.assert_allclose(sta["lon"].values, [-122.4, -122.1, -121.8])
+
+    # ------------------------------------------------------------------
+    # Index timestamps
+    # ------------------------------------------------------------------
+
+    def test_obs_index_start(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        obs, _ = _read_obs_from_correction_group(corrected_h5)
+        assert obs.index[0].to_pydatetime() == pd.Timestamp("2020-06-01").to_pydatetime()
+
+    def test_obs_index_step(self, corrected_h5):
+        from dsm2ui.animate import _read_obs_from_correction_group
+        obs, _ = _read_obs_from_correction_group(corrected_h5)
+        delta = obs.index[1] - obs.index[0]
+        assert delta == pd.Timedelta("1h")
+
+
+# ===========================================================================
+# Obs time interpolation in export_corrected_qual_h5
+# ===========================================================================
+
+class TestObsTimeInterpolation:
+    """Tests for the linear time interpolation applied to observation gaps.
+
+    Uses zero_model=True and a synthetic two-station obs CSV so that the
+    stored /correction/observations dataset reflects the interpolated values.
+    No external data files are required.
+    """
+
+    _ECHO_INP = textwrap.dedent("""\
+        CHANNEL
+        CHAN_NO  LENGTH   MANNING  DISPERSION  UPNODE  DOWNNODE
+        1        19500    0.035    360.0       1       2
+        END
+    """)
+
+    def _make_corrected_h5(self, tmp_path, obs_df, max_obs_age):
+        """Export a zero-model H5 from *obs_df* with *max_obs_age* interpolation."""
+        import warnings
+        from dsm2ui.animate import export_corrected_qual_h5
+
+        obs_csv = tmp_path / "obs.csv"
+        obs_df.to_csv(obs_csv)
+
+        sta_csv = tmp_path / "sta.csv"
+        pd.DataFrame({
+            "station_id": list(obs_df.columns),
+            "lat": [38.0] * len(obs_df.columns),
+            "lon": [-122.0 + 0.1 * i for i in range(len(obs_df.columns))],
+        }).to_csv(sta_csv, index=False)
+
+        echo_inp = tmp_path / "echo.inp"
+        echo_inp.write_text(self._ECHO_INP)
+
+        out = tmp_path / "interp_test.h5"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            export_corrected_qual_h5(
+                input_h5=None, output_h5=out,
+                observations_csv=obs_csv, stations_csv=sta_csv,
+                echo_inp_file=echo_inp, zero_model=True,
+                interval="1h", max_obs_age=max_obs_age,
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # Gap within max_obs_age is interpolated
+    # ------------------------------------------------------------------
+
+    def test_gap_within_limit_is_interpolated(self, tmp_path):
+        """A 3-day gap with max_obs_age=5D should be filled by linear interp."""
+        from dsm2ui.animate import _read_obs_from_correction_group
+
+        idx = pd.DatetimeIndex(["2020-01-01", "2020-01-04"])  # 3-day gap
+        obs_df = pd.DataFrame({"A": [500.0, 800.0]}, index=idx)
+
+        h5 = self._make_corrected_h5(tmp_path, obs_df, "5D")
+        obs, _ = _read_obs_from_correction_group(h5)
+
+        # Jan 2 00:00 is 24h after Jan 1; linear interp over 72h: 500 + 300*(24/72)
+        jan2 = pd.Timestamp("2020-01-02 00:00")
+        pos = obs.index.searchsorted(jan2)
+        val = float(obs.iloc[pos, 0])
+        assert val == pytest.approx(600.0, abs=1.0), (
+            f"Expected linear interpolation ~600 at Jan 2, got {val:.1f}"
+        )
+
+    def test_gap_midpoint_differs_from_both_endpoints(self, tmp_path):
+        """Midpoint of a gap must be between the two surrounding obs values."""
+        from dsm2ui.animate import _read_obs_from_correction_group
+
+        idx = pd.DatetimeIndex(["2020-01-01", "2020-01-03"])  # 2-day gap
+        obs_df = pd.DataFrame({"A": [400.0, 800.0]}, index=idx)
+
+        h5 = self._make_corrected_h5(tmp_path, obs_df, "5D")
+        obs, _ = _read_obs_from_correction_group(h5)
+
+        # Jan 2 00:00 is the midpoint (24h from each end); expect ~600
+        jan2 = pd.Timestamp("2020-01-02 00:00")
+        pos = obs.index.searchsorted(jan2)
+        val = float(obs.iloc[pos, 0])
+        assert 550 < val < 650, f"Expected midpoint ~600, got {val:.1f}"
+        assert val != pytest.approx(400.0, abs=5.0), "Value should not equal left obs"
+        assert val != pytest.approx(800.0, abs=5.0), "Value should not equal right obs"
+
+    # ------------------------------------------------------------------
+    # Gap exceeding 2×max_obs_age has NaN in the centre
+    # ------------------------------------------------------------------
+
+    def test_long_gap_has_nan_in_centre(self, tmp_path):
+        """Centre of a gap > 2×max_obs_age must remain NaN."""
+        from dsm2ui.animate import _read_obs_from_correction_group
+
+        # 12-day gap, max_obs_age=3D: centre 6 days should be NaN
+        idx = pd.DatetimeIndex(["2020-01-01", "2020-01-13"])  # 12-day gap
+        obs_df = pd.DataFrame({"A": [500.0, 700.0]}, index=idx)
+
+        h5 = self._make_corrected_h5(tmp_path, obs_df, "3D")
+        obs, _ = _read_obs_from_correction_group(h5)
+
+        # Jan 7 00:00 is 6 days from each end, beyond the 3D limit from both sides
+        jan7 = pd.Timestamp("2020-01-07 00:00")
+        pos = obs.index.searchsorted(jan7)
+        val = obs.iloc[pos, 0]
+        assert np.isnan(val), (
+            f"Expected NaN at centre of long gap (>2×max_obs_age), got {val:.1f}"
+        )
+
+    # ------------------------------------------------------------------
+    # Endpoints near observations are not NaN
+    # ------------------------------------------------------------------
+
+    def test_obs_timestamps_are_not_nan(self, tmp_path):
+        """The output values at obs timestamps must equal the obs values."""
+        from dsm2ui.animate import _read_obs_from_correction_group
+
+        idx = pd.DatetimeIndex(["2020-01-01", "2020-01-05"])
+        obs_df = pd.DataFrame({"A": [300.0, 900.0]}, index=idx)
+
+        h5 = self._make_corrected_h5(tmp_path, obs_df, "5D")
+        obs, _ = _read_obs_from_correction_group(h5)
+
+        jan1_pos = obs.index.searchsorted(pd.Timestamp("2020-01-01 00:00"))
+        jan5_pos = obs.index.searchsorted(pd.Timestamp("2020-01-05 00:00"))
+        assert obs.iloc[jan1_pos, 0] == pytest.approx(300.0, abs=0.1)
+        assert obs.iloc[jan5_pos, 0] == pytest.approx(900.0, abs=0.1)
 
 
 # ===========================================================================

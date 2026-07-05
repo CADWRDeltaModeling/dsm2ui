@@ -28,6 +28,7 @@ the result in ``DataUI`` and expects a ``DataUIManager``).
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import click
 
@@ -555,8 +556,9 @@ def hydro_cmd(
 @click.option("--idw-power", default=2.0, show_default=True, type=float,
               help="IDW distance exponent for the network correction.")
 @click.option("--max-obs-age", default="2h", show_default=True,
-              help="Maximum age of observations relative to a model timestep "
-                   '(e.g. "2h", "30min"). Older matches are treated as missing.')
+              help="Maximum obs age for gap interpolation (e.g. \"25h\", \"5D\"). "
+                   "Gaps up to this distance from an observation are filled by "
+                   "linear time interpolation; farther timesteps get NaN.")
 @click.option("--correction-method", default="idw", show_default=True,
               type=click.Choice(["idw", "oi"], case_sensitive=False),
               help="Correction algorithm: idw (inverse-distance weighting, default) or "
@@ -1057,7 +1059,8 @@ def flow_cmd(
 # ---------------------------------------------------------------------------
 
 @animate.command(name="export-corrected", context_settings=CONTEXT_SETTINGS)
-@click.argument("h5file", type=click.Path(exists=True, dir_okay=False, readable=True))
+@click.argument("h5file", required=False, default=None,
+                type=click.Path(dir_okay=False, readable=True))
 @click.option("--output", "output_h5", required=True,
               type=click.Path(dir_okay=False),
               help="Output HDF5 path for the corrected concentrations.")
@@ -1072,7 +1075,8 @@ def flow_cmd(
 @click.option("--echo-inp", default=None,
               type=click.Path(dir_okay=False),
               help="DSM2 echo .inp fallback for CHANNEL table "
-                   "(needed when the H5 has no /input/channel dataset).")
+                   "(needed when the H5 has no /input/channel dataset; "
+                   "required when --zero-model is set).")
 @click.option("--centerlines-file", default=None,
               type=click.Path(exists=True, dir_okay=False),
               help="GeoJSON or shapefile of DSM2 channel centrelines used for "
@@ -1085,14 +1089,31 @@ def flow_cmd(
 @click.option("--idw-power", default=2.0, show_default=True, type=float,
               help="IDW distance exponent.")
 @click.option("--max-obs-age", default="2h", show_default=True,
-              help='Max observation age relative to model timestep (e.g. "2h").')
+              help="Maximum obs age for gap interpolation (e.g. \"25h\", \"5D\"). "
+                   "Gaps up to this distance from an observation are filled by "
+                   "linear time interpolation; farther timesteps get NaN.")
 @click.option("--chunk-size", default=1000, show_default=True, type=int,
               help="Timesteps per write chunk (controls memory usage).")
+@click.option("--zero-model", "zero_model", is_flag=True, default=False,
+              help="Treat model concentrations as zero everywhere (no H5FILE "
+                   "required). The output is a pure IDW spatial interpolation "
+                   "of the supplied observations. --echo-inp is required in "
+                   "this mode.")
+@click.option("--interval", "interval", default=None, type=str,
+              help="Time step size for zero-model mode (e.g. '15min', '1h'). "
+                   "Required when the observations CSV has no regular frequency "
+                   "that can be inferred automatically.")
 def export_corrected_cmd(
     h5file, output_h5, constituent, observations_csv, stations_csv,
     echo_inp, centerlines_file, start, end, idw_power, max_obs_age, chunk_size,
+    zero_model, interval,
 ):
     """Pre-compute IDW-corrected concentrations and write a new QUAL HDF5.
+
+    H5FILE is the source QUAL/GTM HDF5 tidefile.  It may be omitted when
+    --zero-model is set, in which case model concentrations are treated as
+    zero and the output is a pure IDW spatial interpolation of the supplied
+    observations.
 
     The output file is a drop-in replacement for the raw QUAL HDF5 \u2014 same
     dataset paths and time attributes \u2014 so it can be compared with the raw
@@ -1109,6 +1130,26 @@ def export_corrected_cmd(
     """
     from pydsm.analysis.dsm2study import parse_military_date
     import pandas as _pd
+
+    # Validate mutually-dependent options
+    if zero_model:
+        if echo_inp is None:
+            raise click.UsageError(
+                "--echo-inp is required when --zero-model is set "
+                "(needed for channel topology)."
+            )
+        if h5file is not None:
+            import logging as _logging
+            _logging.warning(
+                f"H5FILE {h5file!r} is ignored because --zero-model was set."
+            )
+    else:
+        if h5file is None:
+            raise click.UsageError(
+                "H5FILE is required unless --zero-model is set."
+            )
+        if not Path(h5file).exists():
+            raise click.UsageError(f"H5FILE {h5file!r} does not exist.")
 
     def _parse(s):
         if s is None:
@@ -1132,6 +1173,8 @@ def export_corrected_cmd(
         start=_parse(start),
         end=_parse(end),
         chunk_size=chunk_size,
+        zero_model=zero_model,
+        interval=interval,
     )
 
 

@@ -861,15 +861,17 @@ class CorrectedQualH5ConcentrationReader(SlicingReader):
         self._precompute_idw_matrices()
 
     def _align_obs(self, obs_df: "pd.DataFrame") -> "pd.DataFrame":
-        """Reindex *obs_df* onto the model time index with nearest-match and
-        tolerance so every per-step lookup is an O(1) label access."""
+        """Project *obs_df* onto the model time index using linear time
+        interpolation, limited to *max_obs_age* from each surrounding
+        observation.
+
+        Gaps in the observation record up to *max_obs_age* are filled
+        smoothly by linear interpolation.  Timesteps farther than
+        *max_obs_age* from any observation return NaN.
+        """
         if obs_df.empty:
             return obs_df
-        return obs_df.reindex(
-            self._inner.time_index,
-            method="nearest",
-            tolerance=self._max_obs_age,
-        )
+        return _align_obs_to_grid(obs_df, self._inner.time_index, self._max_obs_age)
 
     def _reload_observations(self, obs_path: str) -> None:
         """Reload the observations CSV, rebuild the pre-aligned cache and
@@ -1024,16 +1026,7 @@ class CorrectedQualH5ConcentrationReader(SlicingReader):
                 "CHANNEL table not found in the H5 file (tried /input/channel "
                 "and /hydro/input/channel) and no echo_inp_file was supplied."
             )
-        from pydsm.input.parser import parse
-
-        with open(echo_inp_file, "r") as fh:
-            tables = parse(fh.read())
-        df = tables["CHANNEL"].rename(columns=lambda c: c.lower())
-        df["chan_no"]  = df["chan_no"].astype(str)
-        df["upnode"]   = df["upnode"].astype(int)
-        df["downnode"] = df["downnode"].astype(int)
-        df["length"]   = df["length"].astype(float)
-        return df
+        return _load_channels_from_echo_inp(echo_inp_file)
 
     # ------------------------------------------------------------------
     # Observation lookup
@@ -1900,12 +1893,16 @@ def _add_obs_station_overlay(
     # 1. Load and reproject station locations to EPSG:3857 (Bokeh web map) #
     # ------------------------------------------------------------------ #
     try:
-        from pyproj import Transformer
-        sta_df = pd.read_csv(stations_csv)
+        if isinstance(stations_csv, pd.DataFrame):
+            sta_df = stations_csv
+        else:
+            sta_df = pd.read_csv(stations_csv)
         if "lat" in sta_df.columns and "lon" in sta_df.columns:
+            from pyproj import Transformer
             t = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
             mx, my = t.transform(sta_df["lon"].values, sta_df["lat"].values)
         elif "x" in sta_df.columns and "y" in sta_df.columns:
+            from pyproj import Transformer
             t = Transformer.from_crs("EPSG:26910", "EPSG:3857", always_xy=True)
             mx, my = t.transform(sta_df["x"].values, sta_df["y"].values)
         else:
@@ -2429,6 +2426,11 @@ def animate_qual(
     mgr._config_path_input.value = str(
         Path(h5abs).with_name(Path(h5abs).stem + "_animate.yml")
     )
+    # Auto-detect embedded observations in a corrected HDF5
+    _obs_data = _read_obs_from_correction_group(h5file)
+    if _obs_data is not None:
+        _obs_aligned, _sta_df = _obs_data
+        _add_obs_station_overlay(mgr, _obs_aligned, _sta_df)
     _add_resample_card_to_manager(mgr)
     return mgr
 
@@ -3381,6 +3383,13 @@ def animate_qual_multi(
             _Path(h5file_a).stem + "_animate.yml"
         )
     )
+    # Auto-detect embedded observations — prefer h5file_b (typically corrected)
+    for _hf in [h5file_b, h5file_a]:
+        _obs_data = _read_obs_from_correction_group(_hf)
+        if _obs_data is not None:
+            _obs_aligned, _sta_df = _obs_data
+            _add_obs_station_overlay(mgr, _obs_aligned, _sta_df)
+            break  # Only add one overlay
     _add_resample_card_to_manager(mgr)
     return mgr
 
@@ -3393,6 +3402,241 @@ _MONTHS_3 = ["JAN","FEB","MAR","APR","MAY","JUN",
              "JUL","AUG","SEP","OCT","NOV","DEC"]
 
 
+def _load_channels_from_echo_inp(echo_inp_file: "str | Path") -> "pd.DataFrame":
+    """Return a normalised CHANNEL DataFrame parsed from a DSM2 echo .inp file.
+
+    Parameters
+    ----------
+    echo_inp_file : str or Path
+        Path to a DSM2 echo .inp file that contains a ``CHANNEL`` table.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with lowercase columns ``chan_no`` (str), ``upnode`` (int),
+        ``downnode`` (int), ``length`` (float).
+    """
+    from pydsm.input.parser import parse
+
+    with open(echo_inp_file, "r") as fh:
+        tables = parse(fh.read())
+    df = tables["CHANNEL"].rename(columns=lambda c: c.lower())
+    df["chan_no"]  = df["chan_no"].astype(str)
+    df["upnode"]   = df["upnode"].astype(int)
+    df["downnode"] = df["downnode"].astype(int)
+    df["length"]   = df["length"].astype(float)
+    return df
+
+
+def _align_obs_to_grid(
+    obs_df: "pd.DataFrame",
+    time_index: "pd.DatetimeIndex",
+    max_obs_age: "pd.Timedelta",
+) -> "pd.DataFrame":
+    """Align observations to an output time grid using linear time interpolation.
+
+    Within *max_obs_age* of any observation, values are linearly interpolated
+    from the two surrounding observations.  Timesteps farther than
+    *max_obs_age* from all observations (e.g. the centre of a very long gap)
+    remain NaN.  No extrapolation beyond the first or last observation.
+
+    Uses vectorised :func:`numpy.interp` per column so it is fast even when
+    the output grid is much denser than the observation record (e.g. hourly
+    output with daily observations over 15 years).
+
+    Parameters
+    ----------
+    obs_df : pd.DataFrame
+        Raw observations at their native timestamps; NaN = missing.
+    time_index : pd.DatetimeIndex
+        Target output grid.
+    max_obs_age : pd.Timedelta
+        Maximum distance from an observation to allow interpolation.
+    """
+    if obs_df.empty or len(obs_df.columns) == 0:
+        return obs_df.reindex(time_index)
+
+    # Force nanosecond resolution — pandas 2.x uses datetime64[us] internally
+    # so .astype(np.int64) would give microseconds, making age_ns comparisons wrong.
+    t_out  = np.array(time_index,       dtype="datetime64[ns]").view(np.int64)
+    age_ns = int(max_obs_age.total_seconds() * 1e9)
+
+    n_out = len(time_index)
+    n_col = len(obs_df.columns)
+    result = np.full((n_out, n_col), np.nan, dtype=np.float64)
+
+    for j, col in enumerate(obs_df.columns):
+        vals  = obs_df[col].values.astype(np.float64)
+        valid = ~np.isnan(vals)
+        if not valid.any():
+            continue
+        t_obs_j = np.array(obs_df.index[valid], dtype="datetime64[ns]").view(np.int64)
+        v_obs_j = vals[valid]
+
+        # Linear interpolation; NaN outside obs range (no extrapolation)
+        interp_col = np.interp(t_out, t_obs_j, v_obs_j,
+                               left=np.nan, right=np.nan)
+
+        # Distance from each output step to the nearest obs on its left
+        li = np.searchsorted(t_obs_j, t_out, side="right") - 1
+        d_left = np.where(
+            li >= 0,
+            t_out - t_obs_j[np.clip(li, 0, len(t_obs_j) - 1)],
+            age_ns + 1,
+        )
+        # Distance to the nearest obs on its right
+        ri = np.searchsorted(t_obs_j, t_out, side="left")
+        d_right = np.where(
+            ri < len(t_obs_j),
+            t_obs_j[np.clip(ri, 0, len(t_obs_j) - 1)] - t_out,
+            age_ns + 1,
+        )
+        # Fill if within max_obs_age of EITHER the left or the right obs
+        # (equivalent to pandas limit_direction='both')
+        min_dist = np.minimum(d_left, d_right)
+        result[:, j] = np.where(min_dist <= age_ns, interp_col, np.nan)
+
+    return pd.DataFrame(result, index=time_index, columns=obs_df.columns)
+
+
+def _read_obs_from_correction_group(
+    h5file: "str | Path",
+) -> "tuple[pd.DataFrame, pd.DataFrame] | None":
+    """Read embedded observations and station locations from a corrected HDF5.
+
+    Returns ``(obs_aligned, stations_df)`` when the file contains a
+    ``/correction/observations`` and ``/correction/stations`` group, or
+    ``None`` otherwise (missing groups, unrecognised format, or any I/O
+    error).
+
+    The returned *obs_aligned* DataFrame has a :class:`pandas.DatetimeIndex`
+    and station IDs as columns.  *stations_df* has ``station_id``, plus
+    either ``lat``/``lon`` (WGS-84) or ``x``/``y`` (UTM Zone 10N) columns.
+    """
+    import h5py
+
+    try:
+        with h5py.File(Path(h5file), "r") as f:
+            if "/correction/observations" not in f:
+                return None
+            if "/correction/stations" not in f:
+                return None
+
+            obs_grp = f["/correction/observations"]
+            ts_ns = obs_grp["timestamps"][:]
+            idx = pd.to_datetime(ts_ns, unit="ns")
+            raw_ids = obs_grp["station_ids"][:]
+            station_ids = [
+                s.decode("utf-8") if isinstance(s, bytes) else str(s)
+                for s in raw_ids
+            ]
+            values = obs_grp["values"][:].astype(np.float64)
+            obs_df = pd.DataFrame(values, index=idx, columns=station_ids)
+
+            sta_grp = f["/correction/stations"]
+            raw_sta = sta_grp["station_id"][:]
+            sta_ids = [
+                s.decode("utf-8") if isinstance(s, bytes) else str(s)
+                for s in raw_sta
+            ]
+            sta_dict: dict = {"station_id": sta_ids}
+            if "lat" in sta_grp:
+                sta_dict["lat"] = sta_grp["lat"][:]
+                sta_dict["lon"] = sta_grp["lon"][:]
+            elif "x" in sta_grp:
+                sta_dict["x"] = sta_grp["x"][:]
+                sta_dict["y"] = sta_grp["y"][:]
+            else:
+                return None
+            stations_df = pd.DataFrame(sta_dict)
+
+        return obs_df, stations_df
+    except Exception:
+        return None
+
+
+def _write_obs_to_correction_group(
+    grp: "h5py.Group",
+    obs_aligned: "pd.DataFrame",
+    stations_csv: "str | Path",
+) -> None:
+    """Embed observation values and station coordinates in an HDF5 /correction group.
+
+    Stores two subgroups so the corrected HDF5 is self-contained for animation:
+
+    ``observations/``
+        ``timestamps``  \u2014 int64 (n_times,), nanoseconds since the Unix epoch
+        ``station_ids`` \u2014 UTF-8 variable-length string (n_sta,)
+        ``values``      \u2014 float32 (n_times, n_sta), NaN for missing observations
+
+    ``stations/``
+        ``station_id``  \u2014 UTF-8 variable-length string (n_sta,)
+        ``lat`` + ``lon``  \u2014 float64, WGS-84  *or*  ``x`` + ``y``, EPSG:26910
+        attr ``crs``    \u2014 ``"EPSG:4326"`` or ``"EPSG:26910"``
+
+    Parameters
+    ----------
+    grp : h5py.Group
+        The already-created ``/correction`` group (must be writable).
+    obs_aligned : pd.DataFrame
+        Pre-aligned observations (index = model timestamps, columns = station IDs).
+    stations_csv : str or Path
+        CSV with ``station_id`` and ``lat``/``lon`` (WGS-84) or ``x``/``y``
+        (UTM Zone 10N) columns.
+    """
+    import h5py as _h5py
+
+    str_dt = _h5py.string_dtype(encoding="utf-8")
+
+    # --- observations sub-group ---
+    obs_grp = grp.create_group("observations")
+    # Store as int64 nanoseconds since epoch.  Using .value on each Timestamp
+    # (rather than .view(np.int64)) guarantees nanosecond resolution regardless
+    # of the DatetimeIndex dtype (datetime64[ns] or datetime64[us] in pandas 2.x).
+    ts_ns = np.array([ts.value for ts in obs_aligned.index], dtype=np.int64)
+    obs_grp.create_dataset(
+        "timestamps",
+        data=ts_ns,
+    )
+    obs_grp.attrs["timestamps_units"] = "nanoseconds since 1970-01-01"
+    obs_grp.create_dataset(
+        "station_ids",
+        data=list(obs_aligned.columns),
+        dtype=str_dt,
+    )
+    n_t = len(obs_aligned)
+    n_s = len(obs_aligned.columns)
+    obs_grp.create_dataset(
+        "values",
+        data=obs_aligned.values.astype(np.float32),
+        chunks=(min(1000, max(1, n_t)), max(1, n_s)),
+    )
+
+    # --- stations sub-group ---
+    try:
+        sta_df = pd.read_csv(stations_csv)
+        sta_grp = grp.create_group("stations")
+        sta_grp.create_dataset(
+            "station_id",
+            data=list(sta_df["station_id"].astype(str)),
+            dtype=str_dt,
+        )
+        if "lat" in sta_df.columns and "lon" in sta_df.columns:
+            sta_grp.create_dataset("lat", data=sta_df["lat"].astype(np.float64).values)
+            sta_grp.create_dataset("lon", data=sta_df["lon"].astype(np.float64).values)
+            sta_grp.attrs["crs"] = "EPSG:4326"
+        elif "x" in sta_df.columns and "y" in sta_df.columns:
+            sta_grp.create_dataset("x", data=sta_df["x"].astype(np.float64).values)
+            sta_grp.create_dataset("y", data=sta_df["y"].astype(np.float64).values)
+            sta_grp.attrs["crs"] = "EPSG:26910"
+    except Exception as _exc:
+        import warnings as _warnings
+        _warnings.warn(
+            f"Could not embed station locations in /correction/stations: {_exc}",
+            stacklevel=2,
+        )
+
+
 def _ts_to_dsm2(ts: "pd.Timestamp") -> str:
     """Format a Timestamp as a DSM2 military string ``DDMMMYYYY HHMM``."""
     return (f"{ts.day:02d}{_MONTHS_3[ts.month - 1]}{ts.year} "
@@ -3400,7 +3644,7 @@ def _ts_to_dsm2(ts: "pd.Timestamp") -> str:
 
 
 def export_corrected_qual_h5(
-    input_h5: "str | Path",
+    input_h5: "str | Path | None",
     output_h5: "str | Path",
     observations_csv: "str | Path",
     stations_csv: "str | Path",
@@ -3412,6 +3656,8 @@ def export_corrected_qual_h5(
     start: "pd.Timestamp | None" = None,
     end: "pd.Timestamp | None" = None,
     chunk_size: int = 1000,
+    zero_model: bool = False,
+    interval: "str | None" = None,
 ) -> None:
     """Pre-compute IDW-corrected concentrations and write a new QUAL HDF5 file.
 
@@ -3449,10 +3695,22 @@ def export_corrected_qual_h5(
         Maximum observation age for matching.  Default ``"2h"``.
     echo_inp_file : str or Path or None, optional
         Fallback CHANNEL table source when the H5 lacks ``/input/channel``.
+        Required when *zero_model* is ``True``.
     start, end : pd.Timestamp or None, optional
-        Time window to export.  Default: full model range.
+        Time window to export.  Default: full model range (or full
+        observations range when *zero_model* is ``True``).
     chunk_size : int, optional
         Timesteps per write chunk.  Default ``1000``.
+    zero_model : bool, optional
+        When ``True``, *input_h5* is not used and model concentrations are
+        treated as zero everywhere.  The output becomes a pure IDW spatial
+        interpolation of the supplied observations.  *echo_inp_file* is
+        required in this mode.  Default ``False``.
+    interval : str or None, optional
+        Explicit time step size for zero-model mode (e.g. ``"15min"``).
+        Required when the observations CSV index has no regular frequency
+        that pandas can infer automatically.  Ignored when *zero_model* is
+        ``False``.
     """
     import h5py
     import datetime
@@ -3465,61 +3723,116 @@ def export_corrected_qual_h5(
     )
     from pydsm.viz.dsm2gis import read_stations
 
-    input_h5  = Path(input_h5)
+    input_h5  = Path(input_h5) if input_h5 is not None else None
     output_h5 = Path(output_h5)
 
     # ------------------------------------------------------------------ #
-    # 1. Read source structure (no bulk data loaded yet)                   #
+    # 1. Read source dimensions and determine output time window           #
     # ------------------------------------------------------------------ #
-    print(f"Source : {input_h5}")
-    with h5py.File(input_h5, "r") as src:
-        constit_names = _decode_string_array(src[_QUAL_CONSTIT_PATH][:])
-        cname_lc = constituent.strip().lower()
-        ci_map = {n.lower(): i for i, n in enumerate(constit_names)}
-        if cname_lc not in ci_map:
-            raise ValueError(
-                f"Constituent {constituent!r} not found. "
-                f"Available: {constit_names}"
-            )
-        ci = ci_map[cname_lc]
+    if zero_model:
+        import logging as _logging
+        _logging.warning(
+            "--zero-model active: no model H5 used; model concentration is "
+            "set to zero everywhere. Output is a pure IDW spatial "
+            "interpolation of the supplied observations."
+        )
+        # Channel shape comes from the echo .inp CHANNEL table
+        _channels_tmp = _load_channels_from_echo_inp(echo_inp_file)
+        _chan_nos_sorted = sorted(
+            _channels_tmp["chan_no"].astype(str).tolist(),
+            key=lambda x: int(x),
+        )
+        chan_raw    = np.array([int(c) for c in _chan_nos_sorted], dtype=np.int32)
+        n_channels  = len(_chan_nos_sorted)
+        n_loc       = 2
+        ci          = 0  # single constituent written to output
 
-        src_ds    = src[_QUAL_CONC_PATH]
-        src_attrs = dict(src_ds.attrs)
-        n_times_src, _, n_channels, n_loc = src_ds.shape
-        chan_raw = src[_QUAL_CHAN_PATH][:]
+        # Build time axis from the observations CSV
+        _obs_tmp = pd.read_csv(observations_csv, index_col=0, parse_dates=True)
+        if start:
+            _obs_tmp = _obs_tmp[_obs_tmp.index >= start]
+        if end:
+            _obs_tmp = _obs_tmp[_obs_tmp.index <= end]
+        if _obs_tmp.empty:
+            raise ValueError("No observations in the requested time window.")
 
-    # Reconstruct full time index from H5 attributes
-    start_ts_src = _parse_dsm2_timestamp(src_attrs["start_time"])
-    raw_iv = src_attrs["interval"]
-    if hasattr(raw_iv, "__len__") and not isinstance(raw_iv, (str, bytes)):
-        raw_iv = raw_iv[0]
-    if isinstance(raw_iv, (bytes, np.bytes_)):
-        raw_iv = raw_iv.decode("utf-8")
-    interval_str = _normalise_interval(str(raw_iv).strip())
-    time_index_full = pd.date_range(
-        start=start_ts_src, periods=n_times_src, freq=interval_str
-    )
+        if interval is not None:
+            interval_str = _normalise_interval(interval)
+        else:
+            _inferred = pd.infer_freq(_obs_tmp.index)
+            if _inferred is None:
+                raise ValueError(
+                    "Cannot infer a regular interval from the observations CSV "
+                    "index. Pass --interval (e.g. '15min') to specify it "
+                    "explicitly."
+                )
+            interval_str = _normalise_interval(_inferred)
 
-    # ------------------------------------------------------------------ #
-    # 2. Determine output time window                                      #
-    # ------------------------------------------------------------------ #
-    t0 = int(time_index_full.searchsorted(start, side="left"))  if start else 0
-    t1 = int(time_index_full.searchsorted(end,   side="right")) if end   else n_times_src
-    t1 = min(t1, n_times_src)
-    time_index_out = time_index_full[t0:t1]
-    n_times_out    = len(time_index_out)
-    if n_times_out == 0:
-        raise ValueError("No timesteps in the requested range.")
-    print(f"Output : {n_times_out} steps  "
-          f"({time_index_out[0]} -> {time_index_out[-1]})")
+        time_index_out = pd.date_range(
+            start=_obs_tmp.index[0],
+            end=_obs_tmp.index[-1],
+            freq=interval_str,
+        )
+        n_times_out = len(time_index_out)
+        if n_times_out == 0:
+            raise ValueError("No timesteps in the requested range.")
+        t0        = 0  # no H5 source offset in zero-model mode
+        src_attrs = {"interval": np.bytes_(interval_str.encode("utf-8"))}
+        print(f"Output : {n_times_out} steps  "
+              f"({time_index_out[0]} -> {time_index_out[-1]})")
+    else:
+        print(f"Source : {input_h5}")
+        with h5py.File(input_h5, "r") as src:
+            constit_names = _decode_string_array(src[_QUAL_CONSTIT_PATH][:])
+            cname_lc = constituent.strip().lower()
+            ci_map = {n.lower(): i for i, n in enumerate(constit_names)}
+            if cname_lc not in ci_map:
+                raise ValueError(
+                    f"Constituent {constituent!r} not found. "
+                    f"Available: {constit_names}"
+                )
+            ci = ci_map[cname_lc]
+
+            src_ds      = src[_QUAL_CONC_PATH]
+            src_attrs   = dict(src_ds.attrs)
+            n_times_src, _, n_channels, n_loc = src_ds.shape
+            chan_raw     = src[_QUAL_CHAN_PATH][:]
+
+        # Reconstruct full time index from H5 attributes
+        start_ts_src = _parse_dsm2_timestamp(src_attrs["start_time"])
+        raw_iv = src_attrs["interval"]
+        if hasattr(raw_iv, "__len__") and not isinstance(raw_iv, (str, bytes)):
+            raw_iv = raw_iv[0]
+        if isinstance(raw_iv, (bytes, np.bytes_)):
+            raw_iv = raw_iv.decode("utf-8")
+        interval_str = _normalise_interval(str(raw_iv).strip())
+        time_index_full = pd.date_range(
+            start=start_ts_src, periods=n_times_src, freq=interval_str
+        )
+
+        # ------------------------------------------------------------------ #
+        # 2. Determine output time window                                      #
+        # ------------------------------------------------------------------ #
+        t0 = int(time_index_full.searchsorted(start, side="left"))  if start else 0
+        t1 = int(time_index_full.searchsorted(end,   side="right")) if end   else n_times_src
+        t1 = min(t1, n_times_src)
+        time_index_out = time_index_full[t0:t1]
+        n_times_out    = len(time_index_out)
+        if n_times_out == 0:
+            raise ValueError("No timesteps in the requested range.")
+        print(f"Output : {n_times_out} steps  "
+              f"({time_index_out[0]} -> {time_index_out[-1]})")
 
     # ------------------------------------------------------------------ #
     # 3. Build IDW corrector                                               #
     # ------------------------------------------------------------------ #
     print("Building IDW corrector ...")
-    channels_df = CorrectedQualH5ConcentrationReader._load_channels(
-        input_h5, echo_inp_file
-    )
+    if zero_model:
+        channels_df = _load_channels_from_echo_inp(echo_inp_file)
+    else:
+        channels_df = CorrectedQualH5ConcentrationReader._load_channels(
+            input_h5, echo_inp_file
+        )
     import dsm2ui as _dsm2ui_pkg
     _cl = (
         Path(centerlines_file)
@@ -3541,10 +3854,8 @@ def export_corrected_qual_h5(
     # ------------------------------------------------------------------ #
     print(f"Loading observations: {observations_csv}")
     obs_df = pd.read_csv(observations_csv, index_col=0, parse_dates=True)
-    obs_aligned = obs_df.reindex(
-        time_index_out, method="nearest",
-        tolerance=pd.Timedelta(max_obs_age),
-    )
+    _age_td = pd.Timedelta(max_obs_age)
+    obs_aligned = _align_obs_to_grid(obs_df, time_index_out, _age_td)
     obs_cols = list(obs_aligned.columns) if not obs_aligned.empty else []
 
     # Build CE index matching channel order in the H5
@@ -3631,8 +3942,9 @@ def export_corrected_qual_h5(
         out_ds.attrs["interval"] = src_attrs["interval"]
 
         # Chunk loop: read raw → apply IDW → write corrected
-        with h5py.File(input_h5, "r") as src:
-            src_ds = src[_QUAL_CONC_PATH]
+        _src_h5 = h5py.File(input_h5, "r") if not zero_model else None
+        try:
+            _src_ds = _src_h5[_QUAL_CONC_PATH] if _src_h5 is not None else None
             for cs in _tqdm.tqdm(
                 range(0, n_times_out, chunk_size),
                 desc="Exporting corrected EC",
@@ -3642,8 +3954,11 @@ def export_corrected_qual_h5(
                 cn = ce - cs
 
                 # Raw upstream/downstream: (cn, n_channels, 2)
-                block = src_ds[t0 + cs:t0 + ce, ci, :, :].astype(np.float64)
-                block[block < -1e20] = np.nan
+                if zero_model:
+                    block = np.zeros((cn, n_channels, 2), dtype=np.float64)
+                else:
+                    block = _src_ds[t0 + cs:t0 + ce, ci, :, :].astype(np.float64)
+                    block[block < -1e20] = np.nan
 
                 # Interleaved CE block: (cn, 2*n_channels)
                 mcb = np.empty((cn, 2 * n_channels), dtype=np.float64)
@@ -3683,6 +3998,9 @@ def export_corrected_qual_h5(
                     [ccb[:, 0::2], ccb[:, 1::2]], axis=2
                 ).astype(np.float32)
                 out_ds[cs:ce, 0, :, :] = out_chunk
+        finally:
+            if _src_h5 is not None:
+                _src_h5.close()
 
         # Provenance group so the file is self-documenting
         grp = dst.create_group("correction")
@@ -3693,8 +4011,12 @@ def export_corrected_qual_h5(
         grp.attrs["observations_csv"] = str(observations_csv)
         grp.attrs["stations_csv"]     = str(stations_csv)
         grp.attrs["echo_inp_file"]    = str(echo_inp_file) if echo_inp_file else ""
-        grp.attrs["source_h5"]        = str(input_h5.absolute())
+        grp.attrs["source_h5"]        = str(input_h5.absolute()) if input_h5 is not None else ""
+        grp.attrs["zero_model"]       = str(zero_model)
         grp.attrs["created"]          = datetime.datetime.now().isoformat()
+
+        # Embed observations and station locations for self-contained animation
+        _write_obs_to_correction_group(grp, obs_aligned, stations_csv)
 
     print(f"Done -> {output_h5}")
 
