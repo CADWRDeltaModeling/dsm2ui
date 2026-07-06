@@ -688,6 +688,16 @@ class QualH5ConcentrationReader(_DSM2BaseH5Reader):
         # (we need the file open first)
         import h5py
         _h5_tmp = h5py.File(Path(filepath), "r")
+        if _QUAL_CONSTIT_PATH not in _h5_tmp:
+            top_keys = list(_h5_tmp.keys())
+            _h5_tmp.close()
+            raise ValueError(
+                f"'{filepath}' does not appear to be a DSM2 QUAL/GTM tidefile. "
+                f"Expected dataset '{_QUAL_CONSTIT_PATH}' was not found "
+                f"(top-level groups: {top_keys}). "
+                f"Provide a QUAL or GTM output HDF5 file (e.g. '*_ec.h5' or '*_qual.h5'), "
+                f"not a HYDRO tidefile."
+            )
         constit_names = _decode_string_array(_h5_tmp[_QUAL_CONSTIT_PATH][:])
         _h5_tmp.close()
         constit_names_lower = [n.lower() for n in constit_names]
@@ -3783,6 +3793,15 @@ def export_corrected_qual_h5(
     else:
         print(f"Source : {input_h5}")
         with h5py.File(input_h5, "r") as src:
+            if _QUAL_CONSTIT_PATH not in src:
+                top_keys = list(src.keys())
+                raise ValueError(
+                    f"The file '{input_h5}' does not appear to be a DSM2 QUAL/GTM "
+                    f"tidefile. Expected dataset '{_QUAL_CONSTIT_PATH}' was not found "
+                    f"(top-level groups: {top_keys}). "
+                    f"This command requires a QUAL or GTM output HDF5 file "
+                    f"(e.g. '*_ec.h5' or '*_qual.h5'), not a HYDRO tidefile."
+                )
             constit_names = _decode_string_array(src[_QUAL_CONSTIT_PATH][:])
             cname_lc = constituent.strip().lower()
             ci_map = {n.lower(): i for i, n in enumerate(constit_names)}
