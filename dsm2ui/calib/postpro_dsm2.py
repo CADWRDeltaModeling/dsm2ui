@@ -556,39 +556,28 @@ def postpro_validation_bar_charts(
 
 
 def postpro_copy_plot_files(cluster, config_data):
+    '''
+    This method copies the files to new names with a number in the filename, so that they can be dragged 
+    into Word in the desired order. The new names are specified in the config file, and the files are 
+    copied to the output folder.  Order may not be preserved if large number of files are dragged, 
+    or if files are dragged from a network drive. 
+    '''
     import shutil
-
+    options_dict = config_data["options_dict"]
     plot_file_copying_options_dict = config_data["plot_file_copying_options_dict"]
-    # plot_type will be 'flow_calibration', 'ec_validation', etc.
-    # filenames to copy have filenames such as ANC_EC.png.
-    # validation plots are in ./plots_val/ and calibration plots are in ./plots_cal/
-    plot_type_to_const_dict = {
-        "flow_calibration": "Flow",
-        "flow_validation": "Flow",
-        "stage_calibration": "Stage",
-        "stage_validation": "Stage",
-        "ec_calibration": "EC",
-        "ec_validation": "EC",
-    }
-    plot_type_to_dir_dict = {
-        "flow_calibration": "./plots_cal/",
-        "flow_validation": "./plots_val/",
-        "stage_calibration": "./plots_cal/",
-        "stage_validation": "./plots_val/",
-        "ec_calibration": "./plots_cal/",
-        "ec_validation": "./plots_val/",
-    }
-    plot_types_to_copy_list = plot_file_copying_options_dict["plot_types_to_copy_list"]
-    for plot_type in plot_types_to_copy_list:
+    plot_types_to_copy_dict = plot_file_copying_options_dict["plot_types_to_copy_dict"]
+    for constituent in plot_types_to_copy_dict:
+        plot_file_prefix = plot_types_to_copy_dict[constituent]
         # location list is a list of locations, for example, RSAC155
-        const = plot_type_to_const_dict[plot_type]
-        d = plot_type_to_dir_dict[plot_type]
-        location_list = plot_file_copying_options_dict[plot_type]
+        output_folder = options_dict["output_folder"]
+        location_list = plot_file_copying_options_dict[plot_file_prefix]
         #     now copy the files...
         i = 0
         for location in location_list:
-            infile = d + location + "_" + const + ".png"
-            outfile = d + plot_type + "_" + str(i) + "_" + location + ".png"
+            infile = output_folder + location + "_" + constituent + ".png"
+            plot_num_string = '0000' + str(i)
+            plot_num_string = plot_num_string[-4:]
+            outfile = output_folder + plot_file_prefix + "_" + plot_num_string + "_" + location + ".png"
             logger.debug("Copying: %s -> %s", infile, outfile)
             try:
                 shutil.copy2(infile, outfile)
