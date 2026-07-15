@@ -257,6 +257,19 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
             return f'{r["source_num"]}:{r["NAME"]}'
         return f'{r["NAME"]}'
 
+    def get_convertible_unit_groups(self):
+        """Unit groups for dual y-axis when comparing DSM2 DSS output with
+        observed data from external sources.
+
+        DSM2 DSS unit strings are uppercase (e.g. ``UMHOS/CM``, ``FEET``,
+        ``CFS``); the renderer lowercases all unit strings before matching.
+        """
+        return [
+            {"umhos/cm", "us/cm", "micros/cm", "ec", "psu", "ppt"},
+            {"feet", "ft", "meters"},
+            {"cfs", "m^3/s"},
+        ]
+
     def get_time_range(self, dfcat):
         return self.time_range
 
@@ -1531,6 +1544,20 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         if "source_num" in r.index:
             return f'{r["source_num"]}:{r[self.station_id_column]}'
         return f"{r[self.station_id_column]}"
+
+    def get_convertible_unit_groups(self):
+        """Unit groups for dual y-axis when combining HDF5 tidefile output
+        with observed data.
+
+        HydroH5 uses ``"cfs"`` and ``"ft"``; QualH5 uses ``"umhos/cm"`` for EC
+        constituents.  Observed salinity from external sources may use ``"psu"``
+        or ``"ppt"``.
+        """
+        return [
+            {"umhos/cm", "us/cm", "micros/cm", "ec", "psu", "ppt"},
+            {"ft", "feet", "meters"},
+            {"cfs", "m^3/s"},
+        ]
 
     def get_time_range(self, dfcat):
         return self.time_range
