@@ -270,6 +270,22 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
             {"cfs", "m^3/s"},
         ]
 
+    # Reference secondary axis: DSM2 is US-customary; show metric equivalent.
+    _SECONDARY_AXIS_SPECS = {
+        "cfs":      {"label": "m\u00b3/s",      "js_code": "tick / 35.3147"},
+        "feet":     {"label": "meters",          "js_code": "tick * 0.3048"},
+        "ft":       {"label": "meters",          "js_code": "tick * 0.3048"},
+        "umhos/cm": {"label": "PSU\u2248",       "js_code": "tick / 1600"},
+        "us/cm":    {"label": "PSU\u2248",       "js_code": "tick / 1600"},
+        "micros/cm":{"label": "PSU\u2248",       "js_code": "tick / 1600"},
+        "psu":      {"label": "\u00b5S/cm\u2248", "js_code": "tick * 1600"},
+        "ppt":      {"label": "\u00b5S/cm\u2248", "js_code": "tick * 1600"},
+    }
+
+    def get_secondary_axis_spec(self, unit: str):
+        """Reference metric axis for DSM2 US-customary output units."""
+        return self._SECONDARY_AXIS_SPECS.get(unit.lower())
+
     def get_time_range(self, dfcat):
         return self.time_range
 
@@ -1558,6 +1574,21 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
             {"ft", "feet", "meters"},
             {"cfs", "m^3/s"},
         ]
+
+    _SECONDARY_AXIS_SPECS = {
+        "cfs":      {"label": "m\u00b3/s",      "js_code": "tick / 35.3147"},
+        "ft":       {"label": "meters",          "js_code": "tick * 0.3048"},
+        "feet":     {"label": "meters",          "js_code": "tick * 0.3048"},
+        "umhos/cm": {"label": "PSU\u2248",       "js_code": "tick / 1600"},
+        "us/cm":    {"label": "PSU\u2248",       "js_code": "tick / 1600"},
+        "micros/cm":{"label": "PSU\u2248",       "js_code": "tick / 1600"},
+        "psu":      {"label": "\u00b5S/cm\u2248", "js_code": "tick * 1600"},
+        "ppt":      {"label": "\u00b5S/cm\u2248", "js_code": "tick * 1600"},
+    }
+
+    def get_secondary_axis_spec(self, unit: str):
+        """Reference metric axis for DSM2 HDF5 tidefile output units."""
+        return self._SECONDARY_AXIS_SPECS.get(unit.lower())
 
     def get_time_range(self, dfcat):
         return self.time_range
