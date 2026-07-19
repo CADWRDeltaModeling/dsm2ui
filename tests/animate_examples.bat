@@ -72,7 +72,7 @@ SET "FC_HYDRO_H5=%FC_DIR%\hist_fc_mss.h5"
 SET "FC_ECHO_INP=%FC_DIR%\hydro_echo_hist_fc_mss.inp"
 SET "FC_CL=D:\delta\dsm2_grid_2026-04-16_historical_shapefiles\shapefiles\i12_DSM2_Grid_V2020-04-16_Hist_channels_centerlines.shp"
 SET "FC_EC_IDW_H5=D:\delta\hist_fc_mss_qual_EC_idw.h5"
-
+SET "OBS_FC_EC_IDW_H5=obsonly_EC_idw.h5"
 :: --- Observations -----------------------------------------------------------
 SET "EC_OBS_RAW_CSV=D:\delta\ec_obs.csv"
 SET "EC_OBS_AVG_CSV=D:\delta\ec_obs_avg.csv"
@@ -182,10 +182,19 @@ dsm2ui animate export-corrected "%FC_EC_H5%" ^
     --observations-csv "%EC_OBS_AVG_CSV%" ^
     --stations-csv "%EC_STATIONS_CSV%" ^
     --echo-inp "%FC_ECHO_INP%" ^
-    --start 01OCT2014 --end 30SEP2024 ^
+    --start 01OCT2009 --end 30SEP2026 ^
     --idw-power 2.5 --max-obs-age 25h ^
     --centerlines-file "%FC_CL%"
 
+:: no model correction, just data values
+dsm2ui animate export-corrected ^
+    --output "%OBS_FC_EC_IDW_H5%" ^
+    --observations-csv "%EC_OBS_AVG_CSV%" ^
+    --stations-csv "%EC_STATIONS_CSV%" ^
+    --echo-inp "%FC_ECHO_INP%" ^
+    --start 01OCT2009 --end 30SEP2026 ^
+    --idw-power 2.5 --max-obs-age 25h ^
+    --centerlines-file "%FC_CL%" --zero-model --interval 1H
 
 :: ============================================================================
 :: SECTION 4: animate qual — basic single file
@@ -194,6 +203,7 @@ dsm2ui animate export-corrected "%FC_EC_H5%" ^
 :: Opens a browser tab on a random port with the animated map.
 
 dsm2ui animate qual "%V821_EC_H5%" --constituent ec
+dsm2ui animate qual "%OBS_FC_EC_IDW_H5%" --constituent ec
 
 :: Specify a fixed port (useful for bookmarking or firewall rules):
 dsm2ui animate qual "%V821_EC_H5%" --constituent ec --port 5007

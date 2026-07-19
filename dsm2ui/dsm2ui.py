@@ -271,20 +271,25 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
         ]
 
     # Reference secondary axis: DSM2 is US-customary; show metric equivalent.
+    # EC ↔ PSU is non-linear and handled via get_annotation_hook.
     _SECONDARY_AXIS_SPECS = {
-        "cfs":      {"label": "m\u00b3/s",      "js_code": "tick / 35.3147"},
-        "feet":     {"label": "meters",          "js_code": "tick * 0.3048"},
-        "ft":       {"label": "meters",          "js_code": "tick * 0.3048"},
-        "umhos/cm": {"label": "PSU\u2248",       "js_code": "tick / 1600"},
-        "us/cm":    {"label": "PSU\u2248",       "js_code": "tick / 1600"},
-        "micros/cm":{"label": "PSU\u2248",       "js_code": "tick / 1600"},
-        "psu":      {"label": "\u00b5S/cm\u2248", "js_code": "tick * 1600"},
-        "ppt":      {"label": "\u00b5S/cm\u2248", "js_code": "tick * 1600"},
+        "cfs":  {"label": "m\u00b3/s", "js_code": "tick / 35.3147"},
+        "feet": {"label": "meters",   "js_code": "tick * 0.3048"},
+        "ft":   {"label": "meters",   "js_code": "tick * 0.3048"},
     }
 
     def get_secondary_axis_spec(self, unit: str):
-        """Reference metric axis for DSM2 US-customary output units."""
+        """Reference metric axis for DSM2 US-customary output units (linear)."""
         return self._SECONDARY_AXIS_SPECS.get(unit.lower())
+
+    _EC_UNITS = {"umhos/cm", "us/cm", "micros/cm", "ec"}
+
+    def get_annotation_hook(self, unit: str, lo, hi):
+        """PSU reference lines for DSM2 EC/conductance axes; None otherwise."""
+        if unit.lower() in self._EC_UNITS and lo is not None and hi is not None:
+            from dvue.plotutils import make_psu_reference_lines_hook
+            return make_psu_reference_lines_hook(lo, hi)
+        return None
 
     def get_time_range(self, dfcat):
         return self.time_range
@@ -1576,19 +1581,23 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
         ]
 
     _SECONDARY_AXIS_SPECS = {
-        "cfs":      {"label": "m\u00b3/s",      "js_code": "tick / 35.3147"},
-        "ft":       {"label": "meters",          "js_code": "tick * 0.3048"},
-        "feet":     {"label": "meters",          "js_code": "tick * 0.3048"},
-        "umhos/cm": {"label": "PSU\u2248",       "js_code": "tick / 1600"},
-        "us/cm":    {"label": "PSU\u2248",       "js_code": "tick / 1600"},
-        "micros/cm":{"label": "PSU\u2248",       "js_code": "tick / 1600"},
-        "psu":      {"label": "\u00b5S/cm\u2248", "js_code": "tick * 1600"},
-        "ppt":      {"label": "\u00b5S/cm\u2248", "js_code": "tick * 1600"},
+        "cfs":  {"label": "m\u00b3/s", "js_code": "tick / 35.3147"},
+        "ft":   {"label": "meters",   "js_code": "tick * 0.3048"},
+        "feet": {"label": "meters",   "js_code": "tick * 0.3048"},
     }
 
     def get_secondary_axis_spec(self, unit: str):
-        """Reference metric axis for DSM2 HDF5 tidefile output units."""
+        """Reference metric axis for DSM2 HDF5 tidefile output units (linear)."""
         return self._SECONDARY_AXIS_SPECS.get(unit.lower())
+
+    _EC_UNITS = {"umhos/cm", "us/cm", "micros/cm", "ec"}
+
+    def get_annotation_hook(self, unit: str, lo, hi):
+        """PSU reference lines for DSM2 EC/conductance axes; None otherwise."""
+        if unit.lower() in self._EC_UNITS and lo is not None and hi is not None:
+            from dvue.plotutils import make_psu_reference_lines_hook
+            return make_psu_reference_lines_hook(lo, hi)
+        return None
 
     def get_time_range(self, dfcat):
         return self.time_range
