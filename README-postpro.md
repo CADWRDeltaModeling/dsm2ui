@@ -82,6 +82,20 @@ dsm2ui calib postpro setup-from-datastore ^
     --vartype EC
 ```
 
+> **Share drive users:** pass the directory that *contains* `inventory_datasets_screened*.csv`
+> and the `screened/` subdirectory — not `screened/` itself. For example:
+> `-d "\\cnrastore-bdo\Modeling_Data\repo\continuous"`
+>
+> If `pyhecdss` raises an error on a long UNC path, map the share to a drive letter first:
+> ```bat
+> net use Z: \\cnrastore-bdo\Modeling_Data
+> ```
+> then use `-d Z:/repo/continuous`.
+>
+> **Performance tip:** The extraction step reads every matching station CSV from the
+> network share. Run it once and keep the generated `ec_cal.dss` locally. Subsequent
+> `run model` and `run plots` steps use only the local DSS and are fast.
+
 **What this does:**
 
 1. Reads the echo file in `studies/historical/output/` to find `DSM2MODIFIER` and the
@@ -92,12 +106,17 @@ dsm2ui calib postpro setup-from-datastore ^
 4. Writes `postpro_config.yml` referencing the model DSS, the extracted `ec_cal.dss`,
    and the bundled default location station CSV.
 
+> **B-part naming:** DSS B-parts in `ec_cal.dss` are the datastore `station_id` uppercased
+> (with subloc appended when present, e.g. `ANH` + `upper` → `ANHUPPER`). The bundled
+> default location CSVs already use matching `obs_station_id` values for the standard
+> Delta EC network. If you add custom stations to the location CSV, use the same convention.
+
 **Key options:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-s / --study DIR` | *(required, repeatable)* | Study folder (repeat for multiple runs) |
-| `-d / --datastore DIR` | *(required)* | DMS Datastore directory |
+| `-d / --datastore DIR` | *(required)* | DMS Datastore directory — the folder that *contains* `inventory_datasets_screened*.csv` and the `screened/` subdirectory, **not** `screened/` itself |
 | `-o / --output FILE` | *(required)* | Output YAML config path |
 | `--vartype TYPE` | `EC` *(repeatable)* | Vartype(s): `EC`, `FLOW`, `STAGE` |
 | `-m / --module` | `qual` | DSM2 module: `qual` or `gtm` for EC; `hydro` for FLOW/STAGE |
@@ -108,25 +127,35 @@ dsm2ui calib postpro setup-from-datastore ^
 
 ### EC vs FLOW/STAGE module flag
 
-- Use `-m qual` (default) or `-m gtm` when plotting **EC** — these are QUAL/GTM output DSS files.
-- Use `-m hydro` when plotting **FLOW** or **STAGE** — the hydro DSS file.
+| Variable(s) | Module flag | DSS file used |
+|---|---|---|
+| EC | `-m qual` (default) or `-m gtm` | `{modifier}_qual.dss` or `{modifier}_gtm.dss` |
+| FLOW, STAGE | `-m hydro` | `{modifier}_hydro.dss` |
+
+QUAL/GTM output DSS files contain water quality constituents (EC). They do **not**
+contain FLOW or STAGE — those only exist in the hydro DSS. If you need both EC and
+FLOW/STAGE plots, generate **two separate configs**: one with `-m qual` for EC and
+one with `-m hydro` for FLOW/STAGE.
 
 ### Multiple vartypes
 
-Append `--vartype` for each variable you want to process:
+Multiple vartypes are supported within a single module:
 
 ```bat
+# EC and other water quality constituents from a qual run:
 dsm2ui calib postpro setup-from-datastore ^
     -s D:/studies/historical ^
     -d D:/datastore ^
-    -o postpro_config.yml ^
-    --vartype EC --vartype FLOW ^
-    -m qual
-```
+    -o postpro_ec.yml ^
+    --vartype EC -m qual
 
-> When mixing EC and FLOW in a single config, use `-m qual` and note that FLOW in the
-> QUAL DSS comes from the tidefile linkage. If your FLOW output is only in the hydro DSS,
-> run separate configs with `-m hydro` for FLOW/STAGE and `-m qual` for EC.
+# FLOW and STAGE from a hydro run:
+dsm2ui calib postpro setup-from-datastore ^
+    -s D:/studies/historical ^
+    -d D:/datastore ^
+    -o postpro_hydro.yml ^
+    --vartype FLOW --vartype STAGE -m hydro
+```
 
 ---
 
@@ -360,7 +389,7 @@ RSAN007,ANHUPPER,San Joaquin R at Antioch,NO,,
 | `obs_station_id` | Yes | Observed DSS B-part (or arithmetic expression) |
 | `station_name` | Yes | Human-readable station name for plot titles |
 | `subtract` | Yes | `NO` (use `YES` only for legacy gate/diversion logic) |
-| `time_window_exclusion_list` | No | Comma-separated `START_TIMESTAMP_END_TIMESTAMP` pairs to mask bad data |
+| `time_window_exclusion_list` | No | Bad-data periods to mask. Each period is `START_TIMESTAMP_END_TIMESTAMP` (underscore-separated). Multiple periods are comma-separated. |
 | `threshold_value` | No | Absolute value threshold above which data is treated as suspect |
 
 Rows starting with `#` are skipped (useful for temporarily disabling a station).
@@ -378,8 +407,10 @@ If your stations are not in the bundled defaults, generate a starting CSV from a
 Datastore by snapping station coordinates to DSM2 channels:
 
 ```bat
-# Step 1 — extract station metadata from the datastore (coming from dsm2ui datastore tools)
-# Produces: stations_ec.csv with columns: station_id, lat, lon, ...
+# Step 1 — extract station metadata (lat/lon) from the datastore inventory
+dsm2ui datastore extract ec ^
+    --repo \\cnrastore-bdo\Modeling_Data\repo\continuous ^
+    --stations stations_ec.csv
 
 # Step 2 — snap to DSM2 channels, assign dsm2_id
 dsm2ui calib stations-csv ^
@@ -391,9 +422,11 @@ dsm2ui calib stations-csv ^
 Stations that cannot be snapped within 100 ft of a channel are written to
 `my_ec_stations_unmatched.csv`. Use `--distance-tolerance 200` to cast a wider net.
 
-After generation, fill in the `obs_station_id` column (the CDEC/USGS station ID that
-matches the DSS B-parts in your observed file) and any `time_window_exclusion_list`
-entries for known bad data periods.
+After generation, review the `obs_station_id` column. When using `setup-from-datastore`,
+the extracted `ec_cal.dss` writes DSS B-parts as the datastore `station_id` (uppercased,
+with subloc appended if present, e.g. `ANHUPPER`). The `obs_station_id` in your station
+CSV must match these B-parts exactly. The bundled default CSVs already use the correct
+values for the standard Delta network.
 
 ### Excluding bad data windows
 
