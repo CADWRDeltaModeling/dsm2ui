@@ -120,12 +120,19 @@ def postpro_observed(cluster, config_data, use_dask):
     try:
         for vartype in vartype_dict:
             if vartype_timewindow_dict[vartype] is not None:
+                dssfile = observed_files_dict.get(vartype)
+                location_file = location_files_dict.get(vartype)
+                if dssfile is None or location_file is None:
+                    logger.warning(
+                        "Skipping observed %s: missing %s in config",
+                        vartype,
+                        "observed_files_dict" if dssfile is None else "location_files_dict",
+                    )
+                    continue
                 logger.info("Processing observed %s data", vartype)
-                dssfile = observed_files_dict[vartype]
                 # catalog the DSS file. If you don't do this, processes are likely to fail the first time you run them with an
                 # uncataloged DSS File, if you are using dask.
                 pyhecdss.DSSFile(dssfile).catalog()
-                location_file = location_files_dict[vartype]
                 units = vartype_dict[vartype]
                 study_name = "Observed"
                 observed = True

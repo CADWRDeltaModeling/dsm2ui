@@ -486,7 +486,7 @@ def datastore_extract(datastore_dir, dssfile, csvfile, param, repo_level,
     Valid PARAM values: elev, predictions, flow, temp, do, ec, ssc, turbidity, ph, velocity, cla
     """
     if not dssfile and not csvfile and not stations:
-        raise click.UsageError("Provide at least one of --output or --csv.")
+        raise click.UsageError("Provide at least one of --output, --csv, or --stations.")
     from dsm2ui import datastore2dss
     from pydsm.analysis.dsm2study import parse_military_date
     import pandas as pd

@@ -122,6 +122,7 @@ dsm2ui calib postpro setup-from-datastore ^
 | `-m / --module` | `qual` | DSM2 module: `qual` or `gtm` for EC; `hydro` for FLOW/STAGE |
 | `--dss-dir DIR` | same dir as `--output` | Where to write extracted observed DSS files |
 | `--repo-level` | `screened` | Datastore level: `screened` or `raw` |
+| `--location-file VARTYPE=PATH` | *(repeatable)* | Override a location CSV, e.g. `EC=/path/ec.csv`; when omitted bundled defaults are used |
 | `--output-folder DIR` | `./plots/` | Folder where plots are saved |
 | `--timewindow "A - B"` | auto from echo file | Override time window, e.g. `"01OCT2020 - 30SEP2022"` |
 
@@ -327,9 +328,10 @@ options_dict:
   zoom_inst_plot: true
 
 location_files_dict:
-  EC: null                     # null = use bundled default; or a file path
-  FLOW: null
-  STAGE: null
+  EC: null                     # null = use bundled default station CSV (~60 Delta EC stations)
+  FLOW: null                   # null = use bundled default (~30 flow stations)
+  STAGE: null                  # null = use bundled default (~20 stage stations)
+                               # Replace null with a file path to use your own station list
 
 observed_files_dict:
   EC: D:/postprocessing/ec_cal.dss
@@ -361,17 +363,61 @@ To disable a vartype entirely, set `vartype_timewindow_dict → VARTYPE: null`.
 
 ## Customizing the station list
 
-### Bundled defaults
+### Bundled defaults vs custom location CSVs
 
-When no location CSV is provided (`null` in `location_files_dict`), the system uses
-bundled station CSVs from `dsm2ui/calib/data/`:
+When `location_files_dict` entries are `null`, the system uses the bundled station CSVs
+shipped with `dsm2ui`. These cover the **standard DSM2 calibration/validation network**
+(~60 EC stations, ~30 flow stations, ~20 stage stations). The `obs_station_id` values
+in these CSVs already match the DSS B-parts written by `setup-from-datastore`.
 
-- `calibration_ec_stations.csv` — ~60 EC stations across the Delta
-- `calibration_flow_stations.csv` — ~30 flow stations
-- `calibration_stage_stations.csv` — ~20 stage stations
+**Use the bundled defaults when** your datastore contains the same station IDs as the
+standard Delta network (CDEC/USGS/DWR stations like `MALUPPER`, `ANHUPPER`, `FPT`, etc.).
+You do not need to generate any location CSVs.
 
-These cover the standard DSM2 calibration/validation network. For custom station sets,
-provide your own CSV.
+**Generate custom location CSVs when** you have stations that are not in the bundled
+defaults (e.g. a local project network or additional monitoring sites).
+
+### Generating location CSVs from the datastore
+
+Use the following two-step process to build a location CSV from your datastore and wire
+it directly into the config:
+
+```bat
+# Step 1 — extract station metadata (obs_station_id, lat/lon) from the datastore.
+# Passing only --stations reads the inventory CSV and nothing else — it does NOT
+# read any time-series data files, so it is fast even over a network share.
+dsm2ui datastore extract ec ^
+    --repo \\cnrastore-bdo\Modeling_Data\repo\continuous ^
+    --stations stations_ec.csv
+
+# Step 2 — snap stations to DSM2 channels to assign dsm2_id
+#   (bundled GeoJSON works for the standard Delta grid)
+dsm2ui calib stations-csv ^
+    stations_ec.csv ^
+    dsm2ui/dsm2gis/dsm2_channels_centerlines_8_2.geojson ^
+    location_ec.csv
+
+# Step 3 — generate config using the custom location CSV
+dsm2ui calib postpro setup-from-datastore ^
+    -s D:/studies/historical ^
+    -d \\cnrastore-bdo\Modeling_Data\repo\continuous ^
+    -o postpro_config.yml ^
+    --vartype EC ^
+    --location-file EC=location_ec.csv
+```
+
+Step 2 writes `location_ec_unmatched.csv` for any stations that could not be snapped
+within 100 ft of a channel. Use `--distance-tolerance 200` to cast a wider net.
+
+Alternatively, if you already have `postpro_config.yml`, just edit `location_files_dict`
+directly:
+
+```yaml
+location_files_dict:
+  EC: D:/my_project/location_ec.csv
+  FLOW: null      # keep bundled default for flow
+  STAGE: null
+```
 
 ### Location CSV format
 
@@ -393,40 +439,6 @@ RSAN007,ANHUPPER,San Joaquin R at Antioch,NO,,
 | `threshold_value` | No | Absolute value threshold above which data is treated as suspect |
 
 Rows starting with `#` are skipped (useful for temporarily disabling a station).
-
-To use a custom CSV, pass it via `--location-file` at setup time or edit `postpro_config.yml`:
-
-```yaml
-location_files_dict:
-  EC: D:/my_project/location_info/my_ec_stations.csv
-```
-
-### Building a station CSV from scratch
-
-If your stations are not in the bundled defaults, generate a starting CSV from a DMS
-Datastore by snapping station coordinates to DSM2 channels:
-
-```bat
-# Step 1 — extract station metadata (lat/lon) from the datastore inventory
-dsm2ui datastore extract ec ^
-    --repo \\cnrastore-bdo\Modeling_Data\repo\continuous ^
-    --stations stations_ec.csv
-
-# Step 2 — snap to DSM2 channels, assign dsm2_id
-dsm2ui calib stations-csv ^
-    stations_ec.csv ^
-    dsm2ui/dsm2gis/dsm2_channels_centerlines_8_2.geojson ^
-    my_ec_stations.csv
-```
-
-Stations that cannot be snapped within 100 ft of a channel are written to
-`my_ec_stations_unmatched.csv`. Use `--distance-tolerance 200` to cast a wider net.
-
-After generation, review the `obs_station_id` column. When using `setup-from-datastore`,
-the extracted `ec_cal.dss` writes DSS B-parts as the datastore `station_id` (uppercased,
-with subloc appended if present, e.g. `ANHUPPER`). The `obs_station_id` in your station
-CSV must match these B-parts exactly. The bundled default CSVs already use the correct
-values for the standard Delta network.
 
 ### Excluding bad data windows
 

@@ -789,15 +789,24 @@ def calib_postpro_setup(
     default=None,
     help="Override the simulation time window (e.g. \"01OCT2020 - 30SEP2022\").",
 )
+@click.option(
+    "--location-file",
+    "location_files",
+    multiple=True,
+    help="Override a vartype location CSV as VARTYPE=/path (e.g. EC=/path/ec.csv). "
+         "Repeat for multiple vartypes.  When omitted, bundled default station CSVs are used.",
+)
 def calib_postpro_setup_from_datastore(
     study_folders, datastore, output, dss_dir, module, vartypes,
-    repo_level, output_folder, timewindow,
+    repo_level, output_folder, timewindow, location_files,
 ):
     """Generate a calib-ui YAML config by extracting observed data from a DMS Datastore.
 
     Extracts one DSS file per requested vartype from the DMS Datastore, then
     builds a postpro_config.yml that references those files as observed_files_dict.
-    Location station CSVs use the bundled defaults (no --postprocessing folder needed).
+    Location station CSVs default to the bundled defaults (covering the standard Delta
+    calibration network).  Override with --location-file EC=/path/my_ec_stations.csv
+    when your station set differs from the defaults.
 
     Example:
 
@@ -829,6 +838,21 @@ def calib_postpro_setup_from_datastore(
         repo_level=repo_level,
     )
 
+    # Parse --location-file KEY=VALUE overrides
+    def _parse_kv(items):
+        result = {}
+        for item in items:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                result[k.strip().upper()] = v.strip()
+            else:
+                raise click.BadParameter(
+                    f"Expected VARTYPE=/path, got: {item!r}"
+                )
+        return result
+
+    loc_overrides = _parse_kv(location_files) if location_files else None
+
     tw_override = None
     if timewindow:
         tw_override = {
@@ -841,11 +865,12 @@ def calib_postpro_setup_from_datastore(
 
     result = calib_config_builder.build_calib_config(
         study_folders=list(study_folders),
-        postprocessing_folder=None,   # use bundled default location CSVs
+        postprocessing_folder=None,   # use bundled default location CSVs (or loc_overrides)
         output_file=output,
         module=module,
         output_folder=output_folder,
         observed_files=observed_paths,
+        location_files=loc_overrides,
         timewindow_dict=tw_override,
     )
 
