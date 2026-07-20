@@ -591,15 +591,52 @@ rename the echo file to match that pattern, e.g. `qual_echo.inp`.
 ```bat
 conda activate dsm2ui
 
-# --- One-time setup (Path A: from DMS Datastore) ---
+# ===========================================================================
+# PATH A: Setup using the DMS Datastore (share drive)
+# Note: -d must point to the parent of screened/, not screened/ itself.
+# e.g. \\cnrastore-bdo\Modeling_Data\repo\continuous  (not ...\continuous\screened)
+# ===========================================================================
+
+# --- Generate config (EC from a qual run; bundled default station list) ---
 dsm2ui calib postpro setup-from-datastore ^
     -s D:/studies/historical -s D:/studies/scenario_a ^
-    -d D:/datastore ^
+    -d "\\cnrastore-bdo\Modeling_Data\repo\continuous" ^
     -o postpro_config.yml ^
-    --vartype EC --vartype FLOW ^
+    --vartype EC -m qual
+
+# --- Generate config with custom location CSV ---
+#   Step 1: extract station metadata only (fast — reads inventory, not data files)
+dsm2ui datastore extract ec ^
+    --repo "\\cnrastore-bdo\Modeling_Data\repo\continuous" ^
+    --stations stations_ec.csv
+#   Step 2: snap stations to DSM2 channels to assign dsm2_id
+dsm2ui calib stations-csv ^
+    stations_ec.csv ^
+    dsm2ui/dsm2gis/dsm2_channels_centerlines_8_2.geojson ^
+    location_ec.csv
+#   Step 3: generate config referencing the custom station list
+dsm2ui calib postpro setup-from-datastore ^
+    -s D:/studies/historical ^
+    -d "\\cnrastore-bdo\Modeling_Data\repo\continuous" ^
+    -o postpro_config.yml ^
+    --vartype EC -m qual ^
+    --location-file EC=location_ec.csv
+
+# ===========================================================================
+# PATH B: Setup using an existing postprocessing folder
+# ===========================================================================
+
+dsm2ui calib postpro setup ^
+    -s D:/studies/historical -s D:/studies/scenario_a ^
+    -p D:/postprocessing ^
+    -o postpro_config.yml ^
     -m qual
 
-# --- Process observed data (run once per observed DSS change) ---
+# ===========================================================================
+# Processing pipeline (same for both paths)
+# ===========================================================================
+
+# --- Process observed data (run once; re-run only when observed DSS changes) ---
 dsm2ui calib postpro run observed postpro_config.yml
 
 # --- Process model output (run after each new DSM2 run) ---
@@ -611,6 +648,16 @@ dsm2ui calib postpro run plots postpro_config.yml --workers 4
 # --- Review interactively ---
 dsm2ui calib ui plot postpro_config.yml
 
-# --- Rebuild plots faster (skip reprocessing) ---
+# --- Rebuild plots faster without reprocessing ---
 dsm2ui calib postpro run plots postpro_config.yml --workers 4 --skip-cached
+
+# --- FLOW/STAGE from hydro run (separate config) ---
+dsm2ui calib postpro setup-from-datastore ^
+    -s D:/studies/historical ^
+    -d "\\cnrastore-bdo\Modeling_Data\repo\continuous" ^
+    -o postpro_hydro.yml ^
+    --vartype FLOW --vartype STAGE -m hydro
+dsm2ui calib postpro run observed postpro_hydro.yml
+dsm2ui calib postpro run model   postpro_hydro.yml
+dsm2ui calib postpro run plots   postpro_hydro.yml --workers 4
 ```
