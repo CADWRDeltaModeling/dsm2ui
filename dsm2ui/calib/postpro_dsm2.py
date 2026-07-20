@@ -840,6 +840,11 @@ def run_process(process_name, config_filename, use_dask, skip_if_cached=False, n
         exit(0)
 
     logger.debug("Config data loaded from %s", config_filename)
+    # YAML auto-parses ISO-date keys (e.g. 2026-06-29) as datetime.date objects.
+    # Stringify all dict keys that feed study/model names so they work as HoloViews labels.
+    for section in ("study_files_dict", "postpro_model_dict"):
+        if config_data and section in config_data and isinstance(config_data[section], dict):
+            config_data[section] = {str(k): v for k, v in config_data[section].items()}
     # check data in json or yaml file
     check_config_data(config_data)
 
