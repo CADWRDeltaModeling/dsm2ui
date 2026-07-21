@@ -490,7 +490,7 @@ def calib_cascade(config, resume, dry_run, skip_init, log_level):
 @click.option(
     "--distance-tolerance",
     type=click.INT,
-    default=100,
+    default=1000,
     show_default=True,
     help="Maximum distance (ft) from a channel centerline for a station to be considered matched.",
 )

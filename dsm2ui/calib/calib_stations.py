@@ -43,7 +43,7 @@ def build_calib_stations_csv(
     centerlines_file: str,
     output_csv: str,
     unmatched_csv: str | None = None,
-    distance_tolerance: int = 100,
+    distance_tolerance: int = 1000,
 ) -> None:
     """Snap datastore stations to DSM2 channels and write calibration_ec_stations.csv.
 

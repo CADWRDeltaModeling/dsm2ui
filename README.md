@@ -338,7 +338,7 @@ Build `calibration_ec_stations.csv` from a datastore stations CSV by snapping ea
 | `STATIONS_CSV` | path | — | Enriched stations CSV from `datastore extract --stations` |
 | `CENTERLINES_GEOJSON` | path | — | DSM2 channel centerlines GeoJSON (UTM Zone 10N) |
 | `OUTPUT_CSV` | path | — | Output `calibration_ec_stations.csv` |
-| `--distance-tolerance INT` | int | `100` | Max distance (ft) for a station to be considered matched |
+| `--distance-tolerance INT` | int | `1000` | Max distance (ft) for a station to be considered matched |
 | `--unmatched FILE` | path | `<output>_unmatched.csv` | CSV for stations that could not be snapped |
 
 ```bash
@@ -348,7 +348,7 @@ dsm2ui calib stations-csv stations_ec.csv \
 
 # Wider search radius
 dsm2ui calib stations-csv stations_ec.csv channels.geojson cal_stations.csv \
-    --distance-tolerance 200 --unmatched unmatched.csv
+    --distance-tolerance 2000 --unmatched unmatched.csv
 ```
 
 #### `calib checklist`
@@ -497,8 +497,8 @@ dsm2ui calib stations-csv \
     calibration_ec_stations.csv
 ```
 
-Stations that cannot be snapped within the tolerance (default 100 ft) are written to
-`calibration_ec_stations_unmatched.csv` for review. Use `--distance-tolerance 200` to
+Stations that cannot be snapped within the tolerance (default 1000 ft) are written to
+`calibration_ec_stations_unmatched.csv` for review. Use `--distance-tolerance 2000` to
 cast a wider net. The output CSV has blank defaults for manual fields (`note`, `subtract`,
 `time_window_exclusion_list`, `Calibration Period`, etc.) which should be filled in before use.
 
@@ -555,7 +555,7 @@ Snap lat/lon stations to DSM2 channels. Output columns are `NAME` (uppercased st
 | `STATIONS_CSV` | path | — | Station CSV with `station_id`, `lat`, `lon` columns |
 | `OUTPUT_CSV` | path | — | Output CSV with `NAME`, `CHAN_NO`, `DISTANCE` |
 | `--centerlines FILE` | path | bundled centerlines GeoJSON | DSM2 channel centerlines GeoJSON (UTM Zone 10N) |
-| `--distance-tolerance INT` | int | `100` | Max distance (ft) from centerline to consider a match |
+| `--distance-tolerance INT` | int | `1000` | Max distance (ft) from centerline to consider a match |
 | `--unmatched FILE` | path | `<output>_unmatched.csv` | CSV for stations that could not be snapped |
 
 ```bash
@@ -564,7 +564,7 @@ dsm2ui station-map to-dsm2 stations.csv output_locs.csv
 
 # Custom centerlines; wider tolerance
 dsm2ui station-map to-dsm2 stations.csv output_locs.csv \
-    --centerlines my_channels.geojson --distance-tolerance 200 --unmatched unmatched.csv
+    --centerlines my_channels.geojson --distance-tolerance 2000 --unmatched unmatched.csv
 ```
 
 #### `station-map from-dsm2`

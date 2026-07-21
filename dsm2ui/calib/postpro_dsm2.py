@@ -12,6 +12,35 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+def _get_default_location_files():
+    """Return paths to the bundled default station CSVs shipped with dsm2ui."""
+    import pathlib
+    data_dir = pathlib.Path(__file__).parent / "data"
+    return {
+        "EC": str(data_dir / "calibration_ec_stations.csv"),
+        "FLOW": str(data_dir / "calibration_flow_stations.csv"),
+        "STAGE": str(data_dir / "calibration_stage_stations.csv"),
+    }
+
+
+def _fill_null_location_files(config_data):
+    """Replace null entries in location_files_dict with the bundled default CSVs.
+
+    When ``calib postpro setup-from-datastore`` (or ``setup``) writes a config
+    without a custom station list, it stores ``null`` for each vartype.  The
+    interactive ``calib ui plot`` resolves these via ``_resolve_config`` in
+    calibplotui.py; this function provides the same substitution for the
+    ``calib postpro run`` CLI path so both routes behave identically.
+    """
+    defaults = _get_default_location_files()
+    loc = config_data.get("location_files_dict") or {}
+    for vt, default_path in defaults.items():
+        if not loc.get(vt):   # None, empty string, or missing key → use bundled
+            loc[vt] = default_path
+            logger.debug("location_files_dict[%s] was null — using bundled default: %s", vt, default_path)
+    config_data["location_files_dict"] = loc
+
+
 def _worker_init():
     """Initializer for each ProcessPoolExecutor worker process.
 
@@ -854,6 +883,11 @@ def run_process(process_name, config_filename, use_dask, skip_if_cached=False, n
             config_data[section] = {str(k): v for k, v in config_data[section].items()}
     # check data in json or yaml file
     check_config_data(config_data)
+
+    # Substitute null location file entries with bundled defaults so that
+    # 'calib postpro run' behaves the same as 'calib ui plot' when no custom
+    # station CSV has been provided.
+    _fill_null_location_files(config_data)
 
     # Create cluster if using dask
     cluster = None

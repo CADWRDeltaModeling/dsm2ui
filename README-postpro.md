@@ -407,7 +407,7 @@ dsm2ui calib postpro setup-from-datastore ^
 ```
 
 Step 2 writes `location_ec_unmatched.csv` for any stations that could not be snapped
-within 100 ft of a channel. Use `--distance-tolerance 200` to cast a wider net.
+within 1000 ft of a channel. Use `--distance-tolerance 2000` to cast a wider net.
 
 Alternatively, if you already have `postpro_config.yml`, just edit `location_files_dict`
 directly:
