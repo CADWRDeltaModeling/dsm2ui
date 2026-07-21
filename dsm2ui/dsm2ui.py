@@ -287,8 +287,8 @@ class DSM2DataUIManager(TimeSeriesDataUIManager):
     def get_annotation_hook(self, unit: str, lo, hi):
         """PSU reference lines for DSM2 EC/conductance axes; None otherwise."""
         if unit.lower() in self._EC_UNITS and lo is not None and hi is not None:
-            from dvue.plotutils import make_psu_reference_lines_hook
-            return make_psu_reference_lines_hook(lo, hi)
+            from dvue.plotutils import make_psu_dual_axis_hook
+            return make_psu_dual_axis_hook(lo, hi)
         return None
 
     def get_time_range(self, dfcat):
@@ -1595,8 +1595,8 @@ class DSM2TidefileUIManager(TimeSeriesDataUIManager):
     def get_annotation_hook(self, unit: str, lo, hi):
         """PSU reference lines for DSM2 EC/conductance axes; None otherwise."""
         if unit.lower() in self._EC_UNITS and lo is not None and hi is not None:
-            from dvue.plotutils import make_psu_reference_lines_hook
-            return make_psu_reference_lines_hook(lo, hi)
+            from dvue.plotutils import make_psu_dual_axis_hook
+            return make_psu_dual_axis_hook(lo, hi)
         return None
 
     def get_time_range(self, dfcat):
