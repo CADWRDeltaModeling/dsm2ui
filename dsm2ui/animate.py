@@ -1639,14 +1639,15 @@ def make_composed_transform(
         f"{getattr(fn_a, '__name__', 'a')}+{getattr(fn_b, '__name__', 'b')}"
     )
 
-    return TransformSpec(
+    ts = TransformSpec(
         transform_fn=_composed,      # backward compat: STSR aggregate path still works
         kind="aggregate",
         get_overlap=spec_a.get_overlap,
         output_freq=spec_b.output_freq,
-        filter_spec=spec_a,          # new RSR path: STSR(spec_a) → RSR
-        resample_agg=spec_b.resample_agg,
     )
+    ts.filter_spec = spec_a          # new RSR path: STSR(spec_a) → RSR
+    ts.resample_agg = spec_b.resample_agg
+    return ts
 
 
 def _dsm2_transform_options() -> dict:
@@ -2917,12 +2918,14 @@ def make_resample_transform(freq: str = "D", agg: str = "mean"):
         return resampled
     _transform.__name__ = f"resample_{freq}_{agg}"
 
-    return TransformSpec(
+    ts = TransformSpec(
         transform_fn=_transform,
         kind="aggregate",
         get_overlap=lambda _freq_nanos: 0,
         output_freq=freq,
     )
+    ts.resample_agg = agg
+    return ts
 
 
 def make_moving_average_transform(window: str = "24h", min_periods: int = 1):
