@@ -25,11 +25,52 @@ def substitute_base_dir(base_dir, dict):
     return dict
 
 
+# UTM zone used by the DSM2/Delta calibration station tables ("utm_easting"/"utm_northing").
+_UTM_CRS = "EPSG:26910"
+
+
+def _points_from_location_table(df):
+    """Build WGS84 point geometry for a location table, preferring UTM coordinates.
+
+    UTM easting/northing (``Easting``/``Northing``, EPSG:26910) are often more
+    accurate than the accompanying lat/lon columns in the calibration station
+    CSVs -- station locations have been hand-verified/corrected in UTM without
+    always re-deriving the lat/lon columns. When both are present, UTM wins on
+    a per-row basis; lat/lon is used as a fallback where UTM is missing.
+
+    Updates ``df["Latitude"]``/``df["Longitude"]`` in place so the displayed
+    lat/lon stays consistent with whichever coordinate actually produced the
+    geometry.
+
+    Returns the WGS84 point geometry as a ``geopandas.GeoSeries``.
+    """
+    df["Latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
+    df["Longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
+    geometry = gpd.GeoSeries(
+        gpd.points_from_xy(df["Longitude"], df["Latitude"]), index=df.index, crs="EPSG:4326"
+    )
+
+    if "Easting" in df.columns and "Northing" in df.columns:
+        easting = pd.to_numeric(df["Easting"], errors="coerce")
+        northing = pd.to_numeric(df["Northing"], errors="coerce")
+        utm_mask = easting.notna() & northing.notna()
+        if utm_mask.any():
+            utm_points = gpd.GeoSeries(
+                gpd.points_from_xy(easting[utm_mask], northing[utm_mask]),
+                index=df.index[utm_mask],
+                crs=_UTM_CRS,
+            ).to_crs("EPSG:4326")
+            geometry.loc[utm_mask] = utm_points.values
+            df.loc[utm_mask, "Longitude"] = utm_points.x.values
+            df.loc[utm_mask, "Latitude"] = utm_points.y.values
+
+    return geometry
+
+
 def load_location_file(location_file):
     df = postpro.load_location_file(location_file)
-    gdf = gpd.GeoDataFrame(
-        df, geometry=gpd.points_from_xy(df.Longitude, df.Latitude), crs="EPSG:4326"
-    )
+    geometry = _points_from_location_table(df)
+    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
     return gdf
 
 
@@ -329,13 +370,8 @@ class CalibPlotUIManager(DataUIManager):
                 )
                 continue
             gdf = postpro.load_location_file(location_file)
-            gdf.Latitude = pd.to_numeric(gdf.Latitude, errors="coerce")
-            gdf.Longitude = pd.to_numeric(gdf.Longitude, errors="coerce")
-            gdf = gpd.GeoDataFrame(
-                gdf,
-                geometry=gpd.points_from_xy(gdf.Longitude, gdf.Latitude),
-                crs="EPSG:4326",
-            )
+            geometry = _points_from_location_table(gdf)
+            gdf = gpd.GeoDataFrame(gdf, geometry=geometry, crs="EPSG:4326")
             gdf["vartype"] = str(tkey)
             gdfs.append(gdf)
         if not gdfs:
