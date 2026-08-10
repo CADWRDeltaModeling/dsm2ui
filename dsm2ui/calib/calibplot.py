@@ -1250,7 +1250,9 @@ def build_scatter_plots(
                 * splot
             )
             scatter_plot = scatter_plot.opts(
-                xlabel="Observed " + unit_string,
+                # pp[0] is the reference series for scatter/metrics: either true observed data,
+                # or (in no-observed quick-compare mode) the first/baseline model study.
+                xlabel=pp[0].study.name + " " + unit_string,
                 ylabel="Model " + unit_string,
                 legend_position="top_left",
             ).opts(

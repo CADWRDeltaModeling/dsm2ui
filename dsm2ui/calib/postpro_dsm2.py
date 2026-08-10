@@ -716,13 +716,20 @@ def postpro_plots(cluster, config_data, use_dask, skip_if_cached=False, n_worker
                         for name in gate_file_dict
                     ]
 
-                # create list of postpro.Study objects, with observed Study followed by model Study objects
-                obs_study = postpro.Study("Observed", observed_files_dict[vartype.name])
+                # create list of postpro.Study objects, with observed Study followed by model Study objects.
+                # When no observed DSS is configured for this vartype (quick-compare / baseline-vs-alternative
+                # mode, e.g. via `calib postpro setup-compare`), skip the observed study entirely and treat the
+                # first model study (insertion order of study_files_dict) as the reference for scatter/metrics.
                 model_studies = [
                     postpro.Study(name, study_files_dict[name])
                     for name in study_files_dict
                 ]
-                studies = [obs_study] + model_studies
+                obs_dssfile = observed_files_dict.get(vartype.name)
+                if obs_dssfile:
+                    obs_study = postpro.Study("Observed", obs_dssfile)
+                    studies = [obs_study] + model_studies
+                else:
+                    studies = model_studies
 
                 # now run the processes
                 n_locations = len(locations)

@@ -885,6 +885,120 @@ def calib_postpro_setup_from_datastore(
     click.echo(f"  dsm2ui calib-ui {result}")
 
 
+@calib_postpro.command(name="setup-compare")
+@click.option(
+    "--study",
+    "-s",
+    "study_folders",
+    multiple=True,
+    required=True,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Study folder path, repeat -s for multiple studies. The FIRST -s is "
+         "treated as the baseline/reference study for scatter plots and metrics.",
+)
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Output YAML config file path.",
+)
+@click.option(
+    "--module",
+    "-m",
+    type=click.Choice(["hydro", "qual", "gtm"], case_sensitive=False),
+    default="hydro",
+    show_default=True,
+    help="DSM2 module whose DSS output to reference.",
+)
+@click.option(
+    "--output-folder",
+    default="./plots/",
+    show_default=True,
+    help="Plot output folder written into the YAML options_dict.",
+)
+@click.option(
+    "--timewindow",
+    default=None,
+    help="Override the simulation time window (e.g. \"01OCT2020 - 30SEP2022\").",
+)
+@click.option(
+    "--location-file",
+    "location_files",
+    multiple=True,
+    help="Override a vartype location CSV as VARTYPE=/path (e.g. EC=/path/ec.csv). "
+         "Repeat for multiple vartypes.  When omitted, bundled default station CSVs are used.",
+)
+def calib_postpro_setup_compare(
+    study_folders, output, module, output_folder, timewindow, location_files,
+):
+    """Generate a postpro config for a baseline-vs-alternative comparison, with no observed data.
+
+    Use this for planning studies where there is no field/observed data to compare
+    against -- only two or more completed DSM2 runs (e.g. a baseline and one or more
+    alternatives).  The first --study/-s becomes the reference series for scatter
+    plots and calibration-style metrics; every other study is plotted against it.
+
+    Because there is no observed data, `dsm2ui calib postpro run observed` should be
+    skipped for configs generated this way -- go straight to `run model` then
+    `run plots`.
+
+    Example:
+
+    \b
+        dsm2ui calib postpro setup-compare \\
+            -s D:/delta/dsm2_studies/studies/baseline \\
+            -s D:/delta/dsm2_studies/studies/alternative \\
+            -o compare_config.yml \\
+            -m qual
+
+    See README-postpro.md ("Quick baseline-vs-alternative comparison") and
+    README-integrated-comparison.md for the full workflow, including how to follow up
+    with `pydsm diff` on the two studies' echo files to explain *why* outputs differ.
+    """
+    from dsm2ui.calib import calib_config_builder
+
+    def _parse_kv(items):
+        result = {}
+        for item in items:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                result[k.strip().upper()] = v.strip()
+            else:
+                raise click.BadParameter(
+                    f"Expected VARTYPE=/path, got: {item!r}"
+                )
+        return result
+
+    loc_overrides = _parse_kv(location_files) if location_files else None
+
+    tw_override = None
+    if timewindow:
+        tw_override = {
+            "simulation_period": timewindow,
+            "hydro_calibration": timewindow,
+            "qual_calibration": timewindow,
+            "hydro_validation": timewindow,
+            "qual_validation": timewindow,
+        }
+
+    result = calib_config_builder.build_calib_config(
+        study_folders=list(study_folders),
+        postprocessing_folder=None,
+        output_file=output,
+        module=module,
+        output_folder=output_folder,
+        observed_files=None,   # no observed data: quick-compare / baseline-vs-alternative mode
+        location_files=loc_overrides,
+        timewindow_dict=tw_override,
+    )
+
+    click.echo(f"Config written to: {result}")
+    click.echo("\nThis config has no observed data -- skip 'run observed' and go straight to:")
+    click.echo(f"  dsm2ui calib postpro run model   {result}")
+    click.echo(f"  dsm2ui calib postpro run plots   {result}")
+
+
 calib.add_command(calib_postpro)
 
 

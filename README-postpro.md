@@ -314,6 +314,46 @@ dsm2ui calib postpro run plots postpro_config.yml --workers 4
 
 ---
 
+### Quick baseline-vs-alternative comparison (no observed data)
+
+For planning studies you often just want to compare a baseline DSM2 run against one
+or more alternatives — there may be no field/observed data to compare against yet.
+`calib postpro setup-compare` generates a config with no observed data at all:
+
+```bat
+dsm2ui calib postpro setup-compare ^
+    -s D:/delta/dsm2_studies/studies/baseline ^
+    -s D:/delta/dsm2_studies/studies/alternative ^
+    -o compare_config.yml ^
+    -m qual
+```
+
+- The **first** `-s` study becomes the reference series for scatter plots and
+  calibration-style metrics (regression slope, RMSE, NSE, etc.) — every other
+  study is plotted and scored against it, exactly like the standard observed-data
+  workflow, just with a model run standing in for "truth".
+- Because there is no observed data, **skip `run observed`** and go straight to:
+
+  ```bat
+  dsm2ui calib postpro run model compare_config.yml
+  dsm2ui calib postpro run plots compare_config.yml --workers 4
+  ```
+
+- Scatter-plot axis labels and the metrics table use the actual baseline study's
+  name (e.g. `baseline`) instead of the word "Observed", so it's clear the
+  reference is a model run, not field data.
+- Everything else — multiple vartypes, station CSVs, timewindows, `calib ui plot`
+  — works the same as the standard workflow.
+
+Once you've identified which stations/timewindows diverge most between baseline
+and alternative, follow up with `pydsm diff` on the two studies' Hydro echo files
+to see *what changed in the model setup* that could explain it. See
+[README-integrated-comparison.md](README-integrated-comparison.md) for the full
+worked example, and
+[../pydsm/README-diff.md](../pydsm/README-diff.md) for the `pydsm diff` reference.
+
+---
+
 ## The generated config file
 
 `postpro_config.yml` is a YAML file that can be reviewed and edited after generation.

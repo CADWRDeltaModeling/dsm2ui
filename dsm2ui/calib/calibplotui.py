@@ -434,16 +434,17 @@ class CalibPlotUIManager(DataUIManager):
         return self._dvue_catalog.get(self._ref_name(row))
 
     def get_studies(self, varname):
-        studies = list(self.config["study_files_dict"].keys())
-        obs_study = postpro.Study(
-            "Observed", self.config["observed_files_dict"][varname]
-        )
         model_studies = [
             postpro.Study(name, self.config["study_files_dict"][name])
             for name in self.config["study_files_dict"]
         ]
-        studies = [obs_study] + model_studies
-        return studies
+        obs_dssfile = self.config["observed_files_dict"].get(varname)
+        if obs_dssfile:
+            obs_study = postpro.Study("Observed", obs_dssfile)
+            return [obs_study] + model_studies
+        # No observed data configured for this vartype: quick-compare / baseline-vs-alternative
+        # mode.  The first model study becomes the positional reference for scatter/metrics.
+        return model_studies
 
     def build_location(self, row):
         return postpro.Location(

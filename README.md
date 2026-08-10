@@ -16,6 +16,17 @@ This package provides interactive UI components and analysis utilities for DSM2 
 - **`dsm2ui.calib.checklist_dsm2`** – DSM2 run checklist utilities
 - **`dsm2ui.cli`** – Command-line interface (`dsm2ui` command)
 
+Detailed guides:
+
+- [README-postpro.md](README-postpro.md) – `calib postpro` calibration/validation
+  plot generation, including the no-observed baseline-vs-alternative `setup-compare`
+  workflow.
+- [README-calibrator.md](README-calibrator.md) – `calib run` / `calib optimize`
+  YAML-driven variation runner and DISPERSION/MANNING optimizer.
+- [README-integrated-comparison.md](README-integrated-comparison.md) – how to
+  combine `pydsm compare-dss`, `dsm2ui calib postpro`, and `pydsm diff` into one
+  "what changed, and why" workflow.
+
 ## Installation
 
 ```bash
@@ -445,6 +456,32 @@ dsm2ui calib postpro setup-from-datastore \
     -o postpro_config.yml \
     --vartype EC --vartype FLOW \
     --timewindow "01OCT2020 - 30SEP2022"
+```
+
+#### `calib postpro setup-compare`
+
+Generate a postpro config for a baseline-vs-alternative comparison with **no observed
+data** — for planning studies where you just want to compare two or more completed
+DSM2 runs against each other. The first `-s` study is the reference for scatter plots
+and metrics. Skip `run observed` for configs generated this way; go straight to
+`run model` then `run plots`. See
+[README-postpro.md § Quick baseline-vs-alternative comparison](README-postpro.md#quick-baseline-vs-alternative-comparison-no-observed-data).
+
+| Option | Default | Description |
+|---|---|---|
+| `-s / --study DIR` | *(required, repeatable)* | Study folder path; first `-s` is the baseline/reference |
+| `-o / --output FILE` | *(required)* | Output YAML config path |
+| `-m / --module` | `hydro` | DSM2 module whose DSS output to reference (`hydro\|qual\|gtm`) |
+| `--output-folder DIR` | `./plots/` | Plot output folder written into the YAML |
+| `--timewindow "START - END"` | — | Override simulation time window |
+| `--location-file VARTYPE=PATH` | *(repeatable)* | Override a vartype location CSV |
+
+```bash
+dsm2ui calib postpro setup-compare \
+    -s D:/delta/dsm2_studies/studies/baseline \
+    -s D:/delta/dsm2_studies/studies/alternative \
+    -o compare_config.yml \
+    -m qual
 ```
 
 #### `calib ui plot`
