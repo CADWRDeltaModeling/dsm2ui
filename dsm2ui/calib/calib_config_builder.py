@@ -46,6 +46,41 @@ def _dsm2_date_str(dt):
     return dt.strftime("%d%b%Y").upper()
 
 
+def _unique_study_labels(study_folders):
+    """Return a label per study folder, disambiguating folders that share a leaf name.
+
+    Normally the label is just the folder's own name (e.g. ``historical``,
+    ``scenario_a``). But when two or more study folders share the same leaf
+    directory name and differ only in their parent directories (e.g.
+    ``D:/planning/scenario1/v821`` and ``D:/planning/scenario2/v821``), using
+    the bare leaf name for both would collide and silently drop one study from
+    ``study_files_dict``. In that case, progressively prepend parent directory
+    names (joined with ``_``) until all labels are unique.
+    """
+    paths = [pathlib.Path(f).resolve() for f in study_folders]
+    labels = [p.name for p in paths]
+
+    def _has_duplicates(values):
+        seen = set()
+        for v in values:
+            if v in seen:
+                return True
+            seen.add(v)
+        return False
+
+    depth = 1
+    while _has_duplicates(labels):
+        depth += 1
+        new_labels = ["_".join(p.parts[-depth:]) for p in paths]
+        if new_labels == labels:
+            # Ran out of path components to disambiguate further; stop to avoid
+            # looping forever (e.g. duplicate folders passed in twice).
+            break
+        labels = new_labels
+
+    return labels
+
+
 def _find_echo_file(study_folder, module):
     """Return the first echo .inp file matching the module pattern in output/."""
     output_dir = pathlib.Path(study_folder) / "output"
@@ -225,8 +260,8 @@ def build_calib_config(
     # --- study DSS files (also collect echo files for date extraction) ---
     study_files = {}
     echo_files = {}
-    for folder in study_folders:
-        label = pathlib.Path(folder).name
+    labels = _unique_study_labels(study_folders)
+    for folder, label in zip(study_folders, labels):
         echo_file, dss_path = _find_dss_path(folder, module)
         study_files[label] = dss_path
         echo_files[label] = echo_file
