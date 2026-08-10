@@ -45,6 +45,12 @@ _CLI_TRANSFORM_MAP = {
     "daily":              "Daily mean",
     "daily-min":          "Daily min",
     "daily-max":          "Daily max",
+    "weekly":             "Weekly mean",
+    "weekly-min":         "Weekly min",
+    "weekly-max":         "Weekly max",
+    "monthly":            "Monthly mean",
+    "monthly-min":        "Monthly min",
+    "monthly-max":        "Monthly max",
     "rolling-24h":        "Rolling 24 h",
     "rolling-14d":        "Rolling 14 D",
     "rolling-14d-daily":  "Rolling 14 D \u2192 Daily mean",
@@ -52,6 +58,8 @@ _CLI_TRANSFORM_MAP = {
     "godin-daily":        "Godin \u2192 Daily mean",
     "godin-daily-min":    "Godin \u2192 Daily min",
     "godin-daily-max":    "Godin \u2192 Daily max",
+    "godin-weekly":       "Godin \u2192 Weekly mean",
+    "godin-monthly":      "Godin \u2192 Monthly mean",
 }
 
 
@@ -346,17 +354,25 @@ def animate():
 @click.option("--transform", default="none", show_default=True,
               type=click.Choice(
                   ["none", "daily", "daily-min", "daily-max",
+                   "weekly", "weekly-min", "weekly-max",
+                   "monthly", "monthly-min", "monthly-max",
                    "rolling-24h", "rolling-14d", "rolling-14d-daily",
-                   "godin", "godin-daily", "godin-daily-min", "godin-daily-max"],
+                   "godin", "godin-daily", "godin-daily-min", "godin-daily-max",
+                   "godin-weekly", "godin-monthly"],
                   case_sensitive=False),
               help="Time-domain transform to apply before animation.\n"
                    "none: raw data (default).\n"
                    "daily / daily-min / daily-max: daily resample (mean / min / max).\n"
+                   "weekly / weekly-min / weekly-max: 7-day resample (mean / min / max).\n"
+                   "monthly / monthly-min / monthly-max: month-end resample (mean / min / max).\n"
                    "rolling-24h: 24 h centred rolling mean.\n"
                    "rolling-14d: 14-day centred rolling mean.\n"
                    "rolling-14d-daily: 14-day rolling mean then daily mean.\n"
                    "godin: Godin tidal filter.\n"
-                   "godin-daily / godin-daily-min / godin-daily-max: Godin then daily.")   
+                   "godin-daily / godin-daily-min / godin-daily-max: Godin then daily.\n"
+                   "godin-weekly / godin-monthly: Godin then weekly/monthly mean.\n"
+                   "For any other period/aggregation combination, use --resample-freq/--resample-agg "
+                   "(e.g. --resample-freq 10D --resample-agg mean) which stacks on top of --transform.")   
 @click.option("--config", "config_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
               help="Load all settings from a YAML config file saved by the UI. "
@@ -524,8 +540,11 @@ def hydro_cmd(
 @click.option("--transform", default="none", show_default=True,
               type=click.Choice(
                   ["none", "daily", "daily-min", "daily-max",
+                   "weekly", "weekly-min", "weekly-max",
+                   "monthly", "monthly-min", "monthly-max",
                    "rolling-24h", "rolling-14d", "rolling-14d-daily",
-                   "godin", "godin-daily", "godin-daily-min", "godin-daily-max"],
+                   "godin", "godin-daily", "godin-daily-min", "godin-daily-max",
+                   "godin-weekly", "godin-monthly"],
                   case_sensitive=False),
               help="Time-domain transform (see hydro --help for details).")
 @click.option("--resample-freq",

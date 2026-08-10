@@ -1659,12 +1659,24 @@ def _dsm2_transform_options() -> dict:
     dmean  = make_resample_transform("D", "mean")
     dmin   = make_resample_transform("D", "min")
     dmax   = make_resample_transform("D", "max")
+    wmean  = make_resample_transform("7D", "mean")
+    wmin   = make_resample_transform("7D", "min")
+    wmax   = make_resample_transform("7D", "max")
+    mmean  = make_resample_transform("ME", "mean")
+    mmin   = make_resample_transform("ME", "min")
+    mmax   = make_resample_transform("ME", "max")
     r24h   = make_moving_average_transform("24h")
     r14d   = make_moving_average_transform("14D")
     return {
         "Daily mean":           dmean,
         "Daily min":            dmin,
         "Daily max":            dmax,
+        "Weekly mean":          wmean,
+        "Weekly min":           wmin,
+        "Weekly max":           wmax,
+        "Monthly mean":         mmean,
+        "Monthly min":          mmin,
+        "Monthly max":          mmax,
         "Rolling 24 h":         r24h,
         "Rolling 14 D":         r14d,
         "Rolling 14 D \u2192 Daily mean": make_composed_transform(r14d, dmean),
@@ -1672,6 +1684,8 @@ def _dsm2_transform_options() -> dict:
         "Godin \u2192 Daily mean":   make_composed_transform(godin, dmean),
         "Godin \u2192 Daily min":    make_composed_transform(godin, dmin),
         "Godin \u2192 Daily max":    make_composed_transform(godin, dmax),
+        "Godin \u2192 Weekly mean":  make_composed_transform(godin, wmean),
+        "Godin \u2192 Monthly mean": make_composed_transform(godin, mmean),
     }
 
 
@@ -1681,6 +1695,12 @@ def _dsm2_transform_cli_keys() -> dict:
         "Daily mean":               "daily",
         "Daily min":                "daily-min",
         "Daily max":                "daily-max",
+        "Weekly mean":              "weekly",
+        "Weekly min":               "weekly-min",
+        "Weekly max":               "weekly-max",
+        "Monthly mean":             "monthly",
+        "Monthly min":              "monthly-min",
+        "Monthly max":              "monthly-max",
         "Rolling 24 h":             "rolling-24h",
         "Rolling 14 D":             "rolling-14d",
         "Rolling 14 D \u2192 Daily mean": "rolling-14d-daily",
@@ -1688,6 +1708,8 @@ def _dsm2_transform_cli_keys() -> dict:
         "Godin \u2192 Daily mean":  "godin-daily",
         "Godin \u2192 Daily min":   "godin-daily-min",
         "Godin \u2192 Daily max":   "godin-daily-max",
+        "Godin \u2192 Weekly mean":  "godin-weekly",
+        "Godin \u2192 Monthly mean": "godin-monthly",
     }
 
 
@@ -1701,7 +1723,7 @@ def _make_resample_card(mgr) -> "pn.Card":
     """
     import panel as pn
 
-    PERIOD_PRESETS = ["1h", "3h", "6h", "12h", "1D", "2D", "7D", "1ME"]
+    PERIOD_PRESETS = ["1h", "3h", "6h", "12h", "1D", "2D", "7D", "1W", "1ME", "3ME", "1YE"]
 
     period_select = pn.widgets.Select(
         name="Resample period", options=PERIOD_PRESETS + ["custom"],
