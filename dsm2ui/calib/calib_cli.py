@@ -504,7 +504,7 @@ def calib_cascade(config, resume, dry_run, skip_init, log_level):
 def calib_stations_csv(stations_csv, centerlines_geojson, output_csv, distance_tolerance, unmatched_csv):
     """Build calibration_ec_stations.csv from a datastore stations CSV.
 
-    STATIONS_CSV is the enriched CSV produced by 'dsm2ui datastore extract --stations'.
+    STATIONS_CSV is the enriched CSV produced by 'dsm2ui datastore extract --station-metadata-csv'.
     Stations that cannot be snapped to a DSM2 channel are written to a separate
     unmatched CSV for review.
 

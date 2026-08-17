@@ -434,13 +434,16 @@ def datastore_group():
     help="Override the unit name written to the DSS file.",
 )
 @click.option(
-    "--stations",
+    "--station-metadata-csv",
+    "stations",
     type=click.Path(dir_okay=False),
     default=None,
     help=(
-        "Write a station CSV (dsm2_id, lat, lon, ...) to this path.  "
-        "When --csv is given and --stations is omitted a companion "
-        "{csv_stem}_stations.csv is written automatically."
+        "Write a station metadata CSV (dsm2_id, lat, lon, ...) to this path "
+        "(output, not a station filter — use --station-id to restrict "
+        "extraction to specific stations).  When --csv is given and "
+        "--station-metadata-csv is omitted a companion {csv_stem}_stations.csv "
+        "is written automatically."
     ),
 )
 @click.option(
@@ -466,14 +469,24 @@ def datastore_group():
         "extracted; existing data is preserved and the result is merged."
     ),
 )
+@click.option(
+    "--station-id",
+    "station_ids",
+    multiple=True,
+    default=None,
+    help=(
+        "Restrict extraction to this station_id (case-insensitive). "
+        "Repeat --station-id for multiple stations."
+    ),
+)
 def datastore_extract(datastore_dir, dssfile, csvfile, param, repo_level,
                       unit_name, stations, start, end, clip_polygon_file,
-                      merge_existing):
+                      merge_existing, station_ids):
     """Extract a parameter from a DMS Datastore.
 
     At least one of --output or --csv must be provided.  A companion station
     metadata CSV is written alongside --csv automatically (override with
-    --stations, or suppress by passing --stations "").
+    --station-metadata-csv, or suppress by passing --station-metadata-csv "").
 
     --csv writes a wide-format CSV with timestamps as rows and stations as
     columns (station_id, or station_id@subloc when a sub-location is present).
@@ -483,10 +496,13 @@ def datastore_extract(datastore_dir, dssfile, csvfile, param, repo_level,
     Use --clip to restrict to stations inside a spatial polygon (e.g. a
     buffered DSM2 channel network created with make-clip-polygon).
 
+    Use --station-id to restrict to one or more specific stations (repeat
+    the option for multiple stations).
+
     Valid PARAM values: elev, predictions, flow, temp, do, ec, ssc, turbidity, ph, velocity, cla
     """
     if not dssfile and not csvfile and not stations:
-        raise click.UsageError("Provide at least one of --output, --csv, or --stations.")
+        raise click.UsageError("Provide at least one of --output, --csv, or --station-metadata-csv.")
     from dsm2ui import datastore2dss
     from pydsm.analysis.dsm2study import parse_military_date
     import pandas as pd
@@ -499,27 +515,30 @@ def datastore_extract(datastore_dir, dssfile, csvfile, param, repo_level,
         except Exception:
             return pd.Timestamp(s)
 
+    station_ids = list(station_ids) if station_ids else None
+
     if dssfile:
         datastore2dss.read_from_datastore_write_to_dss(
-            datastore_dir, dssfile, param, repo_level, unit_name=unit_name
+            datastore_dir, dssfile, param, repo_level, unit_name=unit_name,
+            station_ids=station_ids,
         )
     if csvfile:
         if merge_existing:
             datastore2dss.extend_obs_csv(
                 csvfile, datastore_dir, param, repo_level,
                 start=_parse_date(start), end=_parse_date(end),
-                clip_polygon_file=clip_polygon_file,
+                clip_polygon_file=clip_polygon_file, station_ids=station_ids,
             )
             click.echo(f"CSV extended: {csvfile}")
         else:
             datastore2dss.read_from_datastore_write_to_csv(
                 datastore_dir, csvfile, param, repo_level,
                 start=_parse_date(start), end=_parse_date(end),
-                clip_polygon_file=clip_polygon_file,
+                clip_polygon_file=clip_polygon_file, station_ids=station_ids,
             )
             click.echo(f"CSV written to: {csvfile}")
         # Auto-generate companion stations CSV unless the user explicitly set
-        # --stations (including to an empty string to suppress).
+        # --station-metadata-csv (including to an empty string to suppress).
         if stations is None:
             import pathlib
             p = pathlib.Path(csvfile)
@@ -527,7 +546,7 @@ def datastore_extract(datastore_dir, dssfile, csvfile, param, repo_level,
     if stations:
         datastore2dss.write_station_lat_lng(
             datastore_dir, stations, param, repo_level,
-            clip_polygon_file=clip_polygon_file,
+            clip_polygon_file=clip_polygon_file, station_ids=station_ids,
         )
         click.echo(f"Station CSV written to: {stations}")
 

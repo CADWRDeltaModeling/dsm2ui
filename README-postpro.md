@@ -424,11 +424,11 @@ it directly into the config:
 
 ```bat
 # Step 1 — extract station metadata (obs_station_id, lat/lon) from the datastore.
-# Passing only --stations reads the inventory CSV and nothing else — it does NOT
+# Passing only --station-metadata-csv reads the inventory CSV and nothing else — it does NOT
 # read any time-series data files, so it is fast even over a network share.
 dsm2ui datastore extract ec ^
     --repo \\cnrastore-bdo\Modeling_Data\repo\continuous ^
-    --stations stations_ec.csv
+    --station-metadata-csv stations_ec.csv
 
 # Step 2 — snap stations to DSM2 channels to assign dsm2_id
 #   (bundled GeoJSON works for the standard Delta grid)
@@ -648,7 +648,7 @@ dsm2ui calib postpro setup-from-datastore ^
 #   Step 1: extract station metadata only (fast — reads inventory, not data files)
 dsm2ui datastore extract ec ^
     --repo "\\cnrastore-bdo\Modeling_Data\repo\continuous" ^
-    --stations stations_ec.csv
+    --station-metadata-csv stations_ec.csv
 #   Step 2: snap stations to DSM2 channels to assign dsm2_id
 dsm2ui calib stations-csv ^
     stations_ec.csv ^

@@ -14,6 +14,7 @@ from unittest.mock import patch, MagicMock
 from dsm2ui.datastore2dss import (
     average_sublocs_csv,
     _filter_inventory_by_polygon,
+    _filter_inventory_by_station_ids,
     make_dsm2_clip_polygon,
 )
 
@@ -266,3 +267,124 @@ class TestMakeDsm2ClipPolygon:
         import geopandas as gpd
         gdf = gpd.read_file(out)
         assert len(gdf) == 1
+
+
+# ---------------------------------------------------------------------------
+# _filter_inventory_by_station_ids
+# ---------------------------------------------------------------------------
+
+class TestFilterInventoryByStationIds:
+    def test_none_returns_unchanged(self):
+        inv = _make_inventory([
+            {"station_id": "sta1", "param": "elev"},
+            {"station_id": "sta2", "param": "elev"},
+        ])
+        result = _filter_inventory_by_station_ids(inv, None)
+        assert len(result) == 2
+
+    def test_empty_list_returns_unchanged(self):
+        inv = _make_inventory([{"station_id": "sta1", "param": "elev"}])
+        result = _filter_inventory_by_station_ids(inv, [])
+        assert len(result) == 1
+
+    def test_filters_to_matching_station(self):
+        inv = _make_inventory([
+            {"station_id": "sta1", "param": "elev"},
+            {"station_id": "sta2", "param": "elev"},
+        ])
+        result = _filter_inventory_by_station_ids(inv, ["sta1"])
+        assert list(result["station_id"]) == ["sta1"]
+
+    def test_case_insensitive(self):
+        inv = _make_inventory([{"station_id": "srv", "param": "elev"}])
+        result = _filter_inventory_by_station_ids(inv, ["SRV"])
+        assert list(result["station_id"]) == ["srv"]
+
+    def test_multiple_station_ids(self):
+        inv = _make_inventory([
+            {"station_id": "sta1", "param": "elev"},
+            {"station_id": "sta2", "param": "elev"},
+            {"station_id": "sta3", "param": "elev"},
+        ])
+        result = _filter_inventory_by_station_ids(inv, ["sta1", "sta3"])
+        assert sorted(result["station_id"]) == ["sta1", "sta3"]
+
+    def test_no_match_returns_empty(self):
+        inv = _make_inventory([{"station_id": "sta1", "param": "elev"}])
+        result = _filter_inventory_by_station_ids(inv, ["nonexistent"])
+        assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# read_from_datastore_write_to_dss — resilience + station filtering
+# ---------------------------------------------------------------------------
+
+class TestReadFromDatastoreWriteToDss:
+    def _write_station_csv(self, dir_path, fname, values, freq="h", start="2020-01-01"):
+        """Write a minimal dms_datastore-format CSV under *dir_path*/*fname*."""
+        from dms_datastore.write_ts import write_ts_csv
+
+        idx = pd.date_range(start, periods=len(values), freq=freq)
+        s = pd.Series(values, index=idx, name="value")
+        write_ts_csv(s, str(dir_path / fname))
+
+    def _write_inventory(self, datastore_dir, rows):
+        inv_path = datastore_dir / "inventory_datasets_screened.csv"
+        pd.DataFrame(rows).to_csv(inv_path, index=False)
+        return inv_path
+
+    def test_short_series_skipped_others_written(self, tmp_path):
+        """A station with too little data to infer frequency (the original
+        crash) is skipped, and the remaining stations are still written."""
+        pyhecdss = pytest.importorskip("pyhecdss")
+        screened = tmp_path / "screened"
+        screened.mkdir()
+        # good: 5 hourly points → freq inferrable
+        self._write_station_csv(screened, "good_STA1_elev_2020.csv", [1.0, 2.0, 3.0, 4.0, 5.0])
+        # bad: only 2 points → pd.infer_freq raises ValueError
+        self._write_station_csv(screened, "bad_STA2_elev_2020.csv", [1.0, 2.0])
+        self._write_inventory(tmp_path, [
+            {"station_id": "STA1", "subloc": float("nan"), "param": "elev",
+             "unit": "feet", "file_pattern": "good_STA1_elev_2020.csv"},
+            {"station_id": "STA2", "subloc": float("nan"), "param": "elev",
+             "unit": "feet", "file_pattern": "bad_STA2_elev_2020.csv"},
+        ])
+
+        from dsm2ui.datastore2dss import read_from_datastore_write_to_dss
+
+        dssfile = str(tmp_path / "out.dss")
+        # Must not raise despite STA2's short series.
+        read_from_datastore_write_to_dss(str(tmp_path), dssfile, "elev")
+
+        with pyhecdss.DSSFile(dssfile) as f:
+            paths = f.get_pathnames()
+        joined = "\n".join(paths)
+        assert "STA1" in joined
+        assert "STA2" not in joined
+
+    def test_station_id_filter(self, tmp_path):
+        """--station-id restricts extraction to the requested station only."""
+        pyhecdss = pytest.importorskip("pyhecdss")
+        screened = tmp_path / "screened"
+        screened.mkdir()
+        self._write_station_csv(screened, "a_STA1_elev_2020.csv", [1.0, 2.0, 3.0, 4.0, 5.0])
+        self._write_station_csv(screened, "a_STA2_elev_2020.csv", [1.0, 2.0, 3.0, 4.0, 5.0])
+        self._write_inventory(tmp_path, [
+            {"station_id": "STA1", "subloc": float("nan"), "param": "elev",
+             "unit": "feet", "file_pattern": "a_STA1_elev_2020.csv"},
+            {"station_id": "STA2", "subloc": float("nan"), "param": "elev",
+             "unit": "feet", "file_pattern": "a_STA2_elev_2020.csv"},
+        ])
+
+        from dsm2ui.datastore2dss import read_from_datastore_write_to_dss
+
+        dssfile = str(tmp_path / "out.dss")
+        read_from_datastore_write_to_dss(
+            str(tmp_path), dssfile, "elev", station_ids=["sta1"]
+        )
+
+        with pyhecdss.DSSFile(dssfile) as f:
+            paths = f.get_pathnames()
+        joined = "\n".join(paths)
+        assert "STA1" in joined
+        assert "STA2" not in joined

@@ -49,6 +49,17 @@ def _filter_inventory_by_polygon(inventory, polygon_file):
     return within.reset_index(drop=True)
 
 
+def _filter_inventory_by_station_ids(inventory, station_ids):
+    """Return rows of *inventory* whose station_id matches *station_ids* (case-insensitive)."""
+    if not station_ids:
+        return inventory
+    wanted = {s.upper() for s in station_ids}
+    filtered = inventory[inventory["station_id"].str.upper().isin(wanted)]
+    n_removed = len(inventory) - len(filtered)
+    print(f"  Station filter: {len(filtered)} of {len(inventory)} stations kept ({n_removed} excluded).")
+    return filtered
+
+
 # this should be a util function
 def find_lastest_fname(pattern, dir="."):
     d = Path(dir)
@@ -62,7 +73,8 @@ def find_lastest_fname(pattern, dir="."):
 
 
 def read_from_datastore_write_to_dss(
-    datastore_dir, dssfile, param, repo_level="screened", unit_name=None
+    datastore_dir, dssfile, param, repo_level="screened", unit_name=None,
+    station_ids=None,
 ):
     """
     Reads datastore timeseries files and writes to a DSS file
@@ -77,6 +89,8 @@ def read_from_datastore_write_to_dss(
         Filename to write to
     param : str
         e.g one of "flow","elev", "ec", etc.
+    station_ids : list of str or None
+        If given, restrict extraction to these station_id values (case-insensitive).
     """
     inventory_file, mtime = find_lastest_fname(
         f"inventory_datasets_{repo_level}*.csv", datastore_dir
@@ -84,15 +98,26 @@ def read_from_datastore_write_to_dss(
     print("Using inventory file:", inventory_file)
     inventory = pd.read_csv(inventory_file)
     param_inventory = inventory[inventory["param"] == param]
+    param_inventory = _filter_inventory_by_station_ids(param_inventory, station_ids)
     apart = "DMS-DATASTORE"
     fpart = os.path.basename(inventory_file).split("_")[-1].split(".csv")[0]
+    n_skipped = 0
     with dss.DSSFile(dssfile, create_new=True) as f:
         for idx, row in tqdm.tqdm(
             param_inventory.iterrows(), total=len(param_inventory)
         ):
             filepattern = os.path.join(datastore_dir, repo_level, row["file_pattern"])
-            ts = read_ts(filepattern)
             print("Reading ", filepattern)
+            try:
+                ts = read_ts(filepattern)
+            except Exception as e:
+                print(f"  Skipping {filepattern}: {e}")
+                n_skipped += 1
+                continue
+            if ts is None or len(ts) == 0:
+                print(f"  Skipping {filepattern}: no data")
+                n_skipped += 1
+                continue
             if pd.isna(row["subloc"]):
                 bpart = row["station_id"]
             else:
@@ -100,17 +125,24 @@ def read_from_datastore_write_to_dss(
             epart = ts.index.freqstr
             pathname = f'/{apart}/{bpart}/{row["param"]}///{fpart}/'
             print("Writing to ", pathname)
-            f.write_rts(
-                pathname,
-                ts,
-                unit_name if unit_name is not None else row["unit"],
-                "INST-VAL",
-            )
+            try:
+                f.write_rts(
+                    pathname,
+                    ts,
+                    unit_name if unit_name is not None else row["unit"],
+                    "INST-VAL",
+                )
+            except Exception as e:
+                print(f"  Skipping {pathname}: write failed: {e}")
+                n_skipped += 1
+                continue
+    if n_skipped:
+        print(f"Skipped {n_skipped} of {len(param_inventory)} stations due to errors.")
     print("Done")
 
 
 def write_station_lat_lng(datastore_dir, station_file, param, repo_level="screened",
-                          clip_polygon_file=None):
+                          clip_polygon_file=None, station_ids=None):
     """
     Writes station metadata to a csv file.
 
@@ -142,6 +174,7 @@ def write_station_lat_lng(datastore_dir, station_file, param, repo_level="screen
     print("Using inventory file:", inventory_file)
     inventory = pd.read_csv(inventory_file)
     inventory = inventory[inventory["param"] == param].copy()
+    inventory = _filter_inventory_by_station_ids(inventory, station_ids)
 
     if clip_polygon_file is not None:
         inventory = _filter_inventory_by_polygon(inventory, clip_polygon_file)
@@ -185,7 +218,7 @@ def write_station_lat_lng(datastore_dir, station_file, param, repo_level="screen
 
 def read_from_datastore_write_to_csv(
     datastore_dir, csvfile, param, repo_level="screened", start=None, end=None,
-    clip_polygon_file=None,
+    clip_polygon_file=None, station_ids=None,
 ):
     """
     Reads datastore timeseries files and writes to a wide-format CSV file.
@@ -225,6 +258,7 @@ def read_from_datastore_write_to_csv(
     print("Using inventory file:", inventory_file)
     inventory = pd.read_csv(inventory_file)
     param_inventory = inventory[inventory["param"] == param]
+    param_inventory = _filter_inventory_by_station_ids(param_inventory, station_ids)
 
     if clip_polygon_file is not None:
         param_inventory = _filter_inventory_by_polygon(param_inventory, clip_polygon_file)
@@ -359,6 +393,7 @@ def extend_obs_csv(
     start=None,
     end=None,
     clip_polygon_file=None,
+    station_ids=None,
 ):
     """Extend an existing wide-format observation CSV with new data from the
     datastore, covering a wider time window.
@@ -393,7 +428,7 @@ def extend_obs_csv(
         read_from_datastore_write_to_csv(
             datastore_dir, csvfile, param, repo_level,
             start=start, end=end,
-            clip_polygon_file=clip_polygon_file,
+            clip_polygon_file=clip_polygon_file, station_ids=station_ids,
         )
         return
 
@@ -417,7 +452,7 @@ def extend_obs_csv(
             read_from_datastore_write_to_csv(
                 datastore_dir, str(tf), param, repo_level,
                 start=pd.Timestamp(start), end=early_end,
-                clip_polygon_file=clip_polygon_file,
+                clip_polygon_file=clip_polygon_file, station_ids=station_ids,
             )
             if tf.exists() and tf.stat().st_size > 0:
                 parts.insert(0, pd.read_csv(tf, index_col=0, parse_dates=True))
@@ -431,7 +466,7 @@ def extend_obs_csv(
             read_from_datastore_write_to_csv(
                 datastore_dir, str(tf), param, repo_level,
                 start=late_start, end=pd.Timestamp(end),
-                clip_polygon_file=clip_polygon_file,
+                clip_polygon_file=clip_polygon_file, station_ids=station_ids,
             )
             if tf.exists() and tf.stat().st_size > 0:
                 parts.append(pd.read_csv(tf, index_col=0, parse_dates=True))

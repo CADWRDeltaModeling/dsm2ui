@@ -346,7 +346,7 @@ Build `calibration_ec_stations.csv` from a datastore stations CSV by snapping ea
 
 | Argument / Option | Type | Default | Description |
 |---|---|---|---|
-| `STATIONS_CSV` | path | — | Enriched stations CSV from `datastore extract --stations` |
+| `STATIONS_CSV` | path | — | Enriched stations CSV from `datastore extract --station-metadata-csv` |
 | `CENTERLINES_GEOJSON` | path | — | DSM2 channel centerlines GeoJSON (UTM Zone 10N) |
 | `OUTPUT_CSV` | path | — | Output `calibration_ec_stations.csv` |
 | `--distance-tolerance INT` | int | `1000` | Max distance (ft) for a station to be considered matched |
@@ -525,7 +525,7 @@ The calibration station CSV (`ec_stations_csv` in the config) maps DSM2 output n
 # Step 1 — extract station metadata from the datastore
 dsm2ui datastore extract ec \
     --repo y:/repo/continuous \
-    --stations stations_ec.csv
+    --station-metadata-csv stations_ec.csv
 
 # Step 2 — snap stations to DSM2 channels and assemble the calibration CSV
 dsm2ui calib stations-csv \
@@ -635,21 +635,25 @@ Export time series from a [DMS Datastore](https://github.com/CADWRDeltaModeling/
 | `PARAM` | choice | *(required)* | Parameter: `elev`, `predictions`, `flow`, `temp`, `do`, `ec`, `ssc`, `turbidity`, `ph`, `velocity`, `cla` |
 | `--repo DIR` | path | *(required)* | DMS Datastore directory (must contain `inventory_datasets_*.csv`) |
 | `--output FILE` | path | — | DSS file to write extracted time series to |
-| `--stations FILE` | path | — | Write station metadata CSV (`station_id`, `station_name`, `agency`, `lat`, `lon`, `utm_easting`, `utm_northing`) |
+| `--station-metadata-csv FILE` | path | — | Write station metadata CSV (`station_id`, `station_name`, `agency`, `lat`, `lon`, `utm_easting`, `utm_northing`) — this is an **output** path, not a station filter |
+| `--station-id ID` | string | — | Restrict extraction to this station_id (case-insensitive); repeat for multiple stations |
 | `--repo-level` | choice | `screened` | Datastore repository level |
 | `--unit-name NAME` | string | — | Override the unit name written to the DSS file |
 
-At least one of `--output` or `--stations` must be provided. The `--stations` output is the required input to `calib stations-csv` and `station-map to-dsm2`.
+At least one of `--output` or `--csv` or `--station-metadata-csv` must be provided. The `--station-metadata-csv` output is the required input to `calib stations-csv` and `station-map to-dsm2`.
 
 ```bash
 # Station metadata CSV only
-dsm2ui datastore extract ec --repo /data/datastore --stations stations_ec.csv
+dsm2ui datastore extract ec --repo /data/datastore --station-metadata-csv stations_ec.csv
 
 # DSS time series only
 dsm2ui datastore extract ec --repo /data/datastore --output ec.dss
 
 # Both
-dsm2ui datastore extract ec --repo /data/datastore --output ec.dss --stations stations_ec.csv
+dsm2ui datastore extract ec --repo /data/datastore --output ec.dss --station-metadata-csv stations_ec.csv
+
+# Restrict to specific stations
+dsm2ui datastore extract elev --repo /data/datastore --output elev.dss --station-id srv
 ```
 
 ---

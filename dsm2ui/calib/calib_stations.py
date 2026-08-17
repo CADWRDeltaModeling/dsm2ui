@@ -1,6 +1,6 @@
 """calib_stations.py — Build calibration_ec_stations.csv from datastore station CSV.
 
-Takes the enriched stations CSV produced by ``dsm2ui datastore extract --stations``
+Takes the enriched stations CSV produced by ``dsm2ui datastore extract --station-metadata-csv``
 and a DSM2 channel centerlines GeoJSON, snaps each station to the nearest channel,
 and writes a ``calibration_ec_stations.csv`` ready for use in calibration runs.
 
@@ -51,7 +51,7 @@ def build_calib_stations_csv(
     ----------
     stations_csv:
         Path to the enriched stations CSV produced by
-        ``dsm2ui datastore extract --stations``.
+        ``dsm2ui datastore extract --station-metadata-csv``.
         Required columns: ``station_id``, ``lat``, ``lon``.
         Optional columns (written through if present): ``station_name``,
         ``agency``, ``utm_easting``, ``utm_northing``.
