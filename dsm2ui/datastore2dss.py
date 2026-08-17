@@ -92,6 +92,8 @@ def read_from_datastore_write_to_dss(
     station_ids : list of str or None
         If given, restrict extraction to these station_id values (case-insensitive).
     """
+    from dms_datastore import read_ts_repo
+
     inventory_file, mtime = find_lastest_fname(
         f"inventory_datasets_{repo_level}*.csv", datastore_dir
     )
@@ -101,27 +103,34 @@ def read_from_datastore_write_to_dss(
     param_inventory = _filter_inventory_by_station_ids(param_inventory, station_ids)
     apart = "DMS-DATASTORE"
     fpart = os.path.basename(inventory_file).split("_")[-1].split(".csv")[0]
+    # repo_root, not row["file_pattern"], is passed to read_ts_repo so file
+    # resolution is always done against the live directory listing (with
+    # agency/year wildcards) rather than a possibly stale inventory snapshot.
+    repo_root = os.path.join(datastore_dir, repo_level)
     n_skipped = 0
     with dss.DSSFile(dssfile, create_new=True) as f:
         for idx, row in tqdm.tqdm(
             param_inventory.iterrows(), total=len(param_inventory)
         ):
-            filepattern = os.path.join(datastore_dir, repo_level, row["file_pattern"])
-            print("Reading ", filepattern)
+            subloc = None if pd.isna(row["subloc"]) else row["subloc"]
+            station_label = row["station_id"] if subloc is None else f'{row["station_id"]}@{subloc}'
+            print(f"Reading {station_label}/{param} from {repo_root}")
             try:
-                ts = read_ts(filepattern)
+                ts = read_ts_repo(
+                    row["station_id"], param, subloc=subloc,
+                    repo=repo_level, data_path=repo_root,
+                )
             except Exception as e:
-                print(f"  Skipping {filepattern}: {e}")
+                print(f"  Skipping {station_label}: {e}")
                 n_skipped += 1
                 continue
             if ts is None or len(ts) == 0:
-                print(f"  Skipping {filepattern}: no data")
+                print(f"  Skipping {station_label}: no data")
                 n_skipped += 1
                 continue
-            if pd.isna(row["subloc"]):
-                bpart = row["station_id"]
-            else:
-                bpart = row["station_id"] + row["subloc"]
+            if isinstance(ts, pd.DataFrame):
+                ts = ts.iloc[:, 0]
+            bpart = row["station_id"] if subloc is None else row["station_id"] + subloc
             epart = ts.index.freqstr
             pathname = f'/{apart}/{bpart}/{row["param"]}///{fpart}/'
             print("Writing to ", pathname)

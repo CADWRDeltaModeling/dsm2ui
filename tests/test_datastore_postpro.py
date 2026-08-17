@@ -320,13 +320,20 @@ class TestFilterInventoryByStationIds:
 # ---------------------------------------------------------------------------
 
 class TestReadFromDatastoreWriteToDss:
-    def _write_station_csv(self, dir_path, fname, values, freq="h", start="2020-01-01"):
-        """Write a minimal dms_datastore-format CSV under *dir_path*/*fname*."""
+    def _write_station_csv(self, dir_path, station_id, param, values, agency="src",
+                           agency_id="00001", year="2020", freq="h", start="2020-01-01"):
+        """Write a dms_datastore-format CSV under *dir_path* using the real
+        {agency}_{station_id}_{agency_id}_{param}_{year}.csv naming convention
+        (matches the 'screened' repo's filename_templates), so tests exercise
+        the same read_ts_repo glob resolution used in production."""
         from dms_datastore.write_ts import write_ts_csv
 
         idx = pd.date_range(start, periods=len(values), freq=freq)
-        s = pd.Series(values, index=idx, name="value")
-        write_ts_csv(s, str(dir_path / fname))
+        df = pd.DataFrame({"value": values, "user_flag": [0] * len(values)}, index=idx)
+        df.index.name = "datetime"
+        fname = f"{agency}_{station_id}_{agency_id}_{param}_{year}.csv"
+        write_ts_csv(df, str(dir_path / fname))
+        return fname
 
     def _write_inventory(self, datastore_dir, rows):
         inv_path = datastore_dir / "inventory_datasets_screened.csv"
@@ -340,14 +347,14 @@ class TestReadFromDatastoreWriteToDss:
         screened = tmp_path / "screened"
         screened.mkdir()
         # good: 5 hourly points → freq inferrable
-        self._write_station_csv(screened, "good_STA1_elev_2020.csv", [1.0, 2.0, 3.0, 4.0, 5.0])
+        self._write_station_csv(screened, "STA1", "elev", [1.0, 2.0, 3.0, 4.0, 5.0])
         # bad: only 2 points → pd.infer_freq raises ValueError
-        self._write_station_csv(screened, "bad_STA2_elev_2020.csv", [1.0, 2.0])
+        self._write_station_csv(screened, "STA2", "elev", [1.0, 2.0])
         self._write_inventory(tmp_path, [
             {"station_id": "STA1", "subloc": float("nan"), "param": "elev",
-             "unit": "feet", "file_pattern": "good_STA1_elev_2020.csv"},
+             "unit": "feet", "file_pattern": "stale_pattern_no_longer_on_disk.csv"},
             {"station_id": "STA2", "subloc": float("nan"), "param": "elev",
-             "unit": "feet", "file_pattern": "bad_STA2_elev_2020.csv"},
+             "unit": "feet", "file_pattern": "stale_pattern_no_longer_on_disk.csv"},
         ])
 
         from dsm2ui.datastore2dss import read_from_datastore_write_to_dss
@@ -367,13 +374,13 @@ class TestReadFromDatastoreWriteToDss:
         pyhecdss = pytest.importorskip("pyhecdss")
         screened = tmp_path / "screened"
         screened.mkdir()
-        self._write_station_csv(screened, "a_STA1_elev_2020.csv", [1.0, 2.0, 3.0, 4.0, 5.0])
-        self._write_station_csv(screened, "a_STA2_elev_2020.csv", [1.0, 2.0, 3.0, 4.0, 5.0])
+        self._write_station_csv(screened, "STA1", "elev", [1.0, 2.0, 3.0, 4.0, 5.0])
+        self._write_station_csv(screened, "STA2", "elev", [1.0, 2.0, 3.0, 4.0, 5.0])
         self._write_inventory(tmp_path, [
             {"station_id": "STA1", "subloc": float("nan"), "param": "elev",
-             "unit": "feet", "file_pattern": "a_STA1_elev_2020.csv"},
+             "unit": "feet", "file_pattern": "stale_pattern_no_longer_on_disk.csv"},
             {"station_id": "STA2", "subloc": float("nan"), "param": "elev",
-             "unit": "feet", "file_pattern": "a_STA2_elev_2020.csv"},
+             "unit": "feet", "file_pattern": "stale_pattern_no_longer_on_disk.csv"},
         ])
 
         from dsm2ui.datastore2dss import read_from_datastore_write_to_dss
@@ -388,3 +395,33 @@ class TestReadFromDatastoreWriteToDss:
         joined = "\n".join(paths)
         assert "STA1" in joined
         assert "STA2" not in joined
+
+    def test_stale_agency_id_in_inventory_does_not_block_extraction(self, tmp_path):
+        """Regression test: an inventory row whose recorded file_pattern bakes
+        in an agency_id that no longer matches the file on disk (e.g. the
+        station was reprovisioned under a different agency_id after the
+        inventory snapshot was built) must still be extracted, because
+        read_ts_repo re-resolves the glob with a wildcard agency_id instead of
+        trusting the stale literal recorded in the inventory CSV."""
+        pyhecdss = pytest.importorskip("pyhecdss")
+        screened = tmp_path / "screened"
+        screened.mkdir()
+        # actual file uses agency_id "99999" (different from the stale
+        # inventory row's recorded agency_id below)
+        self._write_station_csv(screened, "BAC", "ec", [1.0, 2.0, 3.0, 4.0, 5.0],
+                                agency_id="99999")
+        self._write_inventory(tmp_path, [
+            # stale snapshot recorded a since-changed agency_id
+            {"station_id": "BAC", "subloc": float("nan"), "param": "ec",
+             "unit": "microS/cm",
+             "file_pattern": "src_BAC_stale_agency_id_ec_2020.csv"},
+        ])
+
+        from dsm2ui.datastore2dss import read_from_datastore_write_to_dss
+
+        dssfile = str(tmp_path / "out.dss")
+        read_from_datastore_write_to_dss(str(tmp_path), dssfile, "ec")
+
+        with pyhecdss.DSSFile(dssfile) as f:
+            paths = f.get_pathnames()
+        assert any("BAC" in p for p in paths)
