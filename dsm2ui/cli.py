@@ -1012,6 +1012,92 @@ def station_map_to_dsm2(stations_csv, output_csv, centerlines_geojson, distance_
         )
 
 
+@station_map_group.command(name="to-inp")
+@click.argument(
+    "stations_csv",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+)
+@click.argument(
+    "output_inp",
+    type=click.Path(dir_okay=False),
+)
+@click.option(
+    "--centerlines", "centerlines_geojson",
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    default=None,
+    help="Channel centerlines GeoJSON. Defaults to the bundled DSM2 v8.2 GeoJSON.",
+)
+@click.option(
+    "--variable", "variables",
+    multiple=True,
+    default=("flow", "stage"),
+    show_default=True,
+    help="DSM2 output variable to write (repeatable), e.g. --variable flow --variable ec.",
+)
+@click.option(
+    "--interval",
+    default="15MIN",
+    show_default=True,
+    help="DSM2 output interval, e.g. 15MIN, 1HOUR.",
+)
+@click.option(
+    "--period-op",
+    default="inst",
+    show_default=True,
+    help="DSM2 period operation: inst or ave.",
+)
+@click.option(
+    "--dss-file",
+    default="${OUTPUTDSS}",
+    show_default=True,
+    help="Output DSS path or ENVVAR written to the FILE column.",
+)
+@click.option(
+    "--distance-tolerance",
+    type=click.INT,
+    default=100,
+    show_default=True,
+    help="Maximum distance (ft) from a channel centerline for a station to be considered matched.",
+)
+@click.option(
+    "--append/--overwrite",
+    default=False,
+    help="Append the OUTPUT_CHANNEL section to output_inp instead of overwriting it.",
+)
+def station_map_to_inp(
+    stations_csv,
+    output_inp,
+    centerlines_geojson,
+    variables,
+    interval,
+    period_op,
+    dss_file,
+    distance_tolerance,
+    append,
+):
+    """Snap lat/lon stations to DSM2 channels and write a ready-to-use OUTPUT_CHANNEL .inp section.
+
+    Unlike 'to-dsm2' (which writes a bare NAME/CHAN_NO/DISTANCE CSV), this writes a
+    complete OUTPUT_CHANNEL table -- with VARIABLE, INTERVAL, PERIOD_OP and FILE columns --
+    wrapped in the table/END syntax DSM2 expects, ready to be included in a study's .inp files.
+    """
+    if not centerlines_geojson:
+        centerlines_geojson = _default_channel_shapefile()
+    from pydsm.viz import dsm2gis
+    dsm2gis.create_output_channel_inp(
+        stations_file=stations_csv,
+        centerlines_file=centerlines_geojson,
+        output_inp_file=output_inp,
+        variables=list(variables),
+        interval=interval,
+        period_op=period_op,
+        dss_file=dss_file,
+        distance_tolerance=distance_tolerance,
+        append=append,
+    )
+    click.echo(f"Wrote OUTPUT_CHANNEL section to: {output_inp}")
+
+
 @station_map_group.command(name="from-dsm2")
 @click.argument(
     "echo_file",

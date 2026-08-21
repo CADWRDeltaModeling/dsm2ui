@@ -580,7 +580,7 @@ dsm2ui mann-disp chan_to_group.csv group_mann_disp.csv \
 
 Convert between real-world lat/lon station locations and DSM2 channel-output positions (`CHAN_NO` + `DISTANCE`), and vice versa.
 
-Both subcommands default to the bundled DSM2 v8.2 centerlines when `--centerlines` is omitted:
+All subcommands default to the bundled DSM2 v8.2 centerlines when `--centerlines` is omitted:
 `dsm2ui/dsm2gis/dsm2_channels_centerlines_8_2.geojson`
 
 #### `station-map to-dsm2`
@@ -602,6 +602,35 @@ dsm2ui station-map to-dsm2 stations.csv output_locs.csv
 # Custom centerlines; wider tolerance
 dsm2ui station-map to-dsm2 stations.csv output_locs.csv \
     --centerlines my_channels.geojson --distance-tolerance 2000 --unmatched unmatched.csv
+```
+
+#### `station-map to-inp`
+
+Snap lat/lon stations to DSM2 channels and write a ready-to-use `OUTPUT_CHANNEL` table section
+(wrapped in the `OUTPUT_CHANNEL ... END` syntax DSM2 expects) directly to a `.inp` file. Unlike
+`to-dsm2`, no manual reformatting is needed — the output already has `VARIABLE`, `INTERVAL`,
+`PERIOD_OP` and `FILE` columns filled in.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `STATIONS_CSV` | path | — | Station CSV with `station_id`, `lat`, `lon` columns |
+| `OUTPUT_INP` | path | — | `.inp` file to write the `OUTPUT_CHANNEL` section to |
+| `--centerlines FILE` | path | bundled centerlines GeoJSON | DSM2 channel centerlines GeoJSON (UTM Zone 10N) |
+| `--variable TEXT` | string | `flow`, `stage` | DSM2 output variable to write; repeat for multiple, e.g. `--variable flow --variable ec` |
+| `--interval TEXT` | string | `15MIN` | DSM2 output interval, e.g. `15MIN`, `1HOUR` |
+| `--period-op TEXT` | string | `inst` | DSM2 period operation: `inst` or `ave` |
+| `--dss-file TEXT` | string | `${OUTPUTDSS}` | Output DSS path or ENVVAR written to the `FILE` column |
+| `--distance-tolerance INT` | int | `100` | Max distance (ft) from centerline to consider a match |
+| `--append` / `--overwrite` | flag | `--overwrite` | Append to `OUTPUT_INP` instead of overwriting it |
+
+```bash
+# Quickest form — flow + stage at 15MIN, uses bundled centerlines automatically
+dsm2ui station-map to-inp stations.csv output_channel.inp
+
+# EC only, hourly, custom centerlines and DSS output path
+dsm2ui station-map to-inp stations.csv output_channel.inp \
+    --variable ec --interval 1HOUR --dss-file '${QUALOUTDSSFILE}' \
+    --centerlines my_channels.geojson
 ```
 
 #### `station-map from-dsm2`
