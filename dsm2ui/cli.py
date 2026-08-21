@@ -94,29 +94,22 @@ class _SmartUIGroup(_LazyGroup):
         return _dispatch
 
 
-@click.group(cls=_LazyGroup, context_settings=CONTEXT_SETTINGS)
+@click.group(
+    cls=_LazyGroup,
+    context_settings=CONTEXT_SETTINGS,
+    lazy_subcommands={
+        # calib/animate pull in heavy viz stacks (dvue/hvplot/geoviews/vtools);
+        # lazy-load them so unrelated commands (station-map, mann-disp, ...) start fast.
+        "calib":   ("dsm2ui.calib.calib_cli", "calib",   "DSM2 calibration: run variations, optimize parameters, or create a config template."),
+        "animate": ("dsm2ui.animate_cli",     "animate", "Animate DSM2 HDF5 tidefile data on a map."),
+    },
+)
 @click.version_option(
     __version__, "-v", "--version", message="%(prog)s, version %(version)s"
 )
 def main():
     """dsm2ui - DSM2 User Interface and Analysis Tools."""
     pass
-
-
-# ---------------------------------------------------------------------------
-# calib group (run / optimize / init)
-# ---------------------------------------------------------------------------
-
-from dsm2ui.calib.calib_cli import calib  # noqa: E402
-main.add_command(calib)
-
-
-# ---------------------------------------------------------------------------
-# animate group — DSM2 HDF5 geo-animation
-# ---------------------------------------------------------------------------
-
-from dsm2ui.animate_cli import animate  # noqa: E402
-main.add_command(animate)
 
 
 # ---------------------------------------------------------------------------
