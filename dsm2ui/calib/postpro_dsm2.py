@@ -241,6 +241,12 @@ def build_plot(
         else True
     )
 
+    include_metrics_table_on_plot_layout = (
+        options_dict["include_metrics_table_on_plot_layout"]
+        if "include_metrics_table_on_plot_layout" in options_dict
+        else True
+    )
+
     # Flow and stage are tidal (also certain water quality constituents)
     tidal_data = vartype.name != "EC"
     if location == "RSAC128-RSAC123":
@@ -279,6 +285,7 @@ def build_plot(
         tech_memo_validation_metrics=tech_memo_validation_metrics,
         manuscript_layout=manuscript_layout,
         metrics_table_list=metrics_table_list,
+        include_metrics_table_on_plot_layout=include_metrics_table_on_plot_layout,
     )
 
     # calib_plot_template, metrics_df = \

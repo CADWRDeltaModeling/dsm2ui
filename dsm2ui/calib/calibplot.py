@@ -568,6 +568,7 @@ def build_calib_plot_template(
     mask_data=True,
     tech_memo_validation_metrics=False,
     metrics_table_list=None,
+    include_metrics_table_on_plot_layout=True,
 ):
     """Builds calibration plot template
 
@@ -595,6 +596,7 @@ def build_calib_plot_template(
         zoom_inst_plot (bool): If true, instantaneous plots will display on data in the inst_plot_timewindow
         time_window_exclusion_list (list of time window strings in format yyyy-mm-dd hh:mm:ss_yyyy-mm-dd hh:mm:ss)
         metrics_table_list (list): if specified, will override all other metrics specifications
+        include_metrics_table_on_plot_layout (bool): If true, include metrics table in plot layout
     Returns:
         dict of holoviews Column objects. Keys=['with', 'without'], meaning with toolbars and without toolbars.
             values are holoviews Column objects, which are templates ready for rendering by display or save.
@@ -713,6 +715,7 @@ def build_calib_plot_template(
         include_kde_plots,
         header_panel,
         manuscript_layout=manuscript_layout,
+        include_metrics_table_on_plot_layout=include_metrics_table_on_plot_layout
     )
     add_toolbars = False
     column_without_toolbar = create_layout(
@@ -731,6 +734,7 @@ def build_calib_plot_template(
         include_kde_plots,
         header_panel,
         manuscript_layout=manuscript_layout,
+        include_metrics_table_on_plot_layout=include_metrics_table_on_plot_layout
     )
     column_dict = {"with": column_with_toolbar, "without": column_without_toolbar}
 
@@ -753,6 +757,7 @@ def create_layout(
     include_kde_plots,
     header_panel,
     manuscript_layout=False,
+    include_metrics_table_on_plot_layout=True,
 ):
     """
     Creates Holoviews Column object with plots and metrics.
@@ -854,7 +859,7 @@ def create_layout(
                         sizing_mode="fixed",
                     )
                 col_row_index += 1
-                if metrics_table is not None:
+                if metrics_table is not None and include_metrics_table_on_plot_layout:
                     # metrics_table_row = pn.Row(metrics_table.opts(title='(d)'))
                     scatter_and_metrics_row.append(
                         metrics_table.opts(
@@ -890,7 +895,7 @@ def create_layout(
                     )
                 )
                 col_row_index += 1
-                if metrics_table is not None:
+                if metrics_table is not None and include_metrics_table_on_plot_layout:
                     scatter_and_metrics_row.append(
                         metrics_table.opts(
                             title=index_to_title_dict[col_row_index],
@@ -1134,6 +1139,7 @@ def build_godin_plot(
         ylabel=godin_y_axis_label, show_grid=True, gridstyle=gridstyle
     )
     gtsp = gtsp.opts(opts.Curve(color=hv.Cycle(cpalette)))
+
     return gtsp
 
 
