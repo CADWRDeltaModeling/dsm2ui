@@ -26,7 +26,7 @@ def create_metrics_map(
         "utm_easting",
         "utm_northing",
         geo=True,
-        tiles="CartoLight",
+        tiles="EsriWorldTopo",
         crs="EPSG:26910",
         project=True,
         responsive=True,

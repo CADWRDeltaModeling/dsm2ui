@@ -320,10 +320,10 @@ import cartopy.crs as ccrs  # noqa: E402  (must be after registry setup)
 # Bundled GeoJSON files shipped with dsm2ui
 _PKG_DIR = os.path.dirname(__file__)
 _DEFAULT_CHANNEL_GEO = os.path.join(
-    _PKG_DIR, "dsm2gis", "dsm2_channels_centerlines_8_2.geojson"
+    _PKG_DIR, "dsm2gis", "dsm2_channels_centerlines_9_3.geojson"
 )
 _DEFAULT_NODE_GEO = os.path.join(
-    _PKG_DIR, "dsm2gis", "dsm2_nodes_8_2.geojson"
+    _PKG_DIR, "dsm2gis", "dsm2_nodes_9_3.geojson"
 )
 
 # Cached midpoint GeoDataFrame (computed once, reused across sessions)

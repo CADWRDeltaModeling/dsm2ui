@@ -43,6 +43,15 @@ import numpy as np
 import pandas as pd
 
 from dvue.animator import SlicingReader
+import dvue.animator.ui as _dvue_ui
+import dvue.animator.multi_ui as _dvue_multi_ui
+
+# dvue defaults to CARTO tiles, which now require an API key.
+for _m in (_dvue_ui, _dvue_multi_ui):
+    _m._CARTO_LIGHT_URL = (
+        "https://server.arcgisonline.com/arcgis/rest/services/World_Topo_Map/MapServer/tile/{Z}/{Y}/{X}"
+    )
+    _m._CARTO_LIGHT_ATTR = "Tiles © Esri"
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -1352,7 +1361,7 @@ def load_dsm2_channel_gdf(
     ----------
     shapefile : str or Path, optional
         Path to an alternative GeoJSON or shapefile.  When ``None`` (default)
-        the bundled ``dsm2_channels_centerlines_8_2.geojson`` is used.
+        the bundled ``dsm2_channels_centerlines_9_3.geojson`` is used.
     simplify_tolerance : float, optional
         Simplification tolerance in metres (applied in EPSG:3857).  Set to
         ``0`` to disable.  Default ``50`` m.
@@ -1388,7 +1397,7 @@ def load_dsm2_channel_gdf(
                 list(gdf.columns),
             )
         else:
-            pkg_path = Path(__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson"
+            pkg_path = Path(__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_9_3.geojson"
             gdf = gpd.read_file(str(pkg_path))
     finally:
         if _old_shx is None:

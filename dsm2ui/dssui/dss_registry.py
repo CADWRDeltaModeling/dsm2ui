@@ -387,7 +387,7 @@ class DSSRegistryUIManager(RegistryUIManager):
         if getattr(self, "_geo_loaded", False):
             return
         _pkg = os.path.dirname(os.path.dirname(__file__))
-        _channel_geo = os.path.join(_pkg, "dsm2gis", "dsm2_channels_centerlines_8_2.geojson")
+        _channel_geo = os.path.join(_pkg, "dsm2gis", "dsm2_channels_centerlines_9_3.geojson")
         if not os.path.isfile(_channel_geo):
             return
         try:

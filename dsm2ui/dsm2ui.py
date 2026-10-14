@@ -110,9 +110,9 @@ logger = logging.getLogger(__name__)
 # Bundled GeoJSON files shipped with dsm2ui
 _PKG_DIR = os.path.dirname(__file__)
 _DEFAULT_CHANNEL_GEO = os.path.join(
-    _PKG_DIR, "dsm2gis", "dsm2_channels_centerlines_8_2.geojson"
+    _PKG_DIR, "dsm2gis", "dsm2_channels_centerlines_9_3.geojson"
 )
-_DEFAULT_NODE_GEO = os.path.join(_PKG_DIR, "dsm2gis", "dsm2_nodes_8_2.geojson")
+_DEFAULT_NODE_GEO = os.path.join(_PKG_DIR, "dsm2gis", "dsm2_nodes_9_3.geojson")
 
 
 class DSM2DSSReader(_UnifiedDSM2DSSReader):
@@ -1754,7 +1754,7 @@ class DSM2FlowlineMap:
         self.dsm2_chans_joined = self._join_channels_info_with_shapefile(
             self.dsm2_chans, self.tables
         )
-        self.map = hv.element.tiles.CartoLight().opts(frame_width=800, frame_height=600, alpha=0.5)
+        self.map = gv.tile_sources.EsriWorldTopo().opts(frame_width=800, frame_height=600, alpha=0.5)
 
     def _join_channels_info_with_shapefile(self, dsm2_chans, tables):
         return dsm2_chans.merge(tables["CHANNEL"], right_on="CHAN_NO", left_on="id")
@@ -1966,7 +1966,7 @@ class DSM2GraphNetworkMap(param.Parameterized):
         # self.param.set_default('date_range', (stime, etime)) # need to set bounds
 
         # should work but doesn't yet
-        tiled_network = hv.element.tiles.CartoLight() * hv.Graph.from_networkx(
+        tiled_network = gv.tile_sources.EsriWorldTopo() * hv.Graph.from_networkx(
             self.study.gc, node_map
         ).opts(
             opts.Graph(
@@ -1996,7 +1996,7 @@ class DSM2GraphNetworkMap(param.Parameterized):
             self.selected = index
 
     def display_node_map(self):
-        return hv.element.tiles.CartoLight() * self.nodes.hvplot()
+        return gv.tile_sources.EsriWorldTopo() * self.nodes.hvplot()
 
     def _date_range_to_twstr(self):
         return "-".join(map(lambda x: x.strftime("%d%b%Y %H%M"), self.date_range))

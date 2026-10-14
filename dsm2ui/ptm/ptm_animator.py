@@ -13,6 +13,7 @@ import shapely
 # This scripts starts a PTM animation can be done with numpy, pandas, geopandas, shapely and holoviews.
 #
 import holoviews as hv
+import geoviews as gv
 from holoviews import opts
 import hvplot.pandas
 import panel as pn
@@ -132,7 +133,7 @@ def ptm_animate(ptm_file, hydro_file, flowlines_shape_file):
     # map from index+1 (numbers 1--> higher to )
     b = dsm2_chans.to_crs(epsg=3857).geometry.bounds
     extents = (b.minx.min(), b.miny.min(), b.maxx.max(), b.maxy.max())
-    map = hv.element.tiles.OSM().opts(width=800, height=600)
+    map = gv.tile_sources.EsriWorldTopo().opts(width=800, height=600)
     map.extents = extents
     #
 

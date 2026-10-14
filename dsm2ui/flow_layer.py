@@ -66,8 +66,10 @@ _CATEGORY20: List[str] = [
     "#bcbd22", "#dbdb8d", "#17becf", "#9edae5",
 ]
 
-_CARTO_LIGHT_URL = "https://basemaps.cartocdn.com/light_all/{Z}/{X}/{Y}.png"
-_CARTO_LIGHT_ATTR = "© CARTO / © OpenStreetMap contributors"
+_CARTO_LIGHT_URL = (
+    "https://server.arcgisonline.com/arcgis/rest/services/World_Topo_Map/MapServer/tile/{Z}/{Y}/{X}"
+)
+_CARTO_LIGHT_ATTR = "Tiles © Esri"
 
 
 # ===========================================================================

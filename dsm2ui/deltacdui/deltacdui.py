@@ -406,7 +406,7 @@ def build_map(time, gdf, df=None, var=""):
             hover_cols="all",
             alpha=0.35,
             width=300,
-            tiles="CartoLight",
+            tiles="EsriWorldTopo",
             c=color,
             responsive=False,
             legend=True,

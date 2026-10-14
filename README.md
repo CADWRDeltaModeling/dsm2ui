@@ -8,6 +8,7 @@ This package provides interactive UI components and analysis utilities for DSM2 
 
 - **`dsm2ui.dsm2ui`** – Interactive map and time-series viewer for DSM2 output channels and tidefiles
 - **`dsm2ui.echo_plugin`** – Combined input+output viewer from a DSM2 echo `.inp` file (registry-based)
+- **`dsm2ui.input_viewer`** – Dashboard-style channel/node map of a hydro echo file with channel properties, cross sections, and boundary-condition time series
 - **`dsm2ui.dssui`** – Generic HEC-DSS file browser and plotter
 - **`dsm2ui.dssui.dss_registry`** – Registry-based DSS browser (drag-and-drop, dvue plugin API)
 - **`dsm2ui.calib.postpro_dsm2`** – Calibration plot generation and post-processing
@@ -269,6 +270,94 @@ dsm2ui ui map hydro_echo.inp --node nodes.geojson
 
 ---
 
+### Input viewer — `input_viewer`
+
+A dashboard-style, web-based **map of the DSM2 channel network** driven by a hydro echo file. Channels are drawn as lines with their up/down nodes, boundary-condition (BC) nodes are marked, and right-click menus open pop-up windows with channel **cross sections** and BC **time series**.
+
+Georeferencing defaults to the bundled DSM2 v9.3 GeoJSONs (`dsm2ui/dsm2gis/`), so no shapefile paths are required.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--input FILE` | path | *(required)* | DSM2 hydro echo `.inp` file |
+| `--channel FILE` | path | bundled centerlines GeoJSON | Channel centerline GeoJSON (feature `id` = channel number) |
+| `--node FILE` | path | bundled node GeoJSON | Node GeoJSON (feature `id` = node number) |
+| `--port PORT` | int | `0` (random) | Port for the web server |
+
+```bash
+# Quickest start — uses the bundled GeoJSONs
+dsm2ui input_viewer --input output/hydro_echo_hist_fc_mss.inp
+
+# Custom geometry and a fixed port
+dsm2ui input_viewer --input output/hydro_echo.inp --channel my_channels.geojson --node my_nodes.geojson --port 5006
+```
+
+**Echo-file tables used**
+
+| Table | Used for |
+|---|---|
+| `CHANNEL` | Channel length, Manning's n, dispersion, up/down nodes, DX; joined to the GeoJSON by channel number |
+| `XSECT_LAYER` | Cross-section data (`DIST`, `ELEV`, `AREA`, `WIDTH`, `WET_PERIM`) |
+| `BOUNDARY_FLOW`, `BOUNDARY_STAGE` | Boundary nodes and their DSS `FILE` / `PATH` |
+| `ENVVAR` | `START_DATE` / `END_DATE` (model run period) |
+
+#### Map and layers
+
+- **Navigate:** left-drag to pan, mouse wheel to zoom about the cursor. The buttons at the top right zoom in, zoom out, return to the full network (home), zoom to the selected channel (locate), and show/hide the Layers box.
+- **Layers box** (top left): switch **Channels**, **Channel Nodes**, **Channel Direction** (an arrow at each channel's midpoint pointing from upnode to downnode) and **Boundary Nodes** (purple triangles drawn inside the node circles) on and off. The chevron collapses the box.
+- **Status:** a scale bar (true miles) and a live latitude/longitude readout (NAD 83) are shown at the bottom left.
+- **Hover:** channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`).
+- **Base map:** Esri World Topo Map (requires internet access).
+
+#### Channel information
+
+Left-click a channel to highlight it (bold line with a glow) and open the **Channel Information** card: channel number, length, Manning's n, dispersion, upnode, downnode, and DX. Click the **✕** to close it.
+
+#### Search
+
+The search box at the top centre finds a channel or node by number.
+
+1. Choose **Channel** or **Node**.
+2. Type the number and press Enter (or click the magnifier).
+3. The map zooms to the result and highlights it (channels also open the information card; nodes get a red ring).
+
+A number that does not exist shows a "not found" message. Editing or deleting the number, or switching Channel/Node, clears the previous result. Only nodes that appear in the `CHANNEL` table can be found.
+
+#### Cross sections — right-click a channel → **View channel info**
+
+Opens a **Cross Sections** window for the channel:
+
+- A list of the channel's cross sections (`XS @ DIST = 0.61`); `DIST` is the fraction of channel length from the upnode. Click one to select it, or use **Previous / Next**.
+- Location, distances to the upnode and downnode, reach length, and source for the selected section, plus ranges of elevation, area, wetted perimeter, and width.
+- Elevation-vs-width, area-vs-elevation, and wetted-perimeter-vs-elevation charts.
+- **Show Table** reveals the underlying `XSECT_LAYER` rows; **Export CSV** saves them.
+- On the map, each cross section is a short line across the channel (the selected one in blue) and the channel is highlighted. **Zoom to Location** and **All XS Locations** frame them to the left of the window.
+
+The window can be dragged by its title; the title and channel summary stay pinned while you scroll.
+
+#### Boundary-condition data — right-click a BC node (or a channel ending at one) → **View BC data**
+
+Opens a **Boundary Condition** window with the DSS time series named by the `FILE` and `PATH` columns of the `BOUNDARY_FLOW` / `BOUNDARY_STAGE` row:
+
+- Name, type, node, sign, fill-in, units, interval, data period, model run period, point count, min/mean/max, and missing-value count; if a node has several BC inputs, a drop-down selects between them.
+- The chart shows the **full record** in the DSS file. Choose a display mode:
+
+| Mode | Plot |
+|---|---|
+| **Original** (default) | Line plot of the original data |
+| **Daily mean** | Line plot of daily means |
+| **Tidally filtered** | Line plot after `cosine_lanczos(data, '40h')` (needs regular sub-daily data) |
+| **Monthly mean** | Bar plot of monthly means |
+
+- **Full record** and **Model run period** buttons set the visible time window (the run period comes from `START_DATE`/`END_DATE`); pan and zoom work along the time axis.
+- **Export CSV** saves the series as currently displayed.
+- Relative `FILE` names are resolved from the study directory (the parent of the folder holding the echo file), then from the echo file's folder, then the current directory; `${VAR}` references are expanded from `ENVVAR`.
+
+The BC node is ringed on the map while its window is open. The window can be dragged by its title, like the cross-section window.
+
+> **Note:** only one pop-up window is open at a time. BC data are read with `pyhecdss`; the tidal filter uses `vtools.functions.filter.cosine_lanczos`.
+
+---
+
 ### Calibration & post-processing — `calib`
 
 #### `calib setup`
@@ -354,7 +443,7 @@ Build `calibration_ec_stations.csv` from a datastore stations CSV by snapping ea
 
 ```bash
 dsm2ui calib stations-csv stations_ec.csv \
-    dsm2ui/dsm2gis/dsm2_channels_centerlines_8_2.geojson \
+    dsm2ui/dsm2gis/dsm2_channels_centerlines_9_3.geojson \
     calibration_ec_stations.csv
 
 # Wider search radius
@@ -530,7 +619,7 @@ dsm2ui datastore extract ec \
 # Step 2 — snap stations to DSM2 channels and assemble the calibration CSV
 dsm2ui calib stations-csv \
     stations_ec.csv \
-    dsm2ui/dsm2gis/dsm2_channels_centerlines_8_2.geojson \
+    dsm2ui/dsm2gis/dsm2_channels_centerlines_9_3.geojson \
     calibration_ec_stations.csv
 ```
 
@@ -580,8 +669,8 @@ dsm2ui mann-disp chan_to_group.csv group_mann_disp.csv \
 
 Convert between real-world lat/lon station locations and DSM2 channel-output positions (`CHAN_NO` + `DISTANCE`), and vice versa.
 
-All subcommands default to the bundled DSM2 v8.2 centerlines when `--centerlines` is omitted:
-`dsm2ui/dsm2gis/dsm2_channels_centerlines_8_2.geojson`
+Both subcommands default to the bundled DSM2 v9.3 centerlines when `--centerlines` is omitted:
+`dsm2ui/dsm2gis/dsm2_channels_centerlines_9_3.geojson`
 
 #### `station-map to-dsm2`
 

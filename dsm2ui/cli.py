@@ -102,6 +102,7 @@ class _SmartUIGroup(_LazyGroup):
         # lazy-load them so unrelated commands (station-map, mann-disp, ...) start fast.
         "calib":   ("dsm2ui.calib.calib_cli", "calib",   "DSM2 calibration: run variations, optimize parameters, or create a config template."),
         "animate": ("dsm2ui.animate_cli",     "animate", "Animate DSM2 HDF5 tidefile data on a map."),
+        "input_viewer": ("dsm2ui.input_viewer", "input_viewer", "Map of DSM2 channels and nodes from a hydro echo file; click a channel for details."),
     },
 )
 @click.version_option(
@@ -255,13 +256,13 @@ main.add_command(ui_group)
 def _default_channel_shapefile():
     """Return path to the bundled DSM2 channel centerline GeoJSON."""
     import pathlib
-    return str(pathlib.Path(__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_8_2.geojson")
+    return str(pathlib.Path(__file__).parent / "dsm2gis" / "dsm2_channels_centerlines_9_3.geojson")
 
 
 def _default_node_shapefile():
     """Return path to the bundled DSM2 node GeoJSON."""
     import pathlib
-    return str(pathlib.Path(__file__).parent / "dsm2gis" / "dsm2_nodes_8_2.geojson")
+    return str(pathlib.Path(__file__).parent / "dsm2gis" / "dsm2_nodes_9_3.geojson")
 
 
 @ui_group.command(name="map")
