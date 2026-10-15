@@ -39,8 +39,9 @@ def _as_timestamp(v):
 class BCPopup:
     """Pop-up showing the DSS time series behind a boundary node; call :meth:`show` to open it."""
 
-    def __init__(self, on_close, load_series):
-        """``load_series(row)`` must return ``(DataFrame with one column, units, model run window)`` for a BC row."""
+    def __init__(self, on_close, load_series, title="BOUNDARY CONDITION", input_label="Boundary input"):
+        """``load_series(row)`` must return ``(DataFrame with one column, units, model run window)`` for a row."""
+        self._heading = title
         self._on_close = on_close
         self._load = load_series
         self._rows = []
@@ -60,7 +61,7 @@ class BCPopup:
             margin=0, width=POPUP_WIDTH - 32, styles=HEADER_STYLES,
         )
 
-        self._select = pn.widgets.Select(name="Boundary input", options={}, visible=False, margin=(8, 0, 0, 0), width=600)
+        self._select = pn.widgets.Select(name=input_label, options={}, visible=False, margin=(8, 0, 0, 0), width=600)
         self._select.param.watch(self._on_pick, "value")
         self._message = pn.pane.HTML("", margin=(8, 0), visible=False)
         self._info = pn.pane.HTML("", margin=(8, 0, 0, 0), width=600)
@@ -135,10 +136,10 @@ class BCPopup:
         self._rows = rows
         self._title.object = (
             "<div class='xs-drag' title='Drag to move' style='cursor:move;user-select:none;padding:6px 0;"
-            f"font-size:15px;font-weight:700;color:#222'>BOUNDARY CONDITION \u2013 NODE {node}</div>"
+            f"font-size:15px;font-weight:700;color:#222'>{self._heading} \u2013 NODE {node}</div>"
         )
         self._loading = True
-        self._select.options = {f"{r['name']} ({r['kind']})": i for i, r in enumerate(rows)}
+        self._select.options = {r.get("label") or f"{r['name']} ({r['kind']})": i for i, r in enumerate(rows)}
         self._select.value = 0
         self._select.visible = len(rows) > 1
         self._loading = False
@@ -168,6 +169,8 @@ class BCPopup:
         if row.get("sign") is not None:
             parts.append(f"<span>Sign: <b style='font-weight:500'>{row['sign']:+d}</b></span>")
         parts.append(f"<span>Fill-in: <b style='font-weight:500'>{html.escape(str(row['fillin']))}</b></span>")
+        for label, value in row.get("extra", []):
+            parts.append(f"<span>{html.escape(label)}: <b style='font-weight:500'>{html.escape(value)}</b></span>")
         sep = "<span style='color:#bbb'>|</span>"
         self._subtitle.object = (
             "<div style='font-size:12px;color:#333;display:flex;gap:10px;align-items:center;flex-wrap:wrap'>"
@@ -205,8 +208,7 @@ class BCPopup:
             "border-top:1px solid #eee;border-bottom:1px solid #eee;padding:4px 0'>"
             f"<div>{_cell('Units:', html.escape(units))}{_cell('Interval:', html.escape(e_part))}"
             f"{_cell('Period:', f'{s.index.min():%d%b%Y} \u2013 {s.index.max():%d%b%Y}')}"
-            f"{_cell('Model run:', run_txt)}"
-            f"{_cell('# Points:', f'{len(s):,}')}</div>"
+            f"{_cell('Model run:', run_txt)}</div>"
             f"<div>{_cell('Min:', _num(s.min()))}{_cell('Mean:', _num(s.mean()))}"
             f"{_cell('Max:', _num(s.max()))}"
             f"{_cell('Missing:', f'{n_missing:,} ({n_missing / max(len(s), 1):.1%})')}</div></div>"

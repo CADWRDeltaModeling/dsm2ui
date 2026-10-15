@@ -38,6 +38,8 @@ _NODE_COLOR = "#5fa83a"
 _SELECT_COLOR = "#e02020"
 _BOUNDARY_COLOR = "#7b2cbf"
 _XS_GREEN = "#2e9e2e"
+_SOURCE_DICU = "#b4b8bd"
+_SOURCE_OTHER = "#4a4f55"
 
 _CONTEXT_MENU_JS = """
 const reg = (window.__dsm2ctx = window.__dsm2ctx || {});
@@ -62,7 +64,9 @@ const addItem = (text, kind, idx) => {
   menu.appendChild(it);
 };
 view.el.addEventListener('contextmenu', (e) => {
-  const ci = src.inspected.indices, bi = bsrc.inspected.indices;
+  const bi = bsrc.inspected.indices, ni = nsrc.inspected.indices;
+  // On a node dot only node options are offered, never the channels meeting there.
+  const ci = (bi.length || ni.length) ? [] : src.inspected.indices;
   // BC nodes offered: the one under the cursor plus any at either end of the hovered channel.
   const bcs = new Map();
   if (bi.length) bcs.set(bsrc.data.node[bi[0]], bi[0]);
@@ -72,11 +76,15 @@ view.el.addEventListener('contextmenu', (e) => {
       if (k >= 0 && !bcs.has(n)) bcs.set(n, k);
     }
   }
-  if (!ci.length && !bcs.size) { hide(); return; }
+  // Source flow is offered only for the node dot directly under the cursor.
+  const under = bi.length ? bsrc.data.node[bi[0]] : (ni.length ? nsrc.data.node[ni[0]] : null);
+  const sfNode = (under != null && srcnodes.includes(under)) ? under : null;
+  if (!ci.length && !bcs.size && sfNode == null) { hide(); return; }
   e.preventDefault();
   menu.replaceChildren();
   if (ci.length) addItem('View channel info', 'chan', ci[0]);
   for (const [n, k] of bcs) addItem(bcs.size > 1 ? `View BC data (node ${n})` : 'View BC data', 'bc', k);
+  if (sfNode != null) addItem('View source flow data', 'src', sfNode);
   menu.style.left = e.clientX + 'px';
   menu.style.top = e.clientY + 'px';
   menu.style.display = 'block';
@@ -93,16 +101,24 @@ Object.assign(tip.style, {
   boxShadow: '0 1px 6px rgba(0,0,0,0.2)',
 });
 document.body.appendChild(tip);
+let lit = -1;
+const setHover = (i) => {
+  if (i === lit) return;
+  lit = i;
+  hsrc.data = i < 0 ? {xs: [], ys: []} : {xs: [src.data.xs[i]], ys: [src.data.ys[i]]};
+};
 view.el.addEventListener('mousemove', (e) => {
   const ci = src.inspected.indices;
-  if (!ci.length || bsrc.inspected.indices.length) { tip.style.display = 'none'; return; }
+  const overNode = bsrc.inspected.indices.length > 0 || nsrc.inspected.indices.length > 0;
+  if (!ci.length || overNode) { tip.style.display = 'none'; setHover(-1); return; }
   const i = ci[0];
+  setHover(i);
   tip.innerHTML = `<b>Channel:</b> ${src.data.CHAN_NO[i]}<br><b>Up \u2192 Down:</b> ${src.data.UPNODE[i]} \u2192 ${src.data.DOWNNODE[i]}`;
   tip.style.left = (e.clientX + 14) + 'px';
   tip.style.top = (e.clientY + 14) + 'px';
   tip.style.display = 'block';
 });
-view.el.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+view.el.addEventListener('mouseleave', () => { tip.style.display = 'none'; setHover(-1); });
 
 // Drag the cross-section pop-up by its title (.xs-drag); the popup host carries .xs-popup.
 let drag = null;
@@ -250,6 +266,25 @@ def _load_boundary_rows(echo_file):
     return rows
 
 
+@functools.lru_cache(maxsize=4)
+def _load_source_rows(echo_file):
+    """Return {node: [source-flow row dicts]} from SOURCE_FLOW; DICU sources are those named ``dicu_*``."""
+    table = _load_echo(echo_file).get("SOURCE_FLOW")
+    rows = {}
+    if table is None:
+        return rows
+    for rec in table.to_dict("records"):
+        node = int(rec["NODE"])
+        name = str(rec["NAME"])
+        group = "DICU" if name.lower().startswith("dicu") else "Other"
+        rows.setdefault(node, []).append({
+            "name": name, "kind": "flow", "node": node, "sign": int(rec["SIGN"]),
+            "fillin": str(rec["FILLIN"]), "file": str(rec["FILE"]), "path": str(rec["PATH"]),
+            "group": group, "label": f"{name} ({group})", "extra": [("Group", group)],
+        })
+    return rows
+
+
 def _echo_env(echo_file):
     envvar = _load_echo(echo_file).get("ENVVAR")
     return dict(zip(envvar["NAME"], envvar["VALUE"])) if envvar is not None else {}
@@ -281,19 +316,35 @@ def _run_window(echo_file):
     return stamp(env["START_DATE"], env.get("START_TIME", "0000")), stamp(env["END_DATE"], env.get("END_TIME", "0000"))
 
 
-@functools.lru_cache(maxsize=16)
-def _read_bc_series(echo_file, dss_name, path):
-    """Return (full-record DataFrame, units, model run period or None) for a BC DSS path."""
+@functools.lru_cache(maxsize=8)
+def _dss_catalog(dss_path):
     import pyhecdss
 
     logging.getLogger("pyhecdss").setLevel(logging.WARNING)  # pyhecdss mis-formats some debug messages
+    with pyhecdss.DSSFile(dss_path) as dss:
+        return dss.read_catalog()
+
+
+@functools.lru_cache(maxsize=32)
+def _read_bc_series(echo_file, dss_name, path):
+    """Return (full-record DataFrame, units, model run period or None) for a BC / source-flow DSS path."""
+    import pyhecdss
+
+    if dss_name.strip().lower() == "constant":
+        window = _run_window(echo_file)
+        if window is None:
+            raise ValueError("constant input, but the echo file has no run period")
+        df = pd.DataFrame({"constant": [float(path)] * 2}, index=pd.DatetimeIndex(list(window)))
+        return df, "cfs", window
+
     # The path's D part is usually blank, so look the record(s) up in the catalog instead.
     a, b, c, _, e, f = path.split("/")[1:7]
-    with pyhecdss.DSSFile(_resolve_dss(echo_file, dss_name)) as dss:
-        cat = dss.read_catalog()
-        hits = cat[(cat.A == a) & (cat.B == b) & (cat.C == c) & (cat.E == e) & (cat.F == f)]
-        if hits.empty:
-            raise KeyError(f"path not found in DSS file: {path}")
+    dss_path = _resolve_dss(echo_file, dss_name)
+    cat = _dss_catalog(dss_path)
+    hits = cat[(cat.A == a) & (cat.B == b) & (cat.C == c) & (cat.E == e) & (cat.F == f)]
+    if hits.empty:
+        raise KeyError(f"path not found in DSS file: {path}")
+    with pyhecdss.DSSFile(dss_path) as dss:
         parts = []
         for pathname in dss.get_pathnames(hits):
             df, units, _ = dss.read_rts(pathname)
@@ -382,6 +433,9 @@ def _swatch(kind):
             "width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;"
             f"border-bottom:10px solid {_BOUNDARY_COLOR};margin-top:1px"
         )
+    elif kind in ("dicu", "other"):
+        color = _SOURCE_DICU if kind == "dicu" else _SOURCE_OTHER
+        css = f"width:8px;height:8px;border-radius:50%;background:{color};margin:1px 0 0 3px"
     else:
         css = f"width:9px;height:9px;border-radius:50%;border:2px solid {_NODE_COLOR}"
     return pn.pane.HTML(f"<div style='{css}'></div>", margin=(12, 4, 0, 0), width=30)
@@ -432,9 +486,11 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
 
     chan_r = p.multi_line(
         "xs", "ys", source=chan_src, line_width=3, line_color=_CHANNEL_COLOR,
-        hover_line_color=_BLUE, hover_line_width=5,
         selection_line_color=_CHANNEL_COLOR, nonselection_line_alpha=1.0,
     )
+    # Hover highlight is drawn by the page script so a node under the cursor can suppress it.
+    hover_src = ColumnDataSource({"xs": [], "ys": []})
+    hover_r = p.multi_line("xs", "ys", source=hover_src, line_width=5, line_color=_BLUE)
     # Soft glow underneath the bold selected-channel line.
     glow_outer = p.multi_line("xs", "ys", source=sel_line_src, line_width=22, line_color=_SELECT_COLOR, line_alpha=0.15)
     glow_inner = p.multi_line("xs", "ys", source=sel_line_src, line_width=13, line_color=_SELECT_COLOR, line_alpha=0.3)
@@ -451,12 +507,36 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     )
     # Smaller than the node circle so the channel node stays visible around the triangle.
     node_pos = {n: (x, y) for n, x, y in zip(nodes["id"], nodes.geometry.x, nodes.geometry.y)}
+    src_rows = {n: r for n, r in _load_source_rows(echo_file).items() if n in node_pos}
+
+    def _source_info(node):
+        rows = src_rows.get(node)
+        if not rows:
+            return ""
+        n_dicu = sum(r["group"] == "DICU" for r in rows)
+        return f"<br><b>Source flow:</b> {n_dicu} DICU, {len(rows) - n_dicu} other"
+
+    def _source_dots(group):
+        ns = sorted(n for n, rows in src_rows.items() if any(r["group"] == group for r in rows))
+        return ColumnDataSource(
+            {"x": [node_pos[n][0] for n in ns], "y": [node_pos[n][1] for n in ns], "node": ns}
+        )
+
+    # Small grey dots inside the node circles; the dark "other" dot sits inside the larger DICU one.
+    dicu_r = p.scatter("x", "y", source=_source_dots("DICU"), size=6, fill_color=_SOURCE_DICU, line_alpha=0)
+    other_r = p.scatter("x", "y", source=_source_dots("Other"), size=4, fill_color=_SOURCE_OTHER, line_alpha=0)
+    src_sel_src = ColumnDataSource({"x": [], "y": []})
+    src_ring = p.scatter(
+        "x", "y", source=src_sel_src, size=24, fill_color=_SOURCE_OTHER, fill_alpha=0.12,
+        line_color=_SOURCE_OTHER, line_width=3,
+    )
     bc_rows = {n: r for n, r in _load_boundary_rows(echo_file).items() if n in node_pos}
     bnd_nodes = sorted(bc_rows)
     bnd_src = ColumnDataSource({
         "x": [node_pos[n][0] for n in bnd_nodes], "y": [node_pos[n][1] for n in bnd_nodes],
         "node": bnd_nodes,
         "label": [", ".join(f"{r['name']} ({r['kind']})" for r in bc_rows[n]) for n in bnd_nodes],
+        "info": [_source_info(n) for n in bnd_nodes],
     })
     # Ring marking the BC node whose data window is open.
     bc_sel_src = ColumnDataSource({"x": [], "y": []})
@@ -474,6 +554,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     plain = [(n, x, y) for n, (x, y) in node_pos.items() if n not in bc_rows]
     node_hit_src = ColumnDataSource({
         "x": [x for _, x, _ in plain], "y": [y for _, _, y in plain], "node": [n for n, _, _ in plain],
+        "info": [_source_info(n) for n, _, _ in plain],
     })
     node_hit = p.scatter("x", "y", source=node_hit_src, size=10, fill_alpha=0, line_alpha=0)
     xs_src = ColumnDataSource({"x": [], "y": [], "angle": [], "color": []})
@@ -491,13 +572,22 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     # fit_div is only reachable by the browser if some model references it.
     p.js_on_event(
         MouseMove,
-        CustomJS(args=dict(p=p, src=chan_src, bsrc=bnd_src, req=req_src, fit=fit_div), code=_CONTEXT_MENU_JS),
+        CustomJS(
+            args=dict(
+                p=p, src=chan_src, bsrc=bnd_src, nsrc=node_hit_src, hsrc=hover_src, srcnodes=sorted(src_rows),
+                req=req_src, fit=fit_div,
+            ),
+            code=_CONTEXT_MENU_JS,
+        ),
     )
     p.add_tools(
         TapTool(renderers=[chan_r]),
         HoverTool(renderers=[chan_r], tooltips=None),  # inspection only; the tooltip is drawn in JS
-        HoverTool(renderers=[node_hit], tooltips=[("Node", "@node")]),
-        HoverTool(renderers=[bnd_hit], tooltips=[("Boundary node", "@node"), ("Inputs", "@label")]),
+        HoverTool(renderers=[node_hit], tooltips="<b>Node:</b> @node@info{safe}"),
+        HoverTool(
+            renderers=[bnd_hit],
+            tooltips="<b>Boundary node:</b> @node<br><b>Inputs:</b> @label@info{safe}",
+        ),
     )
 
     # --- Channel information card -------------------------------------------------
@@ -596,22 +686,45 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     bc_panel = _overlay(bc_popup.panel, top=16, right=76)
     bc_panel.styles = {**bc_panel.styles, "z-index": "20"}
 
+    src_popup = BCPopup(
+        on_close=lambda: setattr(src_sel_src, "data", {"x": [], "y": []}),
+        load_series=lambda row: _read_bc_series(echo_file, row["file"], row["path"]),
+        title="SOURCE FLOW", input_label="Source flow input",
+    )
+    src_panel = _overlay(src_popup.panel, top=16, right=76)
+    src_panel.styles = {**src_panel.styles, "z-index": "20"}
+
+    popups = [popup, bc_popup, src_popup]
+
+    def _close_others(keep):
+        for other in popups:
+            if other is not keep and other.panel.visible:
+                other.hide()
+
     def _open_request(attr, old, new):
         idx = int(new["idx"][0])
+        kind = new["kind"][0]
         if idx < 0:
             return
-        if new["kind"][0] == "bc":
+        if kind == "bc":
             node = int(bnd_src.data["node"][idx])
-            if popup.panel.visible:
-                popup.hide()
+            _close_others(bc_popup)
             x, y = node_pos[node]
             bc_sel_src.data = {"x": [x], "y": [y]}
             bc_popup.show(node, bc_rows[node])
             half = 6000
             _fit(x - half, x + half, y - half, y + half)
             return
-        if bc_popup.panel.visible:
-            bc_popup.hide()
+        if kind == "src":
+            node = idx  # for source flows the request carries the node number itself
+            _close_others(src_popup)
+            x, y = node_pos[node]
+            src_sel_src.data = {"x": [x], "y": [y]}
+            src_popup.show(node, src_rows[node])
+            half = 3000
+            _fit(x - half, x + half, y - half, y + half)
+            return
+        _close_others(popup)
         ci = idx
         chan_no = int(chan_src.data["CHAN_NO"][ci])
         xs = xs_tables.get(chan_no, pd.DataFrame(columns=["CHAN_NO", "DIST", "ELEV", "AREA", "WIDTH", "WET_PERIM"]))
@@ -628,7 +741,10 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     node_cb = pn.widgets.Checkbox(name="Channel Nodes", value=True, margin=(8, 0))
     dir_cb = pn.widgets.Checkbox(name="Channel Direction", value=True, margin=(8, 0))
     bnd_cb = pn.widgets.Checkbox(name="Boundary Nodes", value=True, margin=(8, 0))
+    dicu_cb = pn.widgets.Checkbox(name="Source Flow (DICU)", value=True, margin=(8, 0))
+    other_cb = pn.widgets.Checkbox(name="Source Flow (other)", value=True, margin=(8, 0))
     chan_cb.jslink(chan_r, value="visible")
+    chan_cb.jslink(hover_r, value="visible")
     chan_cb.jslink(sel_r, value="visible")
     chan_cb.jslink(glow_inner, value="visible")
     chan_cb.jslink(glow_outer, value="visible")
@@ -638,6 +754,8 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     bnd_cb.jslink(bnd_r, value="visible")
     bnd_cb.jslink(bnd_hit, value="visible")
     bnd_cb.jslink(bc_ring, value="visible")
+    dicu_cb.jslink(dicu_r, value="visible")
+    other_cb.jslink(other_r, value="visible")
 
     collapse_btn = pn.widgets.Button(icon="chevron-up", button_type="light", width=36, height=36, margin=0)
     layers_body = pn.Column(
@@ -645,6 +763,8 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         pn.Row(node_cb, pn.HSpacer(), _swatch("circle"), margin=0),
         pn.Row(dir_cb, pn.HSpacer(), _swatch("arrow"), margin=0),
         pn.Row(bnd_cb, pn.HSpacer(), _swatch("triangle"), margin=0),
+        pn.Row(dicu_cb, pn.HSpacer(), _swatch("dicu"), margin=0),
+        pn.Row(other_cb, pn.HSpacer(), _swatch("other"), margin=0),
         margin=0,
     )
 
@@ -719,7 +839,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         if not text:
             return
         num = int(text) if text.isdigit() else None
-        reserve = None if (popup.panel.visible or bc_popup.panel.visible) else 0
+        reserve = None if any(pp.panel.visible for pp in popups) else 0
         if kind == "Channel" and num in chan_index:
             ci = chan_index[num]
             chan_src.selected.indices = [ci]
@@ -769,7 +889,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
 
     map_area = pn.Column(
         pn.pane.Bokeh(p, sizing_mode="stretch_both", margin=0),
-        layers, info_card, controls, popup_panel, bc_panel, search_card,
+        layers, info_card, controls, popup_panel, bc_panel, src_panel, search_card,
         _overlay(
             pn.pane.Bokeh(scale_div, width=170, styles=_card_styles(padding="8px 12px")),
             bottom=76, left=16,

@@ -298,14 +298,15 @@ dsm2ui input_viewer --input output/hydro_echo.inp --channel my_channels.geojson 
 | `CHANNEL` | Channel length, Manning's n, dispersion, up/down nodes, DX; joined to the GeoJSON by channel number |
 | `XSECT_LAYER` | Cross-section data (`DIST`, `ELEV`, `AREA`, `WIDTH`, `WET_PERIM`) |
 | `BOUNDARY_FLOW`, `BOUNDARY_STAGE` | Boundary nodes and their DSS `FILE` / `PATH` |
+| `SOURCE_FLOW` | Source-flow nodes and their DSS `FILE` / `PATH` (a `FILE` of `constant` uses the `PATH` value as a fixed flow) |
 | `ENVVAR` | `START_DATE` / `END_DATE` (model run period) |
 
 #### Map and layers
 
 - **Navigate:** left-drag to pan, mouse wheel to zoom about the cursor. The buttons at the top right zoom in, zoom out, return to the full network (home), zoom to the selected channel (locate), and show/hide the Layers box.
-- **Layers box** (top left): switch **Channels**, **Channel Nodes**, **Channel Direction** (an arrow at each channel's midpoint pointing from upnode to downnode) and **Boundary Nodes** (purple triangles drawn inside the node circles) on and off. The chevron collapses the box.
+- **Layers box** (top left): switch **Channels**, **Channel Nodes**, **Channel Direction** (an arrow at each channel's midpoint pointing from upnode to downnode) and **Boundary Nodes** (purple triangles drawn inside the node circles) on and off, as well as the **Source Flow** dots: **Source Flow (DICU)** (light grey) and **Source Flow (other)** (dark grey) are small dots inside the node circles, and a node with both shows one inside the other. The chevron collapses the box.
 - **Status:** a scale bar (true miles) and a live latitude/longitude readout (NAD 83) are shown at the bottom left.
-- **Hover:** channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`).
+- **Hover:** channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`). Nodes with source flows also list how many DICU and other sources they have.
 - **Base map:** Esri World Topo Map (requires internet access).
 
 #### Channel information
@@ -338,7 +339,7 @@ The window can be dragged by its title; the title and channel summary stay pinne
 
 Opens a **Boundary Condition** window with the DSS time series named by the `FILE` and `PATH` columns of the `BOUNDARY_FLOW` / `BOUNDARY_STAGE` row:
 
-- Name, type, node, sign, fill-in, units, interval, data period, model run period, point count, min/mean/max, and missing-value count; if a node has several BC inputs, a drop-down selects between them.
+- Name, type, node, sign, fill-in, units, interval, data period, model run period, min/mean/max, and missing-value count; if a node has several BC inputs, a drop-down selects between them.
 - The chart shows the **full record** in the DSS file. Choose a display mode:
 
 | Mode | Plot |
@@ -354,7 +355,15 @@ Opens a **Boundary Condition** window with the DSS time series named by the `FIL
 
 The BC node is ringed on the map while its window is open. The window can be dragged by its title, like the cross-section window.
 
-> **Note:** only one pop-up window is open at a time. BC data are read with `pyhecdss`; the tidal filter uses `vtools.functions.filter.cosine_lanczos`.
+#### Source flow data — right-click a source-flow dot → **View source flow data**
+
+The option appears only when the cursor is on (or very close to) a source-flow dot, not when you right-click a channel, and it is always a single entry for that node.
+
+Source-flow nodes come from the `SOURCE_FLOW` table and are marked with small grey dots (see the Layers box). A source is **DICU** when its name starts with `dicu` (e.g. `dicu_div_206`); everything else is **other** (e.g. `ccc`, `stockton`).
+
+The **Source Flow** window is the same as the BC window — same display modes, buttons, CSV export, and file resolution — and reads the `FILE` / `PATH` of each `SOURCE_FLOW` row. Because a node usually has several sources (DICU diversion, drain and seepage plus any others), a drop-down lists them as `name (DICU)` / `name (Other)`. The header also shows the sign and the DICU/Other group. A `FILE` of `constant` is shown as a flat line at the constant value over the model run period. The node is ringed on the map while the window is open.
+
+> **Note:** only one pop-up window is open at a time. BC and source-flow data are read with `pyhecdss`; the tidal filter uses `vtools.functions.filter.cosine_lanczos`.
 
 ---
 
