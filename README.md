@@ -8,7 +8,7 @@ This package provides interactive UI components and analysis utilities for DSM2 
 
 - **`dsm2ui.dsm2ui`** – Interactive map and time-series viewer for DSM2 output channels and tidefiles
 - **`dsm2ui.echo_plugin`** – Combined input+output viewer from a DSM2 echo `.inp` file (registry-based)
-- **`dsm2ui.input_viewer`** – Dashboard-style channel/node map of a hydro echo file with channel properties, cross sections, and boundary-condition time series
+- **`dsm2ui.input_viewer`** – Dashboard-style channel/node map of a hydro echo file with channel properties, cross sections, boundary-condition and source-flow time series, output locations, and hydraulic structures (devices and operating rules)
 - **`dsm2ui.dssui`** – Generic HEC-DSS file browser and plotter
 - **`dsm2ui.dssui.dss_registry`** – Registry-based DSS browser (drag-and-drop, dvue plugin API)
 - **`dsm2ui.calib.postpro_dsm2`** – Calibration plot generation and post-processing
@@ -272,7 +272,7 @@ dsm2ui ui map hydro_echo.inp --node nodes.geojson
 
 ### Input viewer — `input_viewer`
 
-A dashboard-style, web-based **map of the DSM2 channel network** driven by a hydro echo file. Channels are drawn as lines with their up/down nodes, boundary-condition (BC) nodes are marked, and right-click menus open pop-up windows with channel **cross sections** and BC **time series**.
+A dashboard-style, web-based **map of the DSM2 channel network** driven by a hydro echo file. Channels are drawn as lines with their up/down nodes, and boundary-condition (BC) nodes, source flows, output locations, and hydraulic structures (gates) are marked. Right-click menus open pop-up windows with channel **cross sections**, BC and source-flow **time series**, and the **devices and operating rules** of a gate.
 
 Georeferencing defaults to the bundled DSM2 v9.3 GeoJSONs (`dsm2ui/dsm2gis/`), so no shapefile paths are required.
 
@@ -291,6 +291,8 @@ dsm2ui input_viewer --input output/hydro_echo_hist_fc_mss.inp
 dsm2ui input_viewer --input output/hydro_echo.inp --channel my_channels.geojson --node my_nodes.geojson --port 5006
 ```
 
+If the connection to the server is lost (server stopped, network or tunnel dropped, idle proxy timeout), the page shows a red "Connection to the server was lost" notification; relaunch if needed and reload the page.
+
 **Echo-file tables used**
 
 | Table | Used for |
@@ -299,14 +301,18 @@ dsm2ui input_viewer --input output/hydro_echo.inp --channel my_channels.geojson 
 | `XSECT_LAYER` | Cross-section data (`DIST`, `ELEV`, `AREA`, `WIDTH`, `WET_PERIM`) |
 | `BOUNDARY_FLOW`, `BOUNDARY_STAGE` | Boundary nodes and their DSS `FILE` / `PATH` |
 | `SOURCE_FLOW` | Source-flow nodes and their DSS `FILE` / `PATH` (a `FILE` of `constant` uses the `PATH` value as a fixed flow) |
+| `OUTPUT_CHANNEL` | Output locations (channel number and distance from the upnode) |
+| `GATE` | Gate locations (`FROM_OBJ` / `FROM_IDENTIFIER` / `TO_NODE`) |
+| `GATE_WEIR_DEVICE`, `GATE_PIPE_DEVICE` | Weir and pipe devices of each gate, matched by `GATE_NAME` |
+| `OPERATING_RULE`, `OPRULE_EXPRESSION`, `OPRULE_TIME_SERIES` | Operating rules of each gate, the named expressions they use, and the DSS series they read |
 | `ENVVAR` | `START_DATE` / `END_DATE` (model run period) |
 
 #### Map and layers
 
-- **Navigate:** left-drag to pan, mouse wheel to zoom about the cursor. The buttons at the top right zoom in, zoom out, return to the full network (home), zoom to the selected channel (locate), and show/hide the Layers box.
-- **Layers box** (top left): switch **Channels**, **Channel Nodes**, **Channel Direction** (an arrow at each channel's midpoint pointing from upnode to downnode) and **Boundary Nodes** (purple triangles drawn inside the node circles) on and off, as well as the **Source Flow** dots: **Source Flow (DICU)** (light grey) and **Source Flow (other)** (dark grey) are small dots inside the node circles, and a node with both shows one inside the other. The chevron collapses the box.
-- **Status:** a scale bar (true miles) and a live latitude/longitude readout (NAD 83) are shown at the bottom left.
-- **Hover:** channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`). Nodes with source flows also list how many DICU and other sources they have.
+- **Navigate:** left-drag to pan, mouse wheel to zoom about the cursor. The buttons at the top right zoom in, zoom out, return to the full network (home), zoom to the selected channel (locate), and show/hide the Layers box. Zooming to a location keeps it clear of the Layers box and of any open window.
+- **Layers box** (top left): switch **Channels**, **Channel Nodes**, **Channel Direction** (an arrow at each channel's midpoint pointing from upnode to downnode) and **Boundary Nodes** (purple triangles drawn inside the node circles) on and off, as well as the **Source Flow** dots: **Source Flow (DICU)** (light grey) and **Source Flow (other)** (dark grey) are small dots inside the node circles, and a node with both shows one inside the other. **Output Locations** (small red map pins) mark the `OUTPUT_CHANNEL` stations along their channels, one pin per location, and grow as you zoom in. **Hydraulic Structures** (blue gate icon, larger than a node) come from the `GATE` table: a gate whose `FROM_OBJ` is `channel` is drawn beside its `TO_NODE` on that channel, and a `reservoir` gate is drawn on its `TO_NODE`. Gate icons grow and shrink with the zoom level. The chevron collapses the box.
+- **Status:** a live latitude/longitude readout (NAD 83) is shown at the bottom left.
+- **Hover:** channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`). Nodes with source flows also list how many DICU and other sources they have. Output-location pins show the station name(s), channel, and distance, e.g. `ANH — channel 51 @ 11,789 ft`. Only one tooltip is shown at a time: the channel tooltip and highlight are suppressed while the cursor is on a pin, a node, or a hydraulic structure; the pin tooltip is suppressed on a node or a hydraulic structure; and node tooltips are suppressed on a hydraulic structure. A channel gate shows the channel number, up→down nodes, and the gate name; a reservoir gate shows the node number and the gate name. Right-clicking a channel gate offers the channel info window.
 - **Base map:** Esri World Topo Map (requires internet access).
 
 #### Channel information
@@ -363,7 +369,16 @@ Source-flow nodes come from the `SOURCE_FLOW` table and are marked with small gr
 
 The **Source Flow** window is the same as the BC window — same display modes, buttons, CSV export, and file resolution — and reads the `FILE` / `PATH` of each `SOURCE_FLOW` row. Because a node usually has several sources (DICU diversion, drain and seepage plus any others), a drop-down lists them as `name (DICU)` / `name (Other)`. The header also shows the sign and the DICU/Other group. A `FILE` of `constant` is shown as a flat line at the constant value over the model run period. The node is ringed on the map while the window is open.
 
-> **Note:** only one pop-up window is open at a time. BC and source-flow data are read with `pyhecdss`; the tidal filter uses `vtools.functions.filter.cosine_lanczos`.
+#### Hydraulic structures — right-click a gate icon → **View hydraulic structure**
+
+The option appears for every hydraulic-structure icon, whether it sits on a channel or on a reservoir node. On a channel gate it is listed together with **View channel info**; on a reservoir gate it is listed with **View source flow data** when the node has source flows.
+
+The **Hydraulic Structure** window shows the gate name, its channel or reservoir, and the node, followed by two tabs. The map zooms to the gate, which is highlighted with a red glow and outline (like a selected channel) until the window is closed, and the window can be dragged by its title. If several gates share a location, a drop-down selects which one is shown.
+
+- **Devices** lists one table of its weir devices (`GATE_WEIR_DEVICE`: device, number of devices, width, elevation, height, flow coefficients, default operation) and one of its pipe devices (`GATE_PIPE_DEVICE`: device, number of devices, radius, elevation, flow coefficients, default operation). Rows are matched to the gate by `GATE_NAME`.
+- **Operating rules** summarises the rules in `OPERATING_RULE` that act on the gate (matched by `gate=` in the rule's `ACTION`), grouped by device and by the quantity they control (`gate_op`, `gate_coef`, `gate_install`, `gate_elev`, `gate_width`, `gate_height`, `gate_nduplicate`). The `from_node` and `to_node` twins of a rule are merged into one row. Each row has a badge: **Trigger: True** (trigger `TRUE`: the gate follows a time series or is set to a value from the start of the run), **Trigger: Schedule** (date triggers such as `DATETIME < 20SEP2018 12:00` / `>=`, shown as a table of "Before" / "From" dates with the value set and any ramp), **Trigger: Condition** (any other trigger, written in words, e.g. "stage in channel 185 at 0 ft ≤ 2.0", with the named expressions from `OPRULE_EXPRESSION` it uses listed underneath), or **Not summarised** (a rule the viewer cannot interpret, shown as its raw text). "Rule text" expands the exact `ACTION` / `TRIGGER` and the `OPRULE_TIME_SERIES` source of each series the rule uses. Directly under each rule there is one chart per time series the rule reads (in its value or its trigger, including through named expressions). Each chart shows the DSS file and path (or constant value), fill-in, minimum / mean / maximum and record period, and a step chart that opens on the model run period. It can be zoomed and panned with the chart toolbar (pan, box zoom, wheel zoom, reset; hover for date and value), and the **Model run period** and **Full record** buttons jump between the two views. Repeated values are merged and dense series are thinned for display. A gate without rules says so. Rules that set `ext_flow` are not tied to a gate and are not shown. The series are read when the tab is opened.
+
+> **Note:** only one pop-up window is open at a time. BC, source-flow, and operating-rule series are read with `pyhecdss` (regular and irregular `IR-*` records; the HEC-DSS missing-value flags `-901` / `-902` are ignored in the operating-rule charts); the tidal filter uses `vtools.functions.filter.cosine_lanczos`.
 
 ---
 

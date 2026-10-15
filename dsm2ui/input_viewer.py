@@ -25,6 +25,8 @@ from pydsm.analysis.dsm2study import load_echo_file
 from shapely.geometry import LineString
 
 from dsm2ui.bc_popup import BCPopup
+from dsm2ui.gate_popup import GatePopup
+from dsm2ui.oprule_parse import parse_rules, summarise_gate
 from dsm2ui.xsection_popup import POPUP_WIDTH, XSectionPopup
 
 _GIS_DIR = pathlib.Path(__file__).parent / "dsm2gis"
@@ -40,6 +42,25 @@ _BOUNDARY_COLOR = "#7b2cbf"
 _XS_GREEN = "#2e9e2e"
 _SOURCE_DICU = "#b4b8bd"
 _SOURCE_OTHER = "#4a4f55"
+_PIN_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 36 52'>"
+    "<path d='M18 1.5C9 1.5 2 8.4 2 17c0 12 16 33.5 16 33.5S34 29 34 17C34 8.4 27 1.5 18 1.5z' "
+    "fill='#e53935' stroke='#b71c1c' stroke-width='2'/><circle cx='18' cy='17' r='7.5' fill='white'/></svg>"
+)
+_PIN_URL = "data:image/svg+xml;base64," + base64.b64encode(_PIN_SVG.encode()).decode()
+
+_GATE_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 170 106'><g fill='#2f5fb3'>"
+    "<rect x='8' y='2' width='17' height='76' rx='2'/><rect x='145' y='2' width='17' height='76' rx='2'/>"
+    "<rect x='25' y='8' width='120' height='10'/></g>"
+    "<rect x='34' y='22' width='102' height='48' fill='white' stroke='#2f5fb3' stroke-width='5'/>"
+    "<path d='M36 36L50 24M54 36L68 24M72 36L86 24M90 36L104 24M108 36L122 24M126 36L136 28' "
+    "stroke='#2f5fb3' stroke-width='4' fill='none'/>"
+    "<path d='M34 38H136M68 38V70M102 38V70M34 54H136' stroke='#2f5fb3' stroke-width='3.5' fill='none'/>"
+    "<path d='M2 78q21-14 42 0t42 0t42 0t42 0M2 94q21-14 42 0t42 0t42 0t42 0' "
+    "stroke='#2f5fb3' stroke-width='9' fill='none' stroke-linecap='round'/></svg>"
+)
+_GATE_URL = "data:image/svg+xml;base64," + base64.b64encode(_GATE_SVG.encode()).decode()
 
 _CONTEXT_MENU_JS = """
 const reg = (window.__dsm2ctx = window.__dsm2ctx || {});
@@ -65,8 +86,10 @@ const addItem = (text, kind, idx) => {
 };
 view.el.addEventListener('contextmenu', (e) => {
   const bi = bsrc.inspected.indices, ni = nsrc.inspected.indices;
-  // On a node dot only node options are offered, never the channels meeting there.
-  const ci = (bi.length || ni.length) ? [] : src.inspected.indices;
+  const gci = gcs.inspected.indices, gri = grs.inspected.indices;
+  // On a node dot only node options are offered, never the channels meeting there; a channel gate offers its channel.
+  const ci = (bi.length || ni.length || gri.length) ? []
+    : (gci.length ? [gcs.data.ci[gci[0]]] : src.inspected.indices);
   // BC nodes offered: the one under the cursor plus any at either end of the hovered channel.
   const bcs = new Map();
   if (bi.length) bcs.set(bsrc.data.node[bi[0]], bi[0]);
@@ -77,12 +100,15 @@ view.el.addEventListener('contextmenu', (e) => {
     }
   }
   // Source flow is offered only for the node dot directly under the cursor.
-  const under = bi.length ? bsrc.data.node[bi[0]] : (ni.length ? nsrc.data.node[ni[0]] : null);
+  const under = bi.length ? bsrc.data.node[bi[0]]
+    : (ni.length ? nsrc.data.node[ni[0]] : (gri.length ? grs.data.node[gri[0]] : null));
   const sfNode = (under != null && srcnodes.includes(under)) ? under : null;
-  if (!ci.length && !bcs.size && sfNode == null) { hide(); return; }
+  if (!ci.length && !bcs.size && sfNode == null && !gci.length && !gri.length) { hide(); return; }
   e.preventDefault();
   menu.replaceChildren();
   if (ci.length) addItem('View channel info', 'chan', ci[0]);
+  if (gci.length) addItem('View hydraulic structure', 'gatec', gci[0]);
+  if (gri.length) addItem('View hydraulic structure', 'gater', gri[0]);
   for (const [n, k] of bcs) addItem(bcs.size > 1 ? `View BC data (node ${n})` : 'View BC data', 'bc', k);
   if (sfNode != null) addItem('View source flow data', 'src', sfNode);
   menu.style.left = e.clientX + 'px';
@@ -101,6 +127,13 @@ Object.assign(tip.style, {
   boxShadow: '0 1px 6px rgba(0,0,0,0.2)',
 });
 document.body.appendChild(tip);
+const otip = tip.cloneNode(false);
+otip.style.display = 'none';
+document.body.appendChild(otip);
+const ntip = tip.cloneNode(false);
+ntip.style.display = 'none';
+document.body.appendChild(ntip);
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
 let lit = -1;
 const setHover = (i) => {
   if (i === lit) return;
@@ -108,8 +141,38 @@ const setHover = (i) => {
   hsrc.data = i < 0 ? {xs: [], ys: []} : {xs: [src.data.xs[i]], ys: [src.data.ys[i]]};
 };
 view.el.addEventListener('mousemove', (e) => {
+  // Output-location tooltip yields to the node, BC node and hydraulic-structure tooltips.
+  const oi = osrc.inspected.indices;
+  const blocked = bsrc.inspected.indices.length > 0 || nsrc.inspected.indices.length > 0
+                  || gcs.inspected.indices.length > 0 || grs.inspected.indices.length > 0;
+  // Node and BC-node tooltips yield to hydraulic structures (whose tooltip is drawn by Bokeh).
+  const bi0 = bsrc.inspected.indices, ni0 = nsrc.inspected.indices;
+  const overGate = gcs.inspected.indices.length > 0 || grs.inspected.indices.length > 0;
+  if (!overGate && (bi0.length || ni0.length)) {
+    ntip.innerHTML = bi0.length
+      ? `<b>Boundary node:</b> ${bsrc.data.node[bi0[0]]}<br><b>Inputs:</b> ${esc(bsrc.data.label[bi0[0]])}${bsrc.data.info[bi0[0]]}`
+      : `<b>Node:</b> ${nsrc.data.node[ni0[0]]}${nsrc.data.info[ni0[0]]}`;
+    ntip.style.left = (e.clientX + 14) + 'px';
+    ntip.style.top = (e.clientY + 14) + 'px';
+    ntip.style.display = 'block';
+  } else {
+    ntip.style.display = 'none';
+  }
+  if (oi.length && !blocked) {
+    otip.replaceChildren();
+    const b = document.createElement('b');
+    b.textContent = osrc.data.label[oi[0]];
+    otip.appendChild(b);
+    otip.style.left = (e.clientX + 14) + 'px';
+    otip.style.top = (e.clientY + 14) + 'px';
+    otip.style.display = 'block';
+  } else {
+    otip.style.display = 'none';
+  }
   const ci = src.inspected.indices;
-  const overNode = bsrc.inspected.indices.length > 0 || nsrc.inspected.indices.length > 0;
+  const overNode = bsrc.inspected.indices.length > 0 || nsrc.inspected.indices.length > 0
+                   || osrc.inspected.indices.length > 0 || gcs.inspected.indices.length > 0
+                   || grs.inspected.indices.length > 0;
   if (!ci.length || overNode) { tip.style.display = 'none'; setHover(-1); return; }
   const i = ci[0];
   setHover(i);
@@ -118,7 +181,9 @@ view.el.addEventListener('mousemove', (e) => {
   tip.style.top = (e.clientY + 14) + 'px';
   tip.style.display = 'block';
 });
-view.el.addEventListener('mouseleave', () => { tip.style.display = 'none'; setHover(-1); });
+view.el.addEventListener('mouseleave', () => {
+  tip.style.display = 'none'; otip.style.display = 'none'; ntip.style.display = 'none'; setHover(-1);
+});
 
 // Drag the cross-section pop-up by its title (.xs-drag); the popup host carries .xs-popup.
 let drag = null;
@@ -180,24 +245,58 @@ div.text = `Lat: ${Math.abs(lat).toFixed(5)}° ${lat >= 0 ? 'N' : 'S'} &nbsp;|&n
            `Lon: ${Math.abs(lon).toFixed(5)}° ${lon >= 0 ? 'E' : 'W'} &nbsp;|&nbsp; NAD 83`;
 """
 
-# Mercator stretches distances by 1/cos(lat); correct for it so the bar reads true miles.
-_SCALE_BAR_JS = """
-let w;
-try { w = p.inner_width; } catch (e) { return; }
-const x = p.x_range, y = p.y_range;
-if (!w || x.start == null || y.start == null) return;
-const R = 6378137;
-const lat = 2 * Math.atan(Math.exp((y.start + y.end) / 2 / R)) - Math.PI / 2;
-const mpp = (x.end - x.start) / w * Math.cos(lat);
-const target = 120 * mpp / 1609.344;
-const pow = Math.pow(10, Math.floor(Math.log10(target)));
-const f = target / pow;
-const miles = (f >= 5 ? 5 : f >= 2 ? 2 : 1) * pow;
-const px = miles * 1609.344 / mpp;
-const label = miles < 1 ? `${Math.round(miles * 5280)} ft` : `${miles} mi`;
-div.text = `<div style="width:${px}px;height:7px;border:2px solid #222;border-top:none"></div>` +
-           `<div style="display:flex;justify-content:space-between;width:${px}px;font-size:12px">` +
-           `<span>0</span><span>${label}</span></div>`;
+# Moves the selection highlight onto the selected gate icon (k: 0 = channel gate, 1 = reservoir gate).
+_GATE_SEL_JS = """
+const gd = gsel.data;
+if (gd.i.length) {
+  const gs = gd.k[0] === 0 ? sc : sr;
+  const gx = gs.data.x[gd.i[0]], gy = gs.data.y[gd.i[0]];
+  if (gd.x[0] !== gx || gd.y[0] !== gy) gsel.data = {i: gd.i, k: gd.k, x: [gx], y: [gy]};
+}
+"""
+
+# Gates scale with zoom (16 px wide at the home view, 12-40 px overall). Channel gates sit a fixed
+# screen distance from their node, along the channel, so they stay beside the node at any zoom.
+_GATE_SIZE_JS = """
+let w, h;
+try { w = p.inner_width; h = p.inner_height; } catch (e) { return; }
+const x = p.x_range;
+if (!w || !h || x.start == null || x.end == null) return;
+const home = Math.max(home_w, home_h * w / h);
+const s = Math.min(40, Math.max(12, 16 * Math.pow(home / (x.end - x.start), 0.18)));
+for (const r of [rc, rr]) {
+  r.glyph.w = {value: s, units: 'screen'};
+  r.glyph.h = {value: s * 0.62, units: 'screen'};
+}
+hc.glyph.size = s * 0.8;
+hr.glyph.size = s * 0.8;
+const off = (s * 0.5 + 8) * (x.end - x.start) / w;
+const d = sc.data;
+sc.data = Object.assign({}, d, {
+  x: Array.from(d.nx, (v, i) => v + d.dx[i] * off),
+  y: Array.from(d.ny, (v, i) => v + d.dy[i] * off),
+});
+for (const [r, pad] of [[gouter, 20], [ginner, 12], [gline, 5]]) {
+  r.glyph.width = {value: s + pad, units: 'screen'};
+  r.glyph.height = {value: s * 0.62 + pad, units: 'screen'};
+}
+""" + _GATE_SEL_JS
+
+# Pins scale with zoom (9 px tall at the home view, 6-30 px overall). The hover target
+# is shifted up to the pin head, since the pin's tip sits on the location.
+_OUTPUT_SIZE_JS = """
+let w, h;
+try { w = p.inner_width; h = p.inner_height; } catch (e) { return; }
+const x = p.x_range;
+if (!w || !h || x.start == null || x.end == null) return;
+const home = Math.max(home_w, home_h * w / h);
+const ph = Math.min(30, Math.max(6, 9 * Math.pow(home / (x.end - x.start), 0.45)));
+rend.glyph.h = {value: ph, units: 'screen'};
+rend.glyph.w = {value: ph * 0.69, units: 'screen'};
+const mpp = (x.end - x.start) / w;
+const d = hit_src.data;
+hit_src.data = {x: d.x, y0: d.y0, y: Array.from(d.y0, (v) => v + ph * 0.6 * mpp), label: d.label};
+hit.glyph.size = ph * 0.75;
 """
 
 _ZOOM_JS = """
@@ -211,11 +310,12 @@ _FIT_LEFT_JS = """
 let w, h;
 try { w = p.inner_width; h = p.inner_height; } catch (e) { return; }
 if (!cb_obj.text || !w || !h) return;
-const [x0, x1, y0, y1, , res] = JSON.parse(cb_obj.text);
-const avail = Math.max(w - (res == null ? reserve : res), 240);  // map pixels left of any open pop-up
+const [x0, x1, y0, y1, , res, lft] = JSON.parse(cb_obj.text);
+const left = lft || 0;  // pixels covered by the Layers card on the left
+const avail = Math.max(w - left - (res == null ? reserve : res), 240);  // map pixels between the Layers card and any pop-up
 const mpp = Math.max((x1 - x0) / avail, (y1 - y0) / h);
 const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-p.x_range.start = cx - mpp * avail / 2; p.x_range.end = p.x_range.start + mpp * w;
+p.x_range.start = cx - mpp * (left + avail / 2); p.x_range.end = p.x_range.start + mpp * w;
 p.y_range.start = cy - mpp * h / 2; p.y_range.end = cy + mpp * h / 2;
 """
 
@@ -228,6 +328,67 @@ const pad = Math.max(x1 - x0, y1 - y0, 1000) * 1.5;
 p.x_range.start = x0 - pad; p.x_range.end = x1 + pad;
 p.y_range.start = y0 - pad; p.y_range.end = y1 + pad;
 """
+
+
+@functools.lru_cache(maxsize=4)
+def _load_output_locations(echo_file):
+    """Return [(names, chan_no, distance_ft or None for 'length')] from OUTPUT_CHANNEL, one per location."""
+    table = _load_echo(echo_file).get("OUTPUT_CHANNEL")
+    if table is None:
+        return []
+    locs = {}
+    for rec in table.to_dict("records"):
+        dist = str(rec["DISTANCE"]).strip()
+        key = (int(rec["CHAN_NO"]), None if dist.lower() == "length" else float(dist))
+        names = locs.setdefault(key, [])
+        if str(rec["NAME"]) not in names:
+            names.append(str(rec["NAME"]))
+    return [(", ".join(names), chan, dist) for (chan, dist), names in locs.items()]
+
+
+@functools.lru_cache(maxsize=4)
+def _load_gates(echo_file):
+    """Return [(name, from_obj, from_identifier, to_node)] from the GATE table."""
+    table = _load_echo(echo_file).get("GATE")
+    if table is None:
+        return []
+    return [
+        (str(r["NAME"]), str(r["FROM_OBJ"]).lower(), str(r["FROM_IDENTIFIER"]), int(r["TO_NODE"]))
+        for r in table.to_dict("records")
+    ]
+
+
+@functools.lru_cache(maxsize=4)
+def _load_gate_devices(echo_file):
+    """Return {gate name: (weir device rows, pipe device rows)} from GATE_WEIR_DEVICE / GATE_PIPE_DEVICE."""
+    echo = _load_echo(echo_file)
+    devices = {}
+    for k, table_name in enumerate(("GATE_WEIR_DEVICE", "GATE_PIPE_DEVICE")):
+        table = echo.get(table_name)
+        if table is None:
+            continue
+        for rec in table.to_dict("records"):
+            devices.setdefault(str(rec["GATE_NAME"]), ([], []))[k].append(rec)
+    return devices
+
+
+@functools.lru_cache(maxsize=4)
+def _load_oprules(echo_file):
+    """Return (parsed operating rules, {lower-case series name: OPRULE_TIME_SERIES row})."""
+    echo = _load_echo(echo_file)
+
+    def records(name):
+        table = echo.get(name)
+        return [] if table is None else table.to_dict("records")
+
+    expressions = {str(r["NAME"]): str(r["DEFINITION"]) for r in records("OPRULE_EXPRESSION")}
+    series = {
+        str(r["NAME"]).lower(): {
+            "name": str(r["NAME"]), "fillin": str(r["FILLIN"]), "file": str(r["FILE"]), "path": str(r["PATH"]),
+        }
+        for r in records("OPRULE_TIME_SERIES")
+    }
+    return parse_rules(records("OPERATING_RULE"), expressions), series
 
 
 @functools.lru_cache(maxsize=4)
@@ -347,7 +508,9 @@ def _read_bc_series(echo_file, dss_name, path):
     with pyhecdss.DSSFile(dss_path) as dss:
         parts = []
         for pathname in dss.get_pathnames(hits):
-            df, units, _ = dss.read_rts(pathname)
+            # Gate schedules are irregular (E part IR-*), which read_rts cannot read.
+            reader = dss.read_its if pathname.split("/")[5].upper().startswith("IR-") else dss.read_rts
+            df, units, _ = reader(pathname)
             parts.append(df)
     df = pd.concat(parts) if len(parts) > 1 else parts[0]
     if isinstance(df.index, pd.PeriodIndex):
@@ -436,6 +599,10 @@ def _swatch(kind):
     elif kind in ("dicu", "other"):
         color = _SOURCE_DICU if kind == "dicu" else _SOURCE_OTHER
         css = f"width:8px;height:8px;border-radius:50%;background:{color};margin:1px 0 0 3px"
+    elif kind == "pin":
+        return pn.pane.HTML(f"<img src='{_PIN_URL}' height='18' style='margin-top:1px'>", margin=(11, 4, 0, 0), width=30)
+    elif kind == "gate":
+        return pn.pane.HTML(f"<img src='{_GATE_URL}' height='16' style='margin-top:2px'>", margin=(11, 4, 0, 0), width=30)
     else:
         css = f"width:9px;height:9px;border-radius:50%;border:2px solid {_NODE_COLOR}"
     return pn.pane.HTML(f"<div style='{css}'></div>", margin=(12, 4, 0, 0), width=30)
@@ -530,6 +697,114 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         "x", "y", source=src_sel_src, size=24, fill_color=_SOURCE_OTHER, fill_alpha=0.12,
         line_color=_SOURCE_OTHER, line_width=3,
     )
+
+    # Output locations: one pin per (channel, distance), placed along the channel from the upnode.
+    chan_geom = {int(n): LineString(ln) for n, ln in zip(chans["CHAN_NO"], lines)}
+    chan_length = dict(zip(chans["CHAN_NO"].astype(int), chans["LENGTH"]))
+    out_x, out_y, out_label = [], [], []
+    for names, chan, dist in _load_output_locations(echo_file):
+        if chan not in chan_geom:
+            continue
+        length = float(chan_length[chan])
+        dist_ft = length if dist is None else dist
+        pt = chan_geom[chan].interpolate(min(max(dist_ft / length, 0.0), 1.0), normalized=True)
+        out_x.append(pt.x)
+        out_y.append(pt.y)
+        out_label.append(f"{names} \u2014 channel {chan} @ {dist_ft:,.0f} ft")
+    out_src = ColumnDataSource({"x": out_x, "y": out_y, "url": [_PIN_URL] * len(out_x)})
+    out_r = p.image_url(
+        url="url", x="x", y="y", w=6, h=9, anchor="bottom_center",
+        w_units="screen", h_units="screen", source=out_src,
+    )
+    out_hit_src = ColumnDataSource({"x": out_x, "y0": out_y, "y": out_y, "label": out_label})
+    out_hit = p.scatter("x", "y", source=out_hit_src, size=13, fill_alpha=0, line_alpha=0)
+    out_size_cb = CustomJS(
+        args=dict(
+            p=p, rend=out_r, hit=out_hit, hit_src=out_hit_src,
+            home_w=home_x[1] - home_x[0], home_h=home_y[1] - home_y[0],
+        ),
+        code=_OUTPUT_SIZE_JS,
+    )
+    for rng in (p.x_range, p.y_range):
+        rng.js_on_change("start", out_size_cb)
+        rng.js_on_change("end", out_size_cb)
+    p.js_on_change("inner_width", out_size_cb)
+
+    # Gates: channel gates sit beside their node along the channel, reservoir gates sit on the node.
+    chan_pos = {int(n): i for i, n in enumerate(chans["CHAN_NO"])}
+    gate_c, gate_r = {}, {}
+    for name, obj, ident, node in _load_gates(echo_file):
+        if obj == "channel" and ident.isdigit() and int(ident) in chan_pos:
+            ci = chan_pos[int(ident)]
+            ln = lines[ci]
+            up, down = int(chans["UPNODE"].iloc[ci]), int(chans["DOWNNODE"].iloc[ci])
+            if node == up:
+                (x0, y0), (x1, y1) = ln[0][:2], ln[1][:2]
+            elif node == down:
+                (x0, y0), (x1, y1) = ln[-1][:2], ln[-2][:2]
+            else:
+                continue
+            norm = math.hypot(x1 - x0, y1 - y0) or 1.0
+            rec = gate_c.setdefault((ci, node), {
+                "nx": x0, "ny": y0, "dx": (x1 - x0) / norm, "dy": (y1 - y0) / norm,
+                "chan": int(ident), "up": up, "down": down, "ci": ci, "node": node, "names": [],
+            })
+            rec["names"].append(name)
+        elif obj == "reservoir" and node in node_pos:
+            gate_r.setdefault(node, []).append((name, ident))
+    gate_c_recs = list(gate_c.values())
+    gate_c_src = ColumnDataSource({
+        "x": [r["nx"] for r in gate_c_recs], "y": [r["ny"] for r in gate_c_recs],
+        "nx": [r["nx"] for r in gate_c_recs], "ny": [r["ny"] for r in gate_c_recs],
+        "dx": [r["dx"] for r in gate_c_recs], "dy": [r["dy"] for r in gate_c_recs],
+        "chan": [r["chan"] for r in gate_c_recs], "up": [r["up"] for r in gate_c_recs],
+        "down": [r["down"] for r in gate_c_recs], "ci": [r["ci"] for r in gate_c_recs],
+        "name": [", ".join(r["names"]) for r in gate_c_recs],
+        "url": [_GATE_URL] * len(gate_c_recs),
+    })
+    res_nodes = sorted(gate_r)
+    gate_r_src = ColumnDataSource({
+        "x": [node_pos[n][0] for n in res_nodes], "y": [node_pos[n][1] for n in res_nodes],
+        "node": res_nodes, "name": [", ".join(n for n, _ in gate_r[k]) for k in res_nodes],
+        "info": [_source_info(n) for n in res_nodes], "url": [_GATE_URL] * len(res_nodes),
+    })
+    # Red glow behind (and outline around) the gate whose window is open, like the selected channel.
+    gate_sel_src = ColumnDataSource({"i": [], "k": [], "x": [], "y": []})
+    gate_glow = [
+        p.rect(
+            "x", "y", width=40, height=30, width_units="screen", height_units="screen", source=gate_sel_src,
+            fill_color=_SELECT_COLOR, fill_alpha=alpha, line_alpha=0,
+        )
+        for alpha in (0.15, 0.3)
+    ]
+    gate_images = []
+    for gsrc in (gate_c_src, gate_r_src):
+        gate_images.append(p.image_url(
+            url="url", x="x", y="y", w=16, h=10, anchor="center",
+            w_units="screen", h_units="screen", source=gsrc,
+        ))
+    gate_c_r, gate_r_r = gate_images
+    gate_line = p.rect(
+        "x", "y", width=20, height=14, width_units="screen", height_units="screen", source=gate_sel_src,
+        fill_alpha=0, line_color=_SELECT_COLOR, line_width=3,
+    )
+    gate_c_hit = p.scatter("x", "y", source=gate_c_src, marker="square", size=18, fill_alpha=0, line_alpha=0)
+    gate_r_hit = p.scatter("x", "y", source=gate_r_src, marker="square", size=18, fill_alpha=0, line_alpha=0)
+    gate_size_cb = CustomJS(
+        args=dict(
+            p=p, rc=gate_c_r, rr=gate_r_r, hc=gate_c_hit, hr=gate_r_hit, sc=gate_c_src, sr=gate_r_src,
+            gouter=gate_glow[0], ginner=gate_glow[1], gline=gate_line, gsel=gate_sel_src,
+            home_w=home_x[1] - home_x[0], home_h=home_y[1] - home_y[0],
+        ),
+        code=_GATE_SIZE_JS,
+    )
+    for rng in (p.x_range, p.y_range):
+        rng.js_on_change("start", gate_size_cb)
+        rng.js_on_change("end", gate_size_cb)
+    p.js_on_change("inner_width", gate_size_cb)
+    gate_sel_src.js_on_change(
+        "data", CustomJS(args=dict(gsel=gate_sel_src, sc=gate_c_src, sr=gate_r_src), code=_GATE_SEL_JS)
+    )
     bc_rows = {n: r for n, r in _load_boundary_rows(echo_file).items() if n in node_pos}
     bnd_nodes = sorted(bc_rows)
     bnd_src = ColumnDataSource({
@@ -550,8 +825,9 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     )
     # Transparent, larger hit target so the tiny triangle is easy to hover and right-click.
     bnd_hit = p.scatter("x", "y", source=bnd_src, size=16, fill_alpha=0, line_alpha=0)
-    # BC nodes get only the boundary tooltip, so the plain node tooltip hits non-BC nodes only.
-    plain = [(n, x, y) for n, (x, y) in node_pos.items() if n not in bc_rows]
+    # BC nodes get only the boundary tooltip, so the plain node tooltip hits non-BC nodes only;
+    # reservoir-gate nodes are also skipped because the gate tooltip already shows the node.
+    plain = [(n, x, y) for n, (x, y) in node_pos.items() if n not in bc_rows and n not in gate_r]
     node_hit_src = ColumnDataSource({
         "x": [x for _, x, _ in plain], "y": [y for _, _, y in plain], "node": [n for n, _, _ in plain],
         "info": [_source_info(n) for n, _, _ in plain],
@@ -574,7 +850,9 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         MouseMove,
         CustomJS(
             args=dict(
-                p=p, src=chan_src, bsrc=bnd_src, nsrc=node_hit_src, hsrc=hover_src, srcnodes=sorted(src_rows),
+                p=p, src=chan_src, bsrc=bnd_src, nsrc=node_hit_src, hsrc=hover_src, osrc=out_hit_src,
+                gcs=gate_c_src, grs=gate_r_src,
+                srcnodes=sorted(src_rows),
                 req=req_src, fit=fit_div,
             ),
             code=_CONTEXT_MENU_JS,
@@ -583,11 +861,14 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     p.add_tools(
         TapTool(renderers=[chan_r]),
         HoverTool(renderers=[chan_r], tooltips=None),  # inspection only; the tooltip is drawn in JS
-        HoverTool(renderers=[node_hit], tooltips="<b>Node:</b> @node@info{safe}"),
+        HoverTool(renderers=[out_hit], tooltips=None),  # inspection only; the tooltip is drawn in JS
         HoverTool(
-            renderers=[bnd_hit],
-            tooltips="<b>Boundary node:</b> @node<br><b>Inputs:</b> @label@info{safe}",
+            renderers=[gate_c_hit],
+            tooltips="<b>Channel:</b> @chan<br><b>Up \u2192 Down:</b> @up \u2192 @down<br><b>Gate:</b> @name",
         ),
+        HoverTool(renderers=[gate_r_hit], tooltips="<b>Node:</b> @node<br><b>Gate:</b> @name@info{safe}"),
+        HoverTool(renderers=[node_hit], tooltips=None),  # tooltip drawn in JS
+        HoverTool(renderers=[bnd_hit], tooltips=None),  # tooltip drawn in JS
     )
 
     # --- Channel information card -------------------------------------------------
@@ -631,9 +912,10 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     state = {"ci": 0, "dists": [], "n": 0}
 
     def _fit(x0, x1, y0, y1, reserve=None):
-        """Frame an extent; ``reserve`` is the pixel width to keep clear on the right (default: pop-up width)."""
+        """Frame an extent; ``reserve`` is the pixel width to keep clear on the right (default: pop-up width); the Layers card keeps the left clear."""
         state["n"] += 1  # nonce so an identical extent still fires a change event
-        fit_div.text = json.dumps([x0, x1, y0, y1, state["n"], reserve])
+        left = 260 if layers.visible and layers_body.visible else 0
+        fit_div.text = json.dumps([x0, x1, y0, y1, state["n"], reserve, left])
 
     def _set_markers(selected):
         line = line_geoms[state["ci"]]
@@ -694,7 +976,19 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     src_panel = _overlay(src_popup.panel, top=16, right=76)
     src_panel.styles = {**src_panel.styles, "z-index": "20"}
 
-    popups = [popup, bc_popup, src_popup]
+    gate_devices = _load_gate_devices(echo_file)
+    oprules, oprule_series = _load_oprules(echo_file)
+    gate_popup = GatePopup(
+        on_close=lambda: setattr(gate_sel_src, "data", {"i": [], "k": [], "x": [], "y": []}),
+        load_devices=lambda name: gate_devices.get(name, ([], [])),
+        load_rules=lambda name: summarise_gate(oprules, name),
+        series_rows=oprule_series,
+        load_series=lambda row: _read_bc_series(echo_file, row["file"], row["path"]),
+    )
+    gate_panel = _overlay(gate_popup.panel, top=16, right=76)
+    gate_panel.styles = {**gate_panel.styles, "z-index": "20"}
+
+    popups = [popup, bc_popup, src_popup, gate_popup]
 
     def _close_others(keep):
         for other in popups:
@@ -724,6 +1018,24 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
             half = 3000
             _fit(x - half, x + half, y - half, y + half)
             return
+        if kind in ("gatec", "gater"):
+            _close_others(gate_popup)
+            if kind == "gatec":
+                rec = gate_c_recs[idx]
+                x, y = rec["nx"], rec["ny"]
+                rows = [
+                    {"name": n, "kind": "Channel", "where": rec["chan"], "node": rec["node"]}
+                    for n in rec["names"]
+                ]
+            else:
+                node = res_nodes[idx]
+                x, y = node_pos[node]
+                rows = [{"name": n, "kind": "Reservoir", "where": r, "node": node} for n, r in gate_r[node]]
+            gate_popup.show(rows)
+            gate_sel_src.data = {"i": [idx], "k": [0 if kind == "gatec" else 1], "x": [x], "y": [y]}
+            half = 3000
+            _fit(x - half, x + half, y - half, y + half)
+            return
         _close_others(popup)
         ci = idx
         chan_no = int(chan_src.data["CHAN_NO"][ci])
@@ -743,6 +1055,8 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     bnd_cb = pn.widgets.Checkbox(name="Boundary Nodes", value=True, margin=(8, 0))
     dicu_cb = pn.widgets.Checkbox(name="Source Flow (DICU)", value=True, margin=(8, 0))
     other_cb = pn.widgets.Checkbox(name="Source Flow (other)", value=True, margin=(8, 0))
+    out_cb = pn.widgets.Checkbox(name="Output Locations", value=True, margin=(8, 0))
+    gate_cb = pn.widgets.Checkbox(name="Hydraulic Structures", value=True, margin=(8, 0))
     chan_cb.jslink(chan_r, value="visible")
     chan_cb.jslink(hover_r, value="visible")
     chan_cb.jslink(sel_r, value="visible")
@@ -756,15 +1070,21 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     bnd_cb.jslink(bc_ring, value="visible")
     dicu_cb.jslink(dicu_r, value="visible")
     other_cb.jslink(other_r, value="visible")
+    out_cb.jslink(out_r, value="visible")
+    out_cb.jslink(out_hit, value="visible")
+    for gate_glyph in (gate_c_r, gate_r_r, gate_c_hit, gate_r_hit, *gate_glow, gate_line):
+        gate_cb.jslink(gate_glyph, value="visible")
 
     collapse_btn = pn.widgets.Button(icon="chevron-up", button_type="light", width=36, height=36, margin=0)
     layers_body = pn.Column(
         pn.Row(chan_cb, pn.HSpacer(), _swatch("line"), margin=0),
         pn.Row(node_cb, pn.HSpacer(), _swatch("circle"), margin=0),
         pn.Row(dir_cb, pn.HSpacer(), _swatch("arrow"), margin=0),
+        pn.Row(gate_cb, pn.HSpacer(), _swatch("gate"), margin=0),
         pn.Row(bnd_cb, pn.HSpacer(), _swatch("triangle"), margin=0),
         pn.Row(dicu_cb, pn.HSpacer(), _swatch("dicu"), margin=0),
         pn.Row(other_cb, pn.HSpacer(), _swatch("other"), margin=0),
+        pn.Row(out_cb, pn.HSpacer(), _swatch("pin"), margin=0),
         margin=0,
     )
 
@@ -796,14 +1116,8 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     )
     _overlay(controls, top=16, right=16)
 
-    # --- Scale bar and coordinate read-out ------------------------------------------
-    scale_div = Div(text="")
+    # --- Coordinate read-out --------------------------------------------------------
     coord_div = Div(text="Lat: --- &nbsp;|&nbsp; Lon: --- &nbsp;|&nbsp; NAD 83")
-    scale_cb = CustomJS(args=dict(p=p, div=scale_div), code=_SCALE_BAR_JS)
-    for rng in (p.x_range, p.y_range):
-        rng.js_on_change("start", scale_cb)
-        rng.js_on_change("end", scale_cb)
-    p.js_on_change("inner_width", scale_cb)
     p.js_on_event(MouseMove, CustomJS(args=dict(div=coord_div), code=_MOUSE_COORD_JS))
 
     # --- Search -----------------------------------------------------------------------
@@ -889,11 +1203,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
 
     map_area = pn.Column(
         pn.pane.Bokeh(p, sizing_mode="stretch_both", margin=0),
-        layers, info_card, controls, popup_panel, bc_panel, src_panel, search_card,
-        _overlay(
-            pn.pane.Bokeh(scale_div, width=170, styles=_card_styles(padding="8px 12px")),
-            bottom=76, left=16,
-        ),
+        layers, info_card, controls, popup_panel, bc_panel, src_panel, gate_panel, search_card,
         _overlay(
             pn.pane.Bokeh(coord_div, width=360, styles=_card_styles(padding="10px 14px", color="#555")),
             bottom=16, left=16,
@@ -952,7 +1262,11 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
 @click.option("--port", default=0, show_default=True, type=int, help="Server port (0 = random).")
 def input_viewer(echo_file, channel_geo, node_geo, port):
     """Interactive map of DSM2 channels and nodes; click a channel for its properties."""
-    pn.extension()
+    pn.extension(
+        notifications=True,
+        disconnect_notification="Connection to the server was lost (timed out or server stopped). "
+        "Relaunch <b>dsm2ui input_viewer</b> if needed, then reload this page.",
+    )
     # Parse once up front; each browser session then builds its own widgets from the cache.
     _load_network(echo_file, channel_geo or _DEFAULT_CHANNEL_GEO, node_geo or _DEFAULT_NODE_GEO)
     pn.serve(
