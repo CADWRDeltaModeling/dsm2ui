@@ -39,11 +39,13 @@ def _as_timestamp(v):
 class BCPopup:
     """Pop-up showing the DSS time series behind a boundary node; call :meth:`show` to open it."""
 
-    def __init__(self, on_close, load_series, title="BOUNDARY CONDITION", input_label="Boundary input"):
-        """``load_series(row)`` must return ``(DataFrame with one column, units, model run window)`` for a row."""
+    def __init__(self, on_close, load_series, title="BOUNDARY CONDITION", input_label="Boundary input", rules_for=None):
+        """``load_series(row)`` must return ``(DataFrame with one column, units, model run window)`` for a row;
+        ``rules_for(row)`` may return Panel objects describing the operating rules that act on the row (or ``[]``)."""
         self._heading = title
         self._on_close = on_close
         self._load = load_series
+        self._rules_for = rules_for
         self._rows = []
         self._series = None  # full original record
         self._shown = None  # what the chart currently displays
@@ -112,8 +114,13 @@ class BCPopup:
             callback=self._csv, filename="bc_data.csv", label="Export CSV",
             icon="download", button_type="light", margin=0, auto=True,
         )
+        self._rules_title = pn.pane.HTML(
+            "<div style='font-size:11px;font-weight:700;letter-spacing:.4px;color:#222;margin:10px 0 2px'>"
+            "OPERATING RULES</div>", margin=0, visible=False,
+        )
+        self._rules = pn.Column(margin=0, width=600)
         self._body = pn.Column(
-            self._select, self._message, self._info,
+            self._select, self._message, self._info, self._rules_title, self._rules,
             pn.Row(
                 pn.pane.HTML(
                     "<div style='font-size:11px;font-weight:700;letter-spacing:.4px;color:#222'>TIME SERIES</div>",
@@ -177,6 +184,9 @@ class BCPopup:
             + sep.join(parts) + "</div>"
         )
         self._row = row
+        objs = self._rules_for(row) if self._rules_for else []
+        self._rules[:] = objs
+        self._rules_title.visible = bool(objs)
         self._export.filename = f"bc_node_{row['node']}_{row['name']}.csv"
         try:
             df, units, window = self._load(row)

@@ -26,7 +26,8 @@ from shapely.geometry import LineString
 
 from dsm2ui.bc_popup import BCPopup
 from dsm2ui.gate_popup import GatePopup
-from dsm2ui.oprule_parse import parse_rules, summarise_gate
+from dsm2ui.oprule_parse import parse_rules, summarise_ext_flow, summarise_gate
+from dsm2ui.oprule_view import RuleSection
 from dsm2ui.xsection_popup import POPUP_WIDTH, XSectionPopup
 
 _GIS_DIR = pathlib.Path(__file__).parent / "dsm2gis"
@@ -961,9 +962,18 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     popup_panel = _overlay(popup.panel, top=16, right=76)
     popup_panel.styles = {**popup_panel.styles, "z-index": "20"}
 
+    oprules, oprule_series = _load_oprules(echo_file)
+    rule_section = RuleSection(oprule_series, lambda row: _read_bc_series(echo_file, row["file"], row["path"]))
+
+    def _flow_rules(row):
+        """Operating rules that set this boundary / source flow; their charts skip the series already plotted."""
+        view = summarise_ext_flow(oprules, row["name"])
+        return rule_section.layout(view, skip=(row["file"], row["path"])) if view["devices"] else []
+
     bc_popup = BCPopup(
         on_close=lambda: setattr(bc_sel_src, "data", {"x": [], "y": []}),
         load_series=lambda row: _read_bc_series(echo_file, row["file"], row["path"]),
+        rules_for=_flow_rules,
     )
     bc_panel = _overlay(bc_popup.panel, top=16, right=76)
     bc_panel.styles = {**bc_panel.styles, "z-index": "20"}
@@ -971,19 +981,17 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     src_popup = BCPopup(
         on_close=lambda: setattr(src_sel_src, "data", {"x": [], "y": []}),
         load_series=lambda row: _read_bc_series(echo_file, row["file"], row["path"]),
-        title="SOURCE FLOW", input_label="Source flow input",
+        title="SOURCE FLOW", input_label="Source flow input", rules_for=_flow_rules,
     )
     src_panel = _overlay(src_popup.panel, top=16, right=76)
     src_panel.styles = {**src_panel.styles, "z-index": "20"}
 
     gate_devices = _load_gate_devices(echo_file)
-    oprules, oprule_series = _load_oprules(echo_file)
     gate_popup = GatePopup(
         on_close=lambda: setattr(gate_sel_src, "data", {"i": [], "k": [], "x": [], "y": []}),
         load_devices=lambda name: gate_devices.get(name, ([], [])),
         load_rules=lambda name: summarise_gate(oprules, name),
-        series_rows=oprule_series,
-        load_series=lambda row: _read_bc_series(echo_file, row["file"], row["path"]),
+        rule_section=rule_section,
     )
     gate_panel = _overlay(gate_popup.panel, top=16, right=76)
     gate_panel.styles = {**gate_panel.styles, "z-index": "20"}

@@ -33,6 +33,7 @@ CONTROLS = {
     "gate_width": ("Width (gate_width)", " ft"),
     "gate_height": ("Height (gate_height)", " ft"),
     "gate_nduplicate": ("Number of duplicates (gate_nduplicate)", ""),
+    "ext_flow": ("External flow (ext_flow)", " cfs"),
 }
 DIRECTION_TEXT = {"from_node": "from node", "to_node": "to node", "to_from_node": "from + to node", "bidir": "from + to node"}
 
@@ -54,6 +55,7 @@ def describe(text):
     text = _RES_FLOW_RE.sub(lambda m: f"flow from reservoir {m.group(1)} to node {m.group(2)}", text)
     text = _TS_RE.sub(lambda m: mark(m.group(1)), text)
     text = re.sub(_OPS, lambda m: _OP_TEXT[m.group(0)], text)
+    text = re.sub("\\s*([\u2264\u2265\u2260<>])\\s*", r" \1 ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -94,7 +96,7 @@ def parse_action(action):
                 k, v = kv.split("=", 1)
                 ids[k.strip().lower()] = v.strip().strip("'\"")
         targets.append({
-            "var": m.group(1).lower(), "gate": ids.get("gate"), "device": ids.get("device"),
+            "var": m.group(1).lower(), "gate": ids.get("gate"), "name": ids.get("name"), "device": ids.get("device"),
             "direction": ids.get("direction", "").lower(), "value": _parse_value(m.group(3).strip()),
             "ramp": int(m.group(4)) if m.group(4) else None,
         })
@@ -152,10 +154,12 @@ def parse_rules(rows, expressions):
         targets = parse_action(action)
         hint = re.search(r"gate\s*=\s*([\w@.]+)", action, re.I)
         dev = re.search(r"device\s*=\s*([\w@.]+)", action, re.I)
+        flow = re.search(r"ext_flow\s*\(\s*name\s*=\s*([\w@.]+)", action, re.I)
         rules.append({
             "name": str(row["NAME"]), "action": action, "trigger": trigger, "targets": targets or [],
             "summarised": targets is not None, "when": parse_trigger(trigger, expressions),
             "hint_gate": hint.group(1) if hint else None, "hint_device": dev.group(1) if dev else None,
+            "hint_name": flow.group(1) if flow else None,
         })
     return rules
 
@@ -164,15 +168,16 @@ def _norm(text):
     return re.sub(r"\s+", "", text).lower()
 
 
-def gate_entries(rules, gate):
-    """Entries (one per target) of the rules that act on ``gate``; twin from/to-node entries are merged."""
-    g = gate.lower()
+def _entries(rules, field, value):
+    """Entries (one per target) of the rules whose target has ``field`` (gate or name) equal to ``value``;
+    twin from/to-node entries are merged."""
+    g = value.lower()
     merged = {}
     entries = []
     for rule in rules:
         if rule["summarised"]:
             for t in rule["targets"]:
-                if (t["gate"] or "").lower() != g:
+                if (t[field] or "").lower() != g:
                     continue
                 key = (t["var"], t["device"], _norm(rule["trigger"]), _norm(t["value"]["text"]), t["ramp"])
                 entry = merged.get(key)
@@ -187,13 +192,17 @@ def gate_entries(rules, gate):
                     entry["directions"].append(t["direction"])
                 if rule["name"] not in entry["rules"]:
                     entry["rules"].append(rule["name"])
-        elif (rule["hint_gate"] or "").lower() == g:
+        elif (rule["hint_gate" if field == "gate" else "hint_name"] or "").lower() == g:
             entries.append({
                 "summarised": False, "var": None, "device": rule["hint_device"], "directions": [],
                 "value": None, "ramp": None, "when": rule["when"], "rules": [rule["name"]],
                 "trigger": rule["trigger"], "action": rule["action"],
             })
     return entries
+
+
+def gate_entries(rules, gate):
+    return _entries(rules, "gate", gate)
 
 
 def _group_key(entry):
@@ -204,6 +213,20 @@ def _group_key(entry):
 def summarise_gate(rules, gate):
     """Build the view model for one gate: devices -> controls -> items, plus the series it refers to."""
     entries = gate_entries(rules, gate)
+    return _summarise(entries)
+
+
+def summarise_ext_flow(rules, name):
+    """View model for the rules that set the external flow (boundary or source flow) called ``name``."""
+    view = _summarise(_entries(rules, "name", name))
+    view["scope"] = "input"
+    for dev in view["devices"]:
+        dev["heading"] = None
+    return view
+
+
+def _summarise(entries):
+    """Group entries into devices -> controls -> items and collect the series they refer to."""
     devices = {}
     for e in entries:
         devices.setdefault(e["device"], []).append(e)

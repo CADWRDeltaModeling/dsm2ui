@@ -1,4 +1,6 @@
-from dsm2ui.oprule_parse import describe, parse_action, parse_rules, parse_trigger, summarise_gate, value_text
+from dsm2ui.oprule_parse import (
+    describe, parse_action, parse_rules, parse_trigger, summarise_ext_flow, summarise_gate, value_text,
+)
 
 EXPRESSIONS = {
     "mscs_velclose": "chan_vel(channel=512,dist=5750) < -0.1",
@@ -69,3 +71,16 @@ def test_unsummarised_rule_is_kept_as_raw():
     rules = parse_rules([_rule("r", "SET gate_op(gate=G,device=d) TO 1 THEN SET gate_op(gate=G,device=d) TO 0", "TRUE")], {})
     (item,) = summarise_gate(rules, "G")["devices"][0]["controls"][0]["items"]
     assert not item["summarised"]
+
+
+def test_ext_flow_rules_are_found_by_name():
+    rules = parse_rules([
+        _rule("off", "SET ext_flow(name=dicu_div_151) TO 0.0", "chan_stage(channel=185, dist=0) <= 2.0"),
+        _rule("on", "SET ext_flow(name=dicu_div_151) TO -1*ts(name=dicu_div_151_flow)", "chan_stage(channel=185, dist=0) >2.2"),
+        _rule("other", "SET ext_flow(name=sjr) TO 1", "TRUE"),
+    ], {})
+    view = summarise_ext_flow(rules, "DICU_DIV_151")
+    assert view["n_rules"] == 2 and view["series"] == ["dicu_div_151_flow"] and view["scope"] == "input"
+    items = view["devices"][0]["controls"][0]["items"]
+    assert [i["when"]["text"] for i in items] == ["stage in channel 185 at 0 ft \u2264 2.0", "stage in channel 185 at 0 ft > 2.2"]
+    assert summarise_ext_flow(rules, "nothing")["devices"] == []
