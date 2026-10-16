@@ -429,21 +429,46 @@ def _load_boundary_rows(echo_file):
 
 
 @functools.lru_cache(maxsize=4)
+def _reservoir_nodes(echo_file):
+    """Return {lower-case reservoir name: sorted nodes it touches} from RESERVOIR_CONNECTION and reservoir gates."""
+    nodes = {}
+    conn = _load_echo(echo_file).get("RESERVOIR_CONNECTION")
+    for rec in ([] if conn is None else conn.to_dict("records")):
+        nodes.setdefault(str(rec["RES_NAME"]).lower(), set()).add(int(rec["NODE"]))
+    for _, obj, ident, node in _load_gates(echo_file):
+        if obj == "reservoir":
+            nodes.setdefault(ident.lower(), set()).add(node)
+    return {k: sorted(v) for k, v in nodes.items()}
+
+
+@functools.lru_cache(maxsize=4)
 def _load_source_rows(echo_file):
-    """Return {node: [source-flow row dicts]} from SOURCE_FLOW; DICU sources are those named ``dicu_*``."""
-    table = _load_echo(echo_file).get("SOURCE_FLOW")
+    """Return {node: [source-flow row dicts]} from SOURCE_FLOW and SOURCE_FLOW_RESERVOIR; DICU sources are named ``dicu_*``.
+
+    A reservoir source flow is listed at every node its reservoir touches.
+    """
+    echo = _load_echo(echo_file)
     rows = {}
-    if table is None:
-        return rows
-    for rec in table.to_dict("records"):
-        node = int(rec["NODE"])
+
+    def add(node, rec, reservoir=None):
         name = str(rec["NAME"])
         group = "DICU" if name.lower().startswith("dicu") else "Other"
+        extra = [("Group", group)] + ([("Reservoir", reservoir)] if reservoir else [])
         rows.setdefault(node, []).append({
             "name": name, "kind": "flow", "node": node, "sign": int(rec["SIGN"]),
-            "fillin": str(rec["FILLIN"]), "file": str(rec["FILE"]), "path": str(rec["PATH"]),
-            "group": group, "label": f"{name} ({group})", "extra": [("Group", group)],
+            "fillin": str(rec["FILLIN"]), "file": str(rec["FILE"]), "path": str(rec["PATH"]), "group": group,
+            "label": f"{name} ({group}{', reservoir ' + reservoir if reservoir else ''})", "extra": extra,
         })
+
+    table = echo.get("SOURCE_FLOW")
+    for rec in ([] if table is None else table.to_dict("records")):
+        add(int(rec["NODE"]), rec)
+    res_table = echo.get("SOURCE_FLOW_RESERVOIR")
+    res_nodes = _reservoir_nodes(echo_file)
+    for rec in ([] if res_table is None else res_table.to_dict("records")):
+        reservoir = str(rec["RES_NAME"])
+        for node in res_nodes.get(reservoir.lower(), []):
+            add(node, rec, reservoir)
     return rows
 
 

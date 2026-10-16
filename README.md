@@ -301,6 +301,8 @@ If the connection to the server is lost (server stopped, network or tunnel dropp
 | `XSECT_LAYER` | Cross-section data (`DIST`, `ELEV`, `AREA`, `WIDTH`, `WET_PERIM`) |
 | `BOUNDARY_FLOW`, `BOUNDARY_STAGE` | Boundary nodes and their DSS `FILE` / `PATH` |
 | `SOURCE_FLOW` | Source-flow nodes and their DSS `FILE` / `PATH` (a `FILE` of `constant` uses the `PATH` value as a fixed flow) |
+| `SOURCE_FLOW_RESERVOIR` | Source flows of reservoirs (`RES_NAME`, `SIGN`, `FILE` / `PATH`), shown at the nodes the reservoir touches |
+| `RESERVOIR_CONNECTION` | Nodes each reservoir is connected to (together with the `TO_NODE` of reservoir gates) |
 | `OUTPUT_CHANNEL` | Output locations (channel number and distance from the upnode) |
 | `GATE` | Gate locations (`FROM_OBJ` / `FROM_IDENTIFIER` / `TO_NODE`) |
 | `GATE_WEIR_DEVICE`, `GATE_PIPE_DEVICE` | Weir and pipe devices of each gate, matched by `GATE_NAME` |
@@ -365,7 +367,7 @@ The BC node is ringed on the map while its window is open. The window can be dra
 
 The option appears only when the cursor is on (or very close to) a source-flow dot, not when you right-click a channel, and it is always a single entry for that node.
 
-Source-flow nodes come from the `SOURCE_FLOW` table and are marked with small grey dots (see the Layers box). A source is **DICU** when its name starts with `dicu` (e.g. `dicu_div_206`); everything else is **other** (e.g. `ccc`, `stockton`).
+Source-flow nodes come from the `SOURCE_FLOW` and `SOURCE_FLOW_RESERVOIR` tables and are marked with small grey dots (see the Layers box). A reservoir source flow belongs to a reservoir rather than a node, so it is listed at every node its reservoir touches: the nodes in `RESERVOIR_CONNECTION` plus the `TO_NODE` of the reservoir's gates (e.g. the Clifton Court source flows appear at node 72). Such entries are labelled `name (DICU, reservoir clifton_court)` in the drop-down, show a **Reservoir** field in the header, and count in the node's DICU / other totals; a reservoir that touches several nodes shows the same flows at each of them. A source is **DICU** when its name starts with `dicu` (e.g. `dicu_div_206`); everything else is **other** (e.g. `ccc`, `stockton`).
 
 The **Source Flow** window is the same as the BC window — same display modes, buttons, CSV export, and file resolution — and reads the `FILE` / `PATH` of each `SOURCE_FLOW` row. Because a node usually has several sources (DICU diversion, drain and seepage plus any others), a drop-down lists them as `name (DICU)` / `name (Other)`. The header also shows the sign and the DICU/Other group. A `FILE` of `constant` is shown as a flat line at the constant value over the model run period. The node is ringed on the map while the window is open.
 
