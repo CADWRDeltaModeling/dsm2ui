@@ -1,0 +1,28 @@
+{
+"type": "FeatureCollection",
+"name": "dsm2_reserviors_connections_9_3",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::26910" } },
+"features": [
+{ "type": "Feature", "properties": { "id": "LibertyIsland_connection" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 614678.0823, 4233760.392 ], [ 615435.777, 4237539.302400000393391 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_clifton_court" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 625425.482700000051409, 4188905.1096 ], [ 627297.297600000048988, 4187984.91840000031516 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_decker_1" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 612392.729999999981374, 4216617.525600000284612 ], [ 613250.1324, 4216668.731999999843538 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_decker_2" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 612392.729999999981374, 4216611.124800000339746 ], [ 611906.002500000060536, 4215673.255200000479817 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_discovery_bay_197" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 623291.73030000005383, 4196828.690400000661612 ], [ 623960.728200000012293, 4198043.623200000263751 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_discovery_bay_198" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 623298.359700000029989, 4196855.208000000566244 ], [ 622588.8615, 4197505.041600000113249 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_franks_tract_102" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 622593.618487577070482, 4211653.268267002888024 ], [ 624555.269744175719097, 4210246.801328309811652 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_franks_tract_103" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 622592.519100000034086, 4211653.55280000064522 ], [ 624277.224900000030175, 4213601.5296 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_franks_tract_216" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 622591.604700000025332, 4211654.467199999839067 ], [ 622370.2437, 4208811.9024 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_franks_tract_219" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 622591.604700000025332, 4211653.55280000064522 ], [ 620707.29300000006333, 4210846.1376 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_franks_tract_224" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 622592.519100000034086, 4211653.55280000064522 ], [ 622299.072900000028312, 4213435.10880000051111 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_franks_tract_225" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 622592.519100000034086, 4211654.467199999839067 ], [ 620162.310600000084378, 4212242.731200000271201 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_franks_tract_232" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 622593.395400000037625, 4211652.638400000520051 ], [ 624358.33980000007432, 4211843.138400000520051 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_little_franks_tract" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 618563.520299999974668, 4212327.465599999763072 ], [ 618231.059699999983422, 4211902.269600000232458 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_mildred_127" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 629956.410900000017136, 4206211.348799999803305 ], [ 628736.067900000023656, 4205381.073599999770522 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_mildred_128" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 629956.79190000006929, 4206211.653599999845028 ], [ 629106.895200000028126, 4206306.141600000672042 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_mildred_129" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 629956.410900000017136, 4206211.348799999803305 ], [ 629842.2633, 4207036.1376 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_mildred_130" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 629956.79190000006929, 4206211.348799999803305 ], [ 630661.718100000056438, 4207082.162399999797344 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_mildred_136" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 629956.410900000017136, 4206211.653599999845028 ], [ 630546.846600000048056, 4205503.603199999779463 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_tule_red" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 588612.576899999985471, 4220860.6464 ], [ 587972.573100000037812, 4220553.103199999779463 ] ] ] } },
+{ "type": "Feature", "properties": { "id": "connection_yolo_flyway" }, "geometry": { "type": "MultiLineString", "coordinates": [ [ [ 618556.814699999988079, 4247469.6864 ], [ 618590.8761, 4245925.8744 ] ] ] } }
+]
+}

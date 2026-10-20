@@ -1,0 +1,16 @@
+{
+"type": "FeatureCollection",
+"name": "dsm2_reservoirs_9_3",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::26910" } },
+"features": [
+{ "type": "Feature", "properties": { "id": "Liberty Island", "sym_diam": 60, "full_name": "Liberty Island", "comments": null }, "geometry": { "type": "Point", "coordinates": [ 615452.5625, 4237524.0 ] } },
+{ "type": "Feature", "properties": { "id": "Mldrd", "sym_diam": 30, "full_name": "Mildred Island", "comments": null }, "geometry": { "type": "Point", "coordinates": [ 629956.8125, 4206211.0 ] } },
+{ "type": "Feature", "properties": { "id": "DscBy", "sym_diam": 30, "full_name": "Discovery Bay", "comments": null }, "geometry": { "type": "Point", "coordinates": [ 623302.375, 4196841.5 ] } },
+{ "type": "Feature", "properties": { "id": "TuleR", "sym_diam": 20, "full_name": "Tule Red", "comments": "restoration area" }, "geometry": { "type": "Point", "coordinates": [ 588617.5625, 4220866.0 ] } },
+{ "type": "Feature", "properties": { "id": "LFT", "sym_diam": 15, "full_name": "Little Franks Tract", "comments": "Formerly \"Bethel Island\". Changed because it isn't part of Bethel Island." }, "geometry": { "type": "Point", "coordinates": [ 618565.3125, 4212326.5 ] } },
+{ "type": "Feature", "properties": { "id": "Franks Tract", "sym_diam": 80, "full_name": "Franks Tract", "comments": null }, "geometry": { "type": "Point", "coordinates": [ 622593.5, 4211653.0 ] } },
+{ "type": "Feature", "properties": { "id": "Dckr", "sym_diam": 20, "full_name": "Decker Island", "comments": "restoration area" }, "geometry": { "type": "Point", "coordinates": [ 612392.875, 4216615.0 ] } },
+{ "type": "Feature", "properties": { "id": "CCF", "sym_diam": 70, "full_name": "Clifton Court Forebay", "comments": null }, "geometry": { "type": "Point", "coordinates": [ 625428.0625, 4188904.75 ] } },
+{ "type": "Feature", "properties": { "id": "YF", "sym_diam": 20, "full_name": "Yolo Flyway", "comments": "restoration area" }, "geometry": { "type": "Point", "coordinates": [ 618561.625, 4247453.5 ] } }
+]
+}

@@ -28,11 +28,20 @@ from dsm2ui.bc_popup import BCPopup
 from dsm2ui.gate_popup import GatePopup
 from dsm2ui.oprule_parse import parse_rules, summarise_ext_flow, summarise_gate
 from dsm2ui.oprule_view import RuleSection
+from dsm2ui.reservoir_popup import ReservoirPopup
 from dsm2ui.xsection_popup import POPUP_WIDTH, XSectionPopup
 
 _GIS_DIR = pathlib.Path(__file__).parent / "dsm2gis"
 _DEFAULT_CHANNEL_GEO = str(_GIS_DIR / "dsm2_channels_centerlines_9_3.geojson")
 _DEFAULT_NODE_GEO = str(_GIS_DIR / "dsm2_nodes_9_3.geojson")
+_DEFAULT_RES_GEO = str(_GIS_DIR / "dsm2_reservoirs_9_3.geojson")
+_DEFAULT_RESCONN_GEO = str(_GIS_DIR / "dsm2_reserviors_connections_9_3.geojson")
+# GeoJSON reservoir id -> DSM2 reservoir name (the names differ, e.g. "CCF" is clifton_court).
+_RESERVOIR_IDS = {
+    "Liberty Island": "liberty", "Mldrd": "mildred", "DscBy": "discovery_bay", "TuleR": "tule_red",
+    "LFT": "little_franks_tract", "Franks Tract": "franks_tract", "Dckr": "decker_island",
+    "CCF": "clifton_court", "YF": "yolo_flyway",
+}
 _TILES = "Esri.WorldTopoMap"
 
 _BLUE = "#1a73e8"
@@ -63,6 +72,8 @@ _GATE_SVG = (
 )
 _GATE_URL = "data:image/svg+xml;base64," + base64.b64encode(_GATE_SVG.encode()).decode()
 
+_RESERVOIR_COLOR = "#1f78b4"
+
 _CONTEXT_MENU_JS = """
 const reg = (window.__dsm2ctx = window.__dsm2ctx || {});
 if (reg[p.id]) return;
@@ -87,9 +98,9 @@ const addItem = (text, kind, idx) => {
 };
 view.el.addEventListener('contextmenu', (e) => {
   const bi = bsrc.inspected.indices, ni = nsrc.inspected.indices;
-  const gci = gcs.inspected.indices, gri = grs.inspected.indices;
+  const gci = gcs.inspected.indices, gri = grs.inspected.indices, rsi = rsrc.inspected.indices;
   // On a node dot only node options are offered, never the channels meeting there; a channel gate offers its channel.
-  const ci = (bi.length || ni.length || gri.length) ? []
+  const ci = (bi.length || ni.length || gri.length || rsi.length) ? []
     : (gci.length ? [gcs.data.ci[gci[0]]] : src.inspected.indices);
   // BC nodes offered: the one under the cursor plus any at either end of the hovered channel.
   const bcs = new Map();
@@ -104,10 +115,12 @@ view.el.addEventListener('contextmenu', (e) => {
   const under = bi.length ? bsrc.data.node[bi[0]]
     : (ni.length ? nsrc.data.node[ni[0]] : (gri.length ? grs.data.node[gri[0]] : null));
   const sfNode = (under != null && srcnodes.includes(under)) ? under : null;
-  if (!ci.length && !bcs.size && sfNode == null && !gci.length && !gri.length) { hide(); return; }
+  if (!ci.length && !bcs.size && sfNode == null && !gci.length && !gri.length && !rsi.length) { hide(); return; }
   e.preventDefault();
   menu.replaceChildren();
   if (ci.length) addItem('View channel info', 'chan', ci[0]);
+  if (rsi.length) addItem('View reservoir', 'res', rsi[0]);
+  if (rsi.length && rsrc.data.src[rsi[0]]) addItem('View source flow data', 'ressrc', rsi[0]);
   if (gci.length) addItem('View hydraulic structure', 'gatec', gci[0]);
   if (gri.length) addItem('View hydraulic structure', 'gater', gri[0]);
   for (const [n, k] of bcs) addItem(bcs.size > 1 ? `View BC data (node ${n})` : 'View BC data', 'bc', k);
@@ -134,6 +147,9 @@ document.body.appendChild(otip);
 const ntip = tip.cloneNode(false);
 ntip.style.display = 'none';
 document.body.appendChild(ntip);
+const ctip = tip.cloneNode(false);
+ctip.style.display = 'none';
+document.body.appendChild(ctip);
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
 let lit = -1;
 const setHover = (i) => {
@@ -145,10 +161,12 @@ view.el.addEventListener('mousemove', (e) => {
   // Output-location tooltip yields to the node, BC node and hydraulic-structure tooltips.
   const oi = osrc.inspected.indices;
   const blocked = bsrc.inspected.indices.length > 0 || nsrc.inspected.indices.length > 0
-                  || gcs.inspected.indices.length > 0 || grs.inspected.indices.length > 0;
-  // Node and BC-node tooltips yield to hydraulic structures (whose tooltip is drawn by Bokeh).
+                  || gcs.inspected.indices.length > 0 || grs.inspected.indices.length > 0
+                  || rsrc.inspected.indices.length > 0 || cnsrc.inspected.indices.length > 0;
+  // Node and BC-node tooltips yield to hydraulic structures and reservoirs (whose tooltips are drawn by Bokeh).
   const bi0 = bsrc.inspected.indices, ni0 = nsrc.inspected.indices;
-  const overGate = gcs.inspected.indices.length > 0 || grs.inspected.indices.length > 0;
+  const overGate = gcs.inspected.indices.length > 0 || grs.inspected.indices.length > 0
+                   || rsrc.inspected.indices.length > 0;
   if (!overGate && (bi0.length || ni0.length)) {
     ntip.innerHTML = bi0.length
       ? `<b>Boundary node:</b> ${bsrc.data.node[bi0[0]]}<br><b>Inputs:</b> ${esc(bsrc.data.label[bi0[0]])}${bsrc.data.info[bi0[0]]}`
@@ -158,6 +176,16 @@ view.el.addEventListener('mousemove', (e) => {
     ntip.style.display = 'block';
   } else {
     ntip.style.display = 'none';
+  }
+  // Reservoir-connection tooltip yields to nodes, hydraulic structures and reservoirs.
+  const cni = cnsrc.inspected.indices;
+  if (cni.length && !overGate && !bi0.length && !ni0.length) {
+    ctip.innerHTML = cnsrc.data.info[cni[0]];
+    ctip.style.left = (e.clientX + 14) + 'px';
+    ctip.style.top = (e.clientY + 14) + 'px';
+    ctip.style.display = 'block';
+  } else {
+    ctip.style.display = 'none';
   }
   if (oi.length && !blocked) {
     otip.replaceChildren();
@@ -173,7 +201,8 @@ view.el.addEventListener('mousemove', (e) => {
   const ci = src.inspected.indices;
   const overNode = bsrc.inspected.indices.length > 0 || nsrc.inspected.indices.length > 0
                    || osrc.inspected.indices.length > 0 || gcs.inspected.indices.length > 0
-                   || grs.inspected.indices.length > 0;
+                   || grs.inspected.indices.length > 0 || rsrc.inspected.indices.length > 0
+                   || cnsrc.inspected.indices.length > 0;
   if (!ci.length || overNode) { tip.style.display = 'none'; setHover(-1); return; }
   const i = ci[0];
   setHover(i);
@@ -183,7 +212,8 @@ view.el.addEventListener('mousemove', (e) => {
   tip.style.display = 'block';
 });
 view.el.addEventListener('mouseleave', () => {
-  tip.style.display = 'none'; otip.style.display = 'none'; ntip.style.display = 'none'; setHover(-1);
+  tip.style.display = 'none'; otip.style.display = 'none'; ntip.style.display = 'none'; ctip.style.display = 'none';
+  setHover(-1);
 });
 
 // Drag the cross-section pop-up by its title (.xs-drag); the popup host carries .xs-popup.
@@ -232,8 +262,8 @@ _MAP_ICON = (
 
 _ARROW_SVG = (
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 56'><polygon "
-    "points='8,20 54,20 54,7 92,28 54,49 54,36 8,36' fill='#ffe27a' stroke='#7a5c00' "
-    "stroke-width='7' stroke-linejoin='round'/></svg>"
+    "points='8,20 54,20 54,7 92,28 54,49 54,36 8,36' fill='none' stroke='#7a5c00' "
+    "stroke-width='8' stroke-linejoin='round'/></svg>"
 )
 _ARROW_URL = "data:image/svg+xml;base64," + base64.b64encode(_ARROW_SVG.encode()).decode()
 _ARROW_SIZE = (20, 11)  # screen px
@@ -244,6 +274,27 @@ const lon = cb_obj.x / R * 180 / Math.PI;
 const lat = (2 * Math.atan(Math.exp(cb_obj.y / R)) - Math.PI / 2) * 180 / Math.PI;
 div.text = `Lat: ${Math.abs(lat).toFixed(5)}° ${lat >= 0 ? 'N' : 'S'} &nbsp;|&nbsp; ` +
            `Lon: ${Math.abs(lon).toFixed(5)}° ${lon >= 0 ? 'E' : 'W'} &nbsp;|&nbsp; NAD 83`;
+"""
+
+# Reservoir icons scale with zoom (14 px tall at the home view, 10-56 px overall).
+_RES_SIZE_JS = """
+let w, h;
+try { w = p.inner_width; h = p.inner_height; } catch (e) { return; }
+const x = p.x_range;
+if (!w || !h || x.start == null || x.end == null) return;
+const home = Math.max(home_w, home_h * w / h);
+const s = Math.min(56, Math.max(10, 14 * Math.pow(home / (x.end - x.start), 0.3)));
+rend.glyph.size = s;
+hit.glyph.size = s * 1.05;
+ring.glyph.size = s * 1.8;
+const mpp = (x.end - x.start) / w;
+for (const [srcs] of [[dots], [dicu_dots]]) {
+  const d = srcs.data;
+  srcs.data = {
+    x0: d.x0, y0: d.y0,
+    x: Array.from(d.x0, (v) => v + 0.5 * s * mpp), y: Array.from(d.y0, (v) => v - 0.38 * s * mpp),
+  };
+}
 """
 
 # Moves the selection highlight onto the selected gate icon (k: 0 = channel gate, 1 = reservoir gate).
@@ -311,12 +362,11 @@ _FIT_LEFT_JS = """
 let w, h;
 try { w = p.inner_width; h = p.inner_height; } catch (e) { return; }
 if (!cb_obj.text || !w || !h) return;
-const [x0, x1, y0, y1, , res, lft] = JSON.parse(cb_obj.text);
-const left = lft || 0;  // pixels covered by the Layers card on the left
-const avail = Math.max(w - left - (res == null ? reserve : res), 240);  // map pixels between the Layers card and any pop-up
+const [x0, x1, y0, y1, , res] = JSON.parse(cb_obj.text);
+const avail = Math.max(w - (res == null ? reserve : res), 240);  // map pixels left of any open pop-up
 const mpp = Math.max((x1 - x0) / avail, (y1 - y0) / h);
 const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-p.x_range.start = cx - mpp * (left + avail / 2); p.x_range.end = p.x_range.start + mpp * w;
+p.x_range.start = cx - mpp * avail / 2; p.x_range.end = p.x_range.start + mpp * w;
 p.y_range.start = cy - mpp * h / 2; p.y_range.end = cy + mpp * h / 2;
 """
 
@@ -443,33 +493,142 @@ def _reservoir_nodes(echo_file):
 
 @functools.lru_cache(maxsize=4)
 def _load_source_rows(echo_file):
-    """Return {node: [source-flow row dicts]} from SOURCE_FLOW and SOURCE_FLOW_RESERVOIR; DICU sources are named ``dicu_*``.
+    """Return {node: [source-flow row dicts]} from SOURCE_FLOW; DICU sources are those named ``dicu_*``."""
+    return _source_rows(echo_file, "SOURCE_FLOW", "NODE")
 
-    A reservoir source flow is listed at every node its reservoir touches.
-    """
-    echo = _load_echo(echo_file)
+
+@functools.lru_cache(maxsize=4)
+def _load_reservoir_source_rows(echo_file):
+    """Return {lower-case reservoir name: [source-flow row dicts]} from SOURCE_FLOW_RESERVOIR."""
+    return _source_rows(echo_file, "SOURCE_FLOW_RESERVOIR", "RES_NAME")
+
+
+def _source_rows(echo_file, table_name, key_col):
+    table = _load_echo(echo_file).get(table_name)
     rows = {}
-
-    def add(node, rec, reservoir=None):
+    for rec in ([] if table is None else table.to_dict("records")):
         name = str(rec["NAME"])
         group = "DICU" if name.lower().startswith("dicu") else "Other"
-        extra = [("Group", group)] + ([("Reservoir", reservoir)] if reservoir else [])
-        rows.setdefault(node, []).append({
-            "name": name, "kind": "flow", "node": node, "sign": int(rec["SIGN"]),
-            "fillin": str(rec["FILLIN"]), "file": str(rec["FILE"]), "path": str(rec["PATH"]), "group": group,
-            "label": f"{name} ({group}{', reservoir ' + reservoir if reservoir else ''})", "extra": extra,
+        key = int(rec[key_col]) if key_col == "NODE" else str(rec[key_col]).lower()
+        extra = [("Group", group)] + ([("Reservoir", str(rec[key_col]))] if key_col != "NODE" else [])
+        rows.setdefault(key, []).append({
+            "name": name, "kind": "flow", "node": key if key_col == "NODE" else None, "sign": int(rec["SIGN"]),
+            "fillin": str(rec["FILLIN"]), "file": str(rec["FILE"]), "path": str(rec["PATH"]),
+            "group": group, "label": f"{name} ({group})", "extra": extra,
         })
-
-    table = echo.get("SOURCE_FLOW")
-    for rec in ([] if table is None else table.to_dict("records")):
-        add(int(rec["NODE"]), rec)
-    res_table = echo.get("SOURCE_FLOW_RESERVOIR")
-    res_nodes = _reservoir_nodes(echo_file)
-    for rec in ([] if res_table is None else res_table.to_dict("records")):
-        reservoir = str(rec["RES_NAME"])
-        for node in res_nodes.get(reservoir.lower(), []):
-            add(node, rec, reservoir)
     return rows
+
+
+@functools.lru_cache(maxsize=2)
+def _load_reservoir_geo(res_geo, conn_geo):
+    """Return (reservoir points, connection lines) in web-mercator."""
+    return gpd.read_file(res_geo).to_crs(epsg=3857), gpd.read_file(conn_geo).to_crs(epsg=3857)
+
+
+def _build_reservoirs(echo_file, nodes):
+    """Return (reservoir columns, connection columns) for the map, cross-referenced with the echo file.
+
+    Reservoirs and connections the echo file does not define are left out. The connection lines join a
+    reservoir point to a channel node; that node is found from the id suffix or from the nearest node
+    the reservoir touches.
+    """
+    pts, conns = _load_reservoir_geo(_DEFAULT_RES_GEO, _DEFAULT_RESCONN_GEO)
+    echo = _load_echo(echo_file)
+
+    def records(name):
+        table = echo.get(name)
+        return [] if table is None else table.to_dict("records")
+
+    info = {str(r["NAME"]).lower(): r for r in records("RESERVOIR")}
+    coefs = {
+        (str(r["RES_NAME"]).lower(), int(r["NODE"])): (float(r["COEF_IN"]), float(r["COEF_OUT"]))
+        for r in records("RESERVOIR_CONNECTION")
+    }
+    res_nodes = _reservoir_nodes(echo_file)
+    node_xy = {int(n): (g.x, g.y) for n, g in zip(nodes["id"], nodes.geometry)}
+
+    res = {"x": [], "y": [], "name": [], "info": []}
+    located = []
+    for rec in pts.to_dict("records"):
+        full = str(rec["full_name"])
+        name = _RESERVOIR_IDS.get(rec["id"]) or re.sub(r"\W+", "_", full.lower()).strip("_")
+        pt = rec["geometry"]
+        located.append((name, full, pt.x, pt.y))
+        if info and name not in info:
+            continue
+        lines = [f"<b>Reservoir:</b> {html.escape(name)}"]
+        lines.append("Connected nodes: " + (", ".join(map(str, res_nodes.get(name, []))) or "none"))
+        res["x"].append(pt.x)
+        res["y"].append(pt.y)
+        res["name"].append(name)
+        res["info"].append("<br>".join(lines))
+
+    conn = {"xs": [], "ys": [], "info": [], "name": []}
+    for rec in conns.to_dict("records"):
+        coords = [c for part in rec["geometry"].geoms for c in part.coords]
+        ends = (coords[0], coords[-1])
+        # The end nearest a reservoir point is the reservoir end; the other end is at a channel node.
+        _, k, i = min(
+            (math.hypot(e[0] - x, e[1] - y), k, i) for i, (_, _, x, y) in enumerate(located) for k, e in enumerate(ends)
+        )
+        name, full = located[i][0], located[i][1]
+        if info and name not in info:
+            continue
+        far, known = ends[1 - k], res_nodes.get(name)
+        # An id suffix names the node only if the line really ends there (decker_1 / decker_2 are not nodes).
+        m = re.search(r"_(\d+)$", str(rec["id"]))
+        node = int(m.group(1)) if m and int(m.group(1)) in node_xy else None
+        if node is not None and math.dist(far, node_xy[node]) < 300:
+            if known and node not in known:
+                continue
+        else:
+            pool = [n for n in (known or node_xy) if n in node_xy]
+            node = min(pool, key=lambda n: math.hypot(node_xy[n][0] - far[0], node_xy[n][1] - far[1]), default=None)
+        lines = ["<b>Reservoir connection</b>", f"{html.escape(full)} \u2194 node {node}"]
+        if (name, node) in coefs:
+            lines.append("Coefficient in / out: {:g} / {:g}".format(*coefs[(name, node)]))
+        elif known and node in known:
+            lines.append("Connected through a gate")
+        conn["xs"].append([c[0] for c in coords])
+        conn["ys"].append([c[1] for c in coords])
+        conn["info"].append("<br>".join(lines))
+        conn["name"].append(name)
+    return res, conn
+
+
+@functools.lru_cache(maxsize=4)
+def _load_reservoir_props(echo_file):
+    """Return {lower-case reservoir name: properties} from RESERVOIR, RESERVOIR_VOL, RESERVOIR_IC, RESERVOIR_CONNECTION, GATE.
+
+    ``area`` is in million sq ft, ``curve`` is [(elevation ft, area acres)] sorted by elevation.
+    """
+    echo = _load_echo(echo_file)
+
+    def records(name):
+        table = echo.get(name)
+        return [] if table is None else table.to_dict("records")
+
+    props = {}
+    for r in records("RESERVOIR"):
+        props[str(r["NAME"]).lower()] = {
+            "name": str(r["NAME"]), "area": float(r["AREA"]), "bot_elev": float(r["BOT_ELEV"]),
+            "ic_stage": None, "curve": [], "connections": [], "gates": [],
+        }
+    for r in records("RESERVOIR_VOL"):
+        if str(r["RES_NAME"]).lower() in props:
+            props[str(r["RES_NAME"]).lower()]["curve"].append((float(r["ELEV"]), float(r["AREA"])))
+    for r in records("RESERVOIR_IC"):
+        if str(r["RES_NAME"]).lower() in props:
+            props[str(r["RES_NAME"]).lower()]["ic_stage"] = float(r["STAGE"])
+    for r in records("RESERVOIR_CONNECTION"):
+        if str(r["RES_NAME"]).lower() in props:
+            props[str(r["RES_NAME"]).lower()]["connections"].append(
+                (int(r["NODE"]), float(r["COEF_IN"]), float(r["COEF_OUT"]))
+            )
+    for name, obj, ident, node in _load_gates(echo_file):
+        if obj == "reservoir" and ident.lower() in props:
+            props[ident.lower()]["gates"].append((name, node))
+    return props
 
 
 def _echo_env(echo_file):
@@ -610,6 +769,84 @@ def _card_styles(**extra):
     }
 
 
+_SIDEBAR_W = 260  # px; the map starts to the right of the Layers / Tools sidebar
+
+
+def _panel_styles():
+    """A flush sidebar panel (as opposed to a floating card)."""
+    return {"background": "white", "padding": "8px 16px", "border-bottom": "1px solid #e5e7eb", "box-sizing": "border-box"}
+
+
+# Tools > colour channels by: label -> (key, heading, CHANNEL column, unit, number format)
+_COLOR_BY = {
+    "Length": ("length", "Length", "LENGTH", " ft", "{:,.0f}"),
+    "Manning's n": ("manning", "Manning's n", "MANNING", "", "{:.4f}"),
+    "Dispersion": ("dispersion", "Dispersion", "DISPERSION", " ft\u00b2/s", "{:,.0f}"),
+    "DX": ("dx", "DX", "DX", " ft", "{:,.0f}"),
+}
+
+
+# Tools > colormap: label -> (key, bokeh palette name); each is resampled to _N_CLASSES discrete colours.
+_COLORMAPS = {
+    "Viridis": ("viridis", "Viridis256"),
+    "Plasma": ("plasma", "Plasma256"),
+    "Inferno": ("inferno", "Inferno256"),
+    "Cividis": ("cividis", "Cividis256"),
+    "Turbo": ("turbo", "Turbo256"),
+    "Spectral": ("spectral", "Spectral11"),
+    "Red-Yellow-Blue": ("rdylbu", "RdYlBu11"),
+    "Yellow-Orange-Red": ("ylorrd", "YlOrRd9"),
+}
+_N_CLASSES = 8
+
+
+def _channel_color_scales(chans):
+    """Return {key: {colormap key: (colour per channel, legend HTML)}} for the Tools colouring.
+
+    Values fall into _N_CLASSES equal-width classes between their 2nd and 98th percentile (the first and last
+    classes extend to the data minimum / maximum), so a few extreme channels do not wash out the rest.
+    """
+    from bokeh import palettes
+
+    n = _N_CLASSES
+    ramps = {ck: palettes.linear_palette(getattr(palettes, name), n) for ck, name in _COLORMAPS.values()}
+    out = {}
+    for key, heading, col, unit, fmt in _COLOR_BY.values():
+        vals = chans[col].astype(float)
+        vmin, vmax = float(vals.min()), float(vals.max())
+        lo, hi = (float(v) for v in vals.quantile([0.02, 0.98]))
+        edges = [lo + (hi - lo) * i / n for i in range(n + 1)]
+        bins = [0 if hi <= lo else min(max(int((v - lo) / (hi - lo) * n), 0), n - 1) for v in vals]
+        bounds = [vmin] + edges[1:-1] + [vmax]
+        out[key] = {}
+        for ck, ramp in ramps.items():
+            rows = "".join(
+                f"<div style='display:flex;align-items:center;margin:1px 0'>"
+                f"<span style='width:22px;height:12px;background:{ramp[i]};border:1px solid #bbb;margin-right:8px'></span>"
+                f"<span>{fmt.format(bounds[i])} \u2013 {fmt.format(bounds[i + 1])}</span></div>"
+                for i in range(n)
+            )
+            out[key][ck] = ([ramp[b] for b in bins], (
+                "<div style='font-size:11px;color:#444;width:228px'>"
+                f"<div style='font-weight:600;margin-bottom:2px'>{html.escape(heading)}{html.escape(unit)}</div>{rows}"
+                "<div style='color:#777;margin-top:3px'>Classes span the 2nd\u201398th percentile; the end classes "
+                "reach the minimum and maximum.</div></div>"
+            ))
+    return out
+
+
+# Switches the channel line colour to a precomputed per-channel colour column (or back to the plain colour).
+_COLOR_BY_JS = """
+const k = keys[prop.value] || null;
+const m = cmaps[cmap.value];
+const spec = k ? {field: 'c_' + k + '_' + m} : {value: base};
+for (const g of [r.glyph, r.selection_glyph, r.nonselection_glyph]) {
+  if (g && typeof g === 'object') g.line_color = spec;
+}
+legend.text = k ? htmls[k][m] : '';
+"""
+
+
 def _swatch(kind):
     if kind == "arrow":
         return pn.pane.HTML(
@@ -629,6 +866,10 @@ def _swatch(kind):
         return pn.pane.HTML(f"<img src='{_PIN_URL}' height='18' style='margin-top:1px'>", margin=(11, 4, 0, 0), width=30)
     elif kind == "gate":
         return pn.pane.HTML(f"<img src='{_GATE_URL}' height='16' style='margin-top:2px'>", margin=(11, 4, 0, 0), width=30)
+    elif kind == "reservoir":
+        css = f"width:12px;height:12px;background:{_RESERVOIR_COLOR};margin:0 0 0 3px"
+    elif kind == "dashed":
+        css = f"width:26px;height:0;border-top:3px dashed {_RESERVOIR_COLOR};margin-top:6px"
     else:
         css = f"width:9px;height:9px;border-radius:50%;border:2px solid {_NODE_COLOR}"
     return pn.pane.HTML(f"<div style='{css}'></div>", margin=(12, 4, 0, 0), width=30)
@@ -650,6 +891,10 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     chan_data = {col: chans[col].tolist() for col, _, _, _ in _INFO_FIELDS}
     chan_data["xs"] = [[c[0] for c in ln] for ln in lines]
     chan_data["ys"] = [[c[1] for c in ln] for ln in lines]
+    color_scales = _channel_color_scales(chans)
+    for key, by_map in color_scales.items():
+        for ck, (colors, _) in by_map.items():
+            chan_data[f"c_{key}_{ck}"] = colors
     chan_src = ColumnDataSource(chan_data)
     node_src = ColumnDataSource(
         {"x": nodes.geometry.x.tolist(), "y": nodes.geometry.y.tolist(), "node": nodes["id"].tolist()}
@@ -693,6 +938,13 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     arrow_r = p.image_url(
         url="url", x="x", y="y", w=_ARROW_SIZE[0], h=_ARROW_SIZE[1], angle="angle",
         anchor="center", w_units="screen", h_units="screen", source=arrow_src,
+    )
+    res_cols, conn_cols = _build_reservoirs(echo_file, nodes)
+    res_flow_rows = _load_reservoir_source_rows(echo_file)
+    res_cols["src"] = [n in res_flow_rows for n in res_cols["name"]]  # reservoirs with SOURCE_FLOW_RESERVOIR rows
+    conn_src = ColumnDataSource(conn_cols)
+    conn_r = p.multi_line(
+        "xs", "ys", source=conn_src, line_width=2.5, line_color=_RESERVOIR_COLOR, line_dash="dashed",
     )
     node_r = p.scatter(
         "x", "y", source=node_src, size=10, fill_color="white", fill_alpha=0.6,
@@ -831,6 +1083,49 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     gate_sel_src.js_on_change(
         "data", CustomJS(args=dict(gsel=gate_sel_src, sc=gate_c_src, sr=gate_r_src), code=_GATE_SEL_JS)
     )
+
+    # Reservoirs (points) with a dashed line to each channel node they connect to.
+    res_src = ColumnDataSource(res_cols)
+    # Ring around the reservoir whose window is open (drawn under the icon).
+    res_sel_src = ColumnDataSource({"x": [], "y": []})
+    res_ring = p.scatter(
+        "x", "y", source=res_sel_src, size=30, fill_color=_RESERVOIR_COLOR, fill_alpha=0.15,
+        line_color=_RESERVOIR_COLOR, line_width=3,
+    )
+    res_r = p.scatter(
+        "x", "y", source=res_src, marker="square", size=14, fill_color=_RESERVOIR_COLOR, line_color="white", line_width=1,
+    )
+    res_hit = p.scatter("x", "y", source=res_src, marker="square", size=15, fill_alpha=0, line_alpha=0)
+    # Dots at the corner of each reservoir icon, as on nodes: light grey for DICU source flows with a smaller
+    # dark grey one inside for other source flows, at the same fixed sizes as the node dots.
+    def _corner_dots(group):
+        idx = [i for i, n in enumerate(res_cols["name"]) if any(r["group"] == group for r in res_flow_rows.get(n, []))]
+        xs, ys = [res_cols["x"][i] for i in idx], [res_cols["y"][i] for i in idx]
+        return ColumnDataSource({"x0": xs, "y0": ys, "x": list(xs), "y": list(ys)})
+
+    res_dicu_src, res_dot_src = _corner_dots("DICU"), _corner_dots("Other")
+    res_dicu_dot = p.scatter(
+        "x", "y", source=res_dicu_src, size=6, fill_color=_SOURCE_DICU, line_color=_SOURCE_OTHER, line_width=0.5,
+    )
+    res_dot = p.scatter(
+        "x", "y", source=res_dot_src, size=4, fill_color=_SOURCE_OTHER, line_alpha=0,
+    )
+    # Each dot follows the Reservoirs layer and its own Source Flow layer.
+    for dot_r, layer_r in ((res_dot, other_r), (res_dicu_dot, dicu_r)):
+        vis_cb = CustomJS(args=dict(dot=dot_r, res=res_r, layer=layer_r), code="dot.visible = res.visible && layer.visible;")
+        res_r.js_on_change("visible", vis_cb)
+        layer_r.js_on_change("visible", vis_cb)
+    res_size_cb = CustomJS(
+        args=dict(
+            p=p, rend=res_r, hit=res_hit, ring=res_ring, dots=res_dot_src, dicu_dots=res_dicu_src,
+            home_w=home_x[1] - home_x[0], home_h=home_y[1] - home_y[0],
+        ),
+        code=_RES_SIZE_JS,
+    )
+    for rng in (p.x_range, p.y_range):
+        rng.js_on_change("start", res_size_cb)
+        rng.js_on_change("end", res_size_cb)
+    p.js_on_change("inner_width", res_size_cb)
     bc_rows = {n: r for n, r in _load_boundary_rows(echo_file).items() if n in node_pos}
     bnd_nodes = sorted(bc_rows)
     bnd_src = ColumnDataSource({
@@ -877,7 +1172,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         CustomJS(
             args=dict(
                 p=p, src=chan_src, bsrc=bnd_src, nsrc=node_hit_src, hsrc=hover_src, osrc=out_hit_src,
-                gcs=gate_c_src, grs=gate_r_src,
+                gcs=gate_c_src, grs=gate_r_src, rsrc=res_src, cnsrc=conn_src,
                 srcnodes=sorted(src_rows),
                 req=req_src, fit=fit_div,
             ),
@@ -893,6 +1188,8 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
             tooltips="<b>Channel:</b> @chan<br><b>Up \u2192 Down:</b> @up \u2192 @down<br><b>Gate:</b> @name",
         ),
         HoverTool(renderers=[gate_r_hit], tooltips="<b>Node:</b> @node<br><b>Gate:</b> @name@info{safe}"),
+        HoverTool(renderers=[res_hit], tooltips="@info{safe}"),
+        HoverTool(renderers=[conn_r], tooltips=None),  # inspection only; the tooltip is drawn in JS
         HoverTool(renderers=[node_hit], tooltips=None),  # tooltip drawn in JS
         HoverTool(renderers=[bnd_hit], tooltips=None),  # tooltip drawn in JS
     )
@@ -938,10 +1235,9 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     state = {"ci": 0, "dists": [], "n": 0}
 
     def _fit(x0, x1, y0, y1, reserve=None):
-        """Frame an extent; ``reserve`` is the pixel width to keep clear on the right (default: pop-up width); the Layers card keeps the left clear."""
+        """Frame an extent; ``reserve`` is the pixel width to keep clear on the right (default: pop-up width)."""
         state["n"] += 1  # nonce so an identical extent still fires a change event
-        left = 260 if layers.visible and layers_body.visible else 0
-        fit_div.text = json.dumps([x0, x1, y0, y1, state["n"], reserve, left])
+        fit_div.text = json.dumps([x0, x1, y0, y1, state["n"], reserve])
 
     def _set_markers(selected):
         line = line_geoms[state["ci"]]
@@ -1004,7 +1300,9 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     bc_panel.styles = {**bc_panel.styles, "z-index": "20"}
 
     src_popup = BCPopup(
-        on_close=lambda: setattr(src_sel_src, "data", {"x": [], "y": []}),
+        on_close=lambda: [
+            setattr(src_sel_src, "data", {"x": [], "y": []}), setattr(res_sel_src, "data", {"x": [], "y": []}),
+        ],
         load_series=lambda row: _read_bc_series(echo_file, row["file"], row["path"]),
         title="SOURCE FLOW", input_label="Source flow input", rules_for=_flow_rules,
     )
@@ -1021,7 +1319,12 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     gate_panel = _overlay(gate_popup.panel, top=16, right=76)
     gate_panel.styles = {**gate_panel.styles, "z-index": "20"}
 
-    popups = [popup, bc_popup, src_popup, gate_popup]
+    res_props = _load_reservoir_props(echo_file)
+    res_popup = ReservoirPopup(on_close=lambda: setattr(res_sel_src, "data", {"x": [], "y": []}))
+    res_panel = _overlay(res_popup.panel, top=16, right=76)
+    res_panel.styles = {**res_panel.styles, "z-index": "20"}
+
+    popups = [popup, bc_popup, src_popup, gate_popup, res_popup]
 
     def _close_others(keep):
         for other in popups:
@@ -1047,9 +1350,29 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
             _close_others(src_popup)
             x, y = node_pos[node]
             src_sel_src.data = {"x": [x], "y": [y]}
+            res_sel_src.data = {"x": [], "y": []}  # the window may have been showing a reservoir's flows
             src_popup.show(node, src_rows[node])
             half = 3000
             _fit(x - half, x + half, y - half, y + half)
+            return
+        if kind in ("res", "ressrc"):
+            name = res_src.data["name"][idx]
+            x, y = res_src.data["x"][idx], res_src.data["y"][idx]
+            if kind == "res":
+                _close_others(res_popup)
+                res_popup.show(res_props[name])
+            else:
+                _close_others(src_popup)
+                src_popup.show(None, res_flow_rows[name], place=f"RESERVOIR {name}")
+            res_sel_src.data = {"x": [x], "y": [y]}
+            # Frame the reservoir together with the ends of its connection lines.
+            xs, ys = [x], [y]
+            for cname, cx, cy in zip(conn_src.data["name"], conn_src.data["xs"], conn_src.data["ys"]):
+                if cname == name:
+                    xs += list(cx)
+                    ys += list(cy)
+            pad = max(max(xs) - min(xs), max(ys) - min(ys), 3000) * 0.5
+            _fit(min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
             return
         if kind in ("gatec", "gater"):
             _close_others(gate_popup)
@@ -1090,6 +1413,8 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     other_cb = pn.widgets.Checkbox(name="Source Flow (other)", value=True, margin=(8, 0))
     out_cb = pn.widgets.Checkbox(name="Output Locations", value=True, margin=(8, 0))
     gate_cb = pn.widgets.Checkbox(name="Hydraulic Structures", value=True, margin=(8, 0))
+    res_cb = pn.widgets.Checkbox(name="Reservoirs", value=True, margin=(8, 0))
+    conn_cb = pn.widgets.Checkbox(name="Reservoir Connections", value=True, margin=(8, 0))
     chan_cb.jslink(chan_r, value="visible")
     chan_cb.jslink(hover_r, value="visible")
     chan_cb.jslink(sel_r, value="visible")
@@ -1107,6 +1432,10 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     out_cb.jslink(out_hit, value="visible")
     for gate_glyph in (gate_c_r, gate_r_r, gate_c_hit, gate_r_hit, *gate_glow, gate_line):
         gate_cb.jslink(gate_glyph, value="visible")
+    res_cb.jslink(res_r, value="visible")
+    res_cb.jslink(res_hit, value="visible")
+    res_cb.jslink(res_ring, value="visible")
+    conn_cb.jslink(conn_r, value="visible")
 
     collapse_btn = pn.widgets.Button(icon="chevron-up", button_type="light", width=36, height=36, margin=0)
     layers_body = pn.Column(
@@ -1114,6 +1443,8 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         pn.Row(node_cb, pn.HSpacer(), _swatch("circle"), margin=0),
         pn.Row(dir_cb, pn.HSpacer(), _swatch("arrow"), margin=0),
         pn.Row(gate_cb, pn.HSpacer(), _swatch("gate"), margin=0),
+        pn.Row(res_cb, pn.HSpacer(), _swatch("reservoir"), margin=0),
+        pn.Row(conn_cb, pn.HSpacer(), _swatch("dashed"), margin=0),
         pn.Row(bnd_cb, pn.HSpacer(), _swatch("triangle"), margin=0),
         pn.Row(dicu_cb, pn.HSpacer(), _swatch("dicu"), margin=0),
         pn.Row(other_cb, pn.HSpacer(), _swatch("other"), margin=0),
@@ -1131,9 +1462,51 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
             pn.pane.HTML("<b style='letter-spacing:.5px;font-size:15px'>LAYERS</b>", margin=(8, 0, 0, 0)),
             pn.HSpacer(), collapse_btn, margin=0,
         ),
-        layers_body, width=230, styles=_card_styles(padding="8px 14px"),
+        layers_body, width=_SIDEBAR_W, margin=0, styles=_panel_styles(),
     )
-    _overlay(layers, top=16, left=16)
+
+    # --- Tools panel: colour the channels by a CHANNEL property ---------------------------
+    color_sel = pn.widgets.Select(options=["None", *_COLOR_BY], value="None", width=_SIDEBAR_W - 34, margin=(0, 0, 6, 0))
+    cmap_sel = pn.widgets.Select(options=list(_COLORMAPS), value="Viridis", width=_SIDEBAR_W - 34, margin=(0, 0, 6, 0))
+    legend_div = Div(text="")
+    color_args = dict(
+        r=chan_r, legend=legend_div, base=_CHANNEL_COLOR, prop=color_sel, cmap=cmap_sel,
+        keys={label: v[0] for label, v in _COLOR_BY.items()},
+        cmaps={label: v[0] for label, v in _COLORMAPS.items()},
+        htmls={key: {ck: legend for ck, (_, legend) in by_map.items()} for key, by_map in color_scales.items()},
+    )
+    color_sel.jscallback(value=_COLOR_BY_JS, args=color_args)
+    cmap_sel.jscallback(value=_COLOR_BY_JS, args=color_args)
+    tools_collapse = pn.widgets.Button(icon="chevron-up", button_type="light", width=36, height=36, margin=0)
+    search_box = pn.Column(margin=0)  # filled in by the Search section below
+    tools_body = pn.Column(
+        pn.pane.HTML("<div style='font-size:12px;color:#555'>Search</div>", margin=(6, 0, 2, 0)),
+        search_box,
+        pn.pane.HTML("<div style='font-size:12px;color:#555'>Color channels by</div>", margin=(10, 0, 2, 0)),
+        color_sel,
+        pn.pane.HTML("<div style='font-size:12px;color:#555'>Color map</div>", margin=(0, 0, 2, 0)),
+        cmap_sel, pn.pane.Bokeh(legend_div, margin=0, width=_SIDEBAR_W - 32), margin=0,
+    )
+
+    def _toggle_tools(_):
+        tools_body.visible = not tools_body.visible
+        tools_collapse.icon = "chevron-up" if tools_body.visible else "chevron-down"
+
+    tools_collapse.on_click(_toggle_tools)
+    tools = pn.Column(
+        pn.Row(
+            pn.pane.HTML("<b style='letter-spacing:.5px;font-size:15px'>TOOLS</b>", margin=(8, 0, 0, 0)),
+            pn.HSpacer(), tools_collapse, margin=0,
+        ),
+        tools_body, width=_SIDEBAR_W, margin=0, styles=_panel_styles(),
+    )
+    sidebar = pn.Column(
+        layers, tools, width=_SIDEBAR_W, margin=0,
+        styles={
+            "background": "white", "height": "calc(100vh - 64px)", "overflow-y": "auto", "flex": "none",
+            "border-right": "1px solid #d9dde3", "box-shadow": "2px 0 6px rgba(0,0,0,0.08)", "z-index": "30",
+        },
+    )
 
     # --- Zoom / navigation buttons (client-side so they respond instantly) ----------
     zoom_in, zoom_out, home, locate, layers_btn = (
@@ -1174,7 +1547,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     search_btn = pn.widgets.Button(
         icon="search", button_type="light", width=30, height=28, margin=0, stylesheets=compact,
     )
-    search_msg = pn.pane.HTML("", margin=0, width=180)
+    search_msg = pn.pane.HTML("", margin=0, width=_SIDEBAR_W - 32)
 
     doc = pn.state.curdoc
     searched = {"text": "", "kind": None}
@@ -1227,23 +1600,23 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     search_in.param.watch(_on_edit, "value_input")
     search_kind.param.watch(_on_edit, "value")
     search_btn.on_click(_search)
-    search_card = pn.Column(
-        pn.Row(search_kind, search_in, search_btn, margin=0), search_msg,
-        width=224, styles=_card_styles(padding="4px 8px"),
-    )
-    _overlay(search_card, top=16)
-    search_card.styles = {**search_card.styles, "left": "50%", "transform": "translateX(-50%)"}
+    search_box[:] = [pn.Row(search_kind, search_in, search_btn, margin=0), search_msg]
 
     map_area = pn.Column(
         pn.pane.Bokeh(p, sizing_mode="stretch_both", margin=0),
-        layers, info_card, controls, popup_panel, bc_panel, src_panel, gate_panel, search_card,
+        info_card, controls, popup_panel, bc_panel, src_panel, gate_panel, res_panel,
         _overlay(
-            pn.pane.Bokeh(coord_div, width=360, styles=_card_styles(padding="10px 14px", color="#555")),
-            bottom=16, left=16,
+            pn.pane.Bokeh(
+                coord_div, width=270,
+                styles=_card_styles(padding="3px 8px", color="#555", **{"font-size": "11px", "border-radius": "8px"}),
+            ),
+            bottom=10, left=10,
         ),
         sizing_mode="stretch_width", margin=0,
-        styles={"position": "relative", "height": "calc(100vh - 100px)"},
+        styles={"position": "relative", "height": "calc(100vh - 64px)"},
     )
+    # The map sits to the right of the sidebar, so nothing of it is drawn beneath Layers or Tools.
+    main_row = pn.Row(sidebar, map_area, sizing_mode="stretch_width", margin=0)
 
     # --- Header ---------------------------------------------------------------------
     map_tab = pn.pane.HTML(
@@ -1258,11 +1631,11 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         pn.widgets.Button(icon="settings", button_type="light", width=40, margin=(8, 8)),
     ]
 
-    return pn.template.FastListTemplate(
+    template = pn.template.FastListTemplate(
         title="DSM2 INPUT VIEWER",
         logo="data:image/svg+xml," + urllib.parse.quote(_LOGO_SVG),
         header=header_items,
-        main=[map_area],
+        main=[main_row],
         main_layout=None,
         header_background="#ffffff",
         header_color="#1f2937",
@@ -1271,9 +1644,21 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         collapsed_sidebar=True,
         raw_css=[
             ".main-content, #main, #content, .content { padding: 0 !important; }",
+            "#main .card-margin { margin: 0 !important; }",
             "#sidebar, #sidebar-button { display: none !important; }",
         ],
     )
+
+    # Each jslink recomputes the document's model graph (~30 links, ~2 s); freeze that until the page is attached.
+    attach = template.server_doc
+
+    def server_doc(doc=None, *args, **kwargs):
+        doc = doc or pn.state.curdoc
+        with doc.models.freeze():
+            return attach(doc, *args, **kwargs)
+
+    template.server_doc = server_doc
+    return template
 
 
 @click.command(name="input_viewer")
@@ -1306,4 +1691,5 @@ def input_viewer(echo_file, channel_geo, node_geo, port):
         lambda: build_input_viewer(echo_file, channel_geo, node_geo),
         port=port, title="DSM2 Input Viewer", show=True,
         websocket_max_message_size=200 * 1024 * 1024,  # full-resolution BC series can be tens of MB
+        compress_response=True,  # gzip the ~6 MB of BokehJS / Panel scripts; matters over SSH or port forwarding
     )

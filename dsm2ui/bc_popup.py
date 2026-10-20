@@ -138,12 +138,12 @@ class BCPopup:
         )
 
     # --- public API --------------------------------------------------------------
-    def show(self, node, rows):
-        """Open for boundary ``node``; ``rows`` are dicts with name/kind/sign/fillin/file/path."""
+    def show(self, node, rows, place=None):
+        """Open for boundary ``node`` (or the free-text ``place``); ``rows`` are dicts with name/kind/sign/fillin/file/path."""
         self._rows = rows
         self._title.object = (
             "<div class='xs-drag' title='Drag to move' style='cursor:move;user-select:none;padding:6px 0;"
-            f"font-size:15px;font-weight:700;color:#222'>{self._heading} \u2013 NODE {node}</div>"
+            f"font-size:15px;font-weight:700;color:#222'>{self._heading} \u2013 {place or f'NODE {node}'}</div>"
         )
         self._loading = True
         self._select.options = {r.get("label") or f"{r['name']} ({r['kind']})": i for i, r in enumerate(rows)}
@@ -171,8 +171,9 @@ class BCPopup:
         parts = [
             f"<span>Name: <b style='font-weight:500'>{html.escape(row['name'])}</b></span>",
             f"<span>Type: <b style='font-weight:500'>{html.escape(row['kind'].title())}</b></span>",
-            f"<span>Node: <b style='color:#1a73e8;font-weight:500'>{row['node']}</b></span>",
         ]
+        if row.get("node") is not None:
+            parts.append(f"<span>Node: <b style='color:#1a73e8;font-weight:500'>{row['node']}</b></span>")
         if row.get("sign") is not None:
             parts.append(f"<span>Sign: <b style='font-weight:500'>{row['sign']:+d}</b></span>")
         parts.append(f"<span>Fill-in: <b style='font-weight:500'>{html.escape(str(row['fillin']))}</b></span>")
@@ -187,7 +188,7 @@ class BCPopup:
         objs = self._rules_for(row) if self._rules_for else []
         self._rules[:] = objs
         self._rules_title.visible = bool(objs)
-        self._export.filename = f"bc_node_{row['node']}_{row['name']}.csv"
+        self._export.filename = f"bc_{row['node'] if row.get('node') is not None else 'reservoir'}_{row['name']}.csv"
         try:
             df, units, window = self._load(row)
         except Exception as exc:  # file or path problems are reported in the window
