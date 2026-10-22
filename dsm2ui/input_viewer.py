@@ -48,6 +48,9 @@ _BLUE = "#1a73e8"
 _CHANNEL_COLOR = "#f5c518"
 _NODE_COLOR = "#5fa83a"
 _SELECT_COLOR = "#e02020"
+_DIFF_COLOR = "#e02020"
+_DIFF_EDGE = "#9b1111"
+_MISSING_COLOR = "#9e9e9e"
 _BOUNDARY_COLOR = "#7b2cbf"
 _XS_GREEN = "#2e9e2e"
 _SOURCE_DICU = "#b4b8bd"
@@ -55,9 +58,12 @@ _SOURCE_OTHER = "#4a4f55"
 _PIN_SVG = (
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 36 52'>"
     "<path d='M18 1.5C9 1.5 2 8.4 2 17c0 12 16 33.5 16 33.5S34 29 34 17C34 8.4 27 1.5 18 1.5z' "
-    "fill='#e53935' stroke='#b71c1c' stroke-width='2'/><circle cx='18' cy='17' r='7.5' fill='white'/></svg>"
+    "fill='#b5179e' stroke='#7a0f6b' stroke-width='2'/><circle cx='18' cy='17' r='7.5' fill='white'/></svg>"
 )
 _PIN_URL = "data:image/svg+xml;base64," + base64.b64encode(_PIN_SVG.encode()).decode()
+_PIN_RED_URL = "data:image/svg+xml;base64," + base64.b64encode(
+    _PIN_SVG.replace("#b5179e", _DIFF_COLOR).replace("#7a0f6b", _DIFF_EDGE).encode()
+).decode()
 
 _GATE_SVG = (
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 170 106'><g fill='#2f5fb3'>"
@@ -71,6 +77,7 @@ _GATE_SVG = (
     "stroke='#2f5fb3' stroke-width='9' fill='none' stroke-linecap='round'/></svg>"
 )
 _GATE_URL = "data:image/svg+xml;base64," + base64.b64encode(_GATE_SVG.encode()).decode()
+_GATE_RED_URL = "data:image/svg+xml;base64," + base64.b64encode(_GATE_SVG.replace("#2f5fb3", _DIFF_COLOR).encode()).decode()
 
 _RESERVOIR_COLOR = "#1f78b4"
 
@@ -215,8 +222,12 @@ view.el.addEventListener('mouseleave', () => {
   tip.style.display = 'none'; otip.style.display = 'none'; ntip.style.display = 'none'; ctip.style.display = 'none';
   setHover(-1);
 });
+"""
 
-// Drag the cross-section pop-up by its title (.xs-drag); the popup host carries .xs-popup.
+# Drag a pop-up by its title (.xs-drag); the popup host carries .xs-popup. Installed once per page.
+_DRAG_JS = """
+if (window.__dsm2drag) return;
+window.__dsm2drag = true;
 let drag = null;
 document.addEventListener('pointerdown', (e) => {
   const path = e.composedPath();
@@ -356,6 +367,14 @@ for (const r of [p.x_range, p.y_range]) {
   const c = (r.start + r.end) / 2, h = (r.end - r.start) / 2 * factor;
   r.start = c - h; r.end = c + h;
 }
+"""
+
+# Header tabs: show one view, hide the other, and mark the active tab button.
+_TAB_JS = """
+map_row.visible = show_map;
+compare_row.visible = !show_map;
+map_btn.css_classes = show_map ? ['tab-active'] : [];
+compare_btn.css_classes = show_map ? [] : ['tab-active'];
 """
 
 _FIT_LEFT_JS = """
@@ -563,7 +582,7 @@ def _build_reservoirs(echo_file, nodes):
         res["name"].append(name)
         res["info"].append("<br>".join(lines))
 
-    conn = {"xs": [], "ys": [], "info": [], "name": []}
+    conn = {"xs": [], "ys": [], "info": [], "name": [], "node": []}
     for rec in conns.to_dict("records"):
         coords = [c for part in rec["geometry"].geoms for c in part.coords]
         ends = (coords[0], coords[-1])
@@ -592,6 +611,7 @@ def _build_reservoirs(echo_file, nodes):
         conn["xs"].append([c[0] for c in coords])
         conn["ys"].append([c[1] for c in coords])
         conn["info"].append("<br>".join(lines))
+        conn["node"].append(node)
         conn["name"].append(name)
     return res, conn
 
@@ -854,6 +874,14 @@ def _swatch(kind):
         )
     if kind == "line":
         css = f"width:26px;height:4px;border-radius:2px;background:{_CHANNEL_COLOR}"
+    elif kind == "diff_line":
+        css = f"width:26px;height:5px;border-radius:2px;background:{_DIFF_COLOR}"
+    elif kind == "diff_circle":
+        css = f"width:9px;height:9px;border-radius:50%;border:2px solid {_DIFF_COLOR}"
+    elif kind == "diff_square":
+        css = f"width:12px;height:12px;background:{_DIFF_COLOR};margin:0 0 0 3px"
+    elif kind == "diff_dashed":
+        css = f"width:26px;height:0;border-top:3px dashed {_DIFF_COLOR};margin-top:6px"
     elif kind == "triangle":
         css = (
             "width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;"
@@ -862,10 +890,21 @@ def _swatch(kind):
     elif kind in ("dicu", "other"):
         color = _SOURCE_DICU if kind == "dicu" else _SOURCE_OTHER
         css = f"width:8px;height:8px;border-radius:50%;background:{color};margin:1px 0 0 3px"
+    elif kind == "diff_triangle":
+        css = (
+            "width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;"
+            f"border-bottom:10px solid {_DIFF_COLOR};margin-top:1px"
+        )
+    elif kind == "diff_dot":
+        css = f"width:8px;height:8px;border-radius:50%;background:{_DIFF_COLOR};margin:1px 0 0 3px"
     elif kind == "pin":
         return pn.pane.HTML(f"<img src='{_PIN_URL}' height='18' style='margin-top:1px'>", margin=(11, 4, 0, 0), width=30)
+    elif kind == "diff_pin":
+        return pn.pane.HTML(f"<img src='{_PIN_RED_URL}' height='18' style='margin-top:1px'>", margin=(11, 4, 0, 0), width=30)
     elif kind == "gate":
         return pn.pane.HTML(f"<img src='{_GATE_URL}' height='16' style='margin-top:2px'>", margin=(11, 4, 0, 0), width=30)
+    elif kind == "diff_gate":
+        return pn.pane.HTML(f"<img src='{_GATE_RED_URL}' height='16' style='margin-top:2px'>", margin=(11, 4, 0, 0), width=30)
     elif kind == "reservoir":
         css = f"width:12px;height:12px;background:{_RESERVOIR_COLOR};margin:0 0 0 3px"
     elif kind == "dashed":
@@ -879,11 +918,90 @@ def _icon_button(icon):
     return pn.widgets.Button(icon=icon, button_type="light", width=44, height=44, margin=0)
 
 
-def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
-    """Build the dashboard template for the channel/node viewer."""
+def _missing_geometry(echo_file, chans, nodes):
+    """Channel and node numbers of the echo file that have no feature in the GeoJSON files."""
+    table = _load_echo(echo_file)["CHANNEL"]
+    used_nodes = set(table["UPNODE"].astype(int)) | set(table["DOWNNODE"].astype(int))
+    return {
+        "channels": sorted(set(table["CHAN_NO"].astype(int)) - set(chans["CHAN_NO"])),
+        "nodes": sorted(used_nodes - set(nodes["id"])),
+    }
+
+
+@functools.lru_cache(maxsize=4)
+def _load_geo(path):
+    """Read a GeoJSON in web-mercator, indexed by its integer feature id."""
+    gdf = gpd.read_file(path).to_crs(epsg=3857)
+    gdf.index = gdf["id"].astype(int).to_numpy()
+    return gdf
+
+
+def _geojson_only(echo_file, channel_geo, node_geo):
+    """GeoJSON channels and nodes the echo file does not define, as ({xs, ys, chan}, {x, y, node}) columns."""
+    table = _load_echo(echo_file)["CHANNEL"]
+    used_nodes = set(table["UPNODE"].astype(int)) | set(table["DOWNNODE"].astype(int))
+    chan_gdf, node_gdf = _load_geo(channel_geo), _load_geo(node_geo)
+    chan_cols = {"xs": [], "ys": [], "chan": []}
+    for chan in sorted(set(chan_gdf.index) - set(table["CHAN_NO"].astype(int))):
+        coords = [c for part in chan_gdf.geometry[chan].geoms for c in part.coords]
+        chan_cols["xs"].append([c[0] for c in coords])
+        chan_cols["ys"].append([c[1] for c in coords])
+        chan_cols["chan"].append(chan)
+    node_cols = {"x": [], "y": [], "node": []}
+    for node in sorted(set(node_gdf.index) - used_nodes):
+        node_cols["x"].append(node_gdf.geometry[node].x)
+        node_cols["y"].append(node_gdf.geometry[node].y)
+        node_cols["node"].append(node)
+    return chan_cols, node_cols
+
+
+def _add_geojson_only_layers(p, chan_cols, node_cols):
+    """Draw the GeoJSON channels and nodes missing from the echo file in gray, with a hover message each."""
+    chan_r = p.multi_line(
+        "xs", "ys", source=ColumnDataSource(chan_cols), line_width=3, line_color=_MISSING_COLOR,
+    )
+    node_r = p.scatter(
+        "x", "y", source=ColumnDataSource(node_cols), size=10, fill_color="white", fill_alpha=0.6,
+        line_color=_MISSING_COLOR, line_width=1.5,
+    )
+    p.add_tools(
+        HoverTool(
+            renderers=[chan_r], tooltips="channel @chan{0} in geojson but missing in dsm2 input", line_policy="nearest",
+        ),
+        HoverTool(renderers=[node_r], tooltips="node @node{0} in geojson but missing in dsm2 input"),
+    )
+
+
+def _geojson_only_warning(chan_cols, node_cols):
+    """Warning text for GeoJSON channels and nodes missing from the echo file, or None."""
+    parts = [
+        f"{noun}{'s' * (len(ids) > 1)} {', '.join(map(str, ids))}"
+        for noun, ids in (("channel", chan_cols["chan"]), ("node", node_cols["node"])) if ids
+    ]
+    return " and ".join(parts).capitalize() + " missing in dsm2 input" if parts else None
+
+
+def _warning_card(messages):
+    """A dismissible warning card, shown until the user closes it."""
+    close = pn.widgets.Button(icon="x", button_type="light", width=30, height=30, margin=0)
+    lines = "".join(f"<div style='margin-top:2px'>{html.escape(m)}</div>" for m in messages)
+    card = pn.Column(
+        pn.Row(
+            pn.pane.HTML("<b style='color:#b26a00'>Warning</b>", margin=(4, 0, 0, 0)), pn.HSpacer(), close, margin=0,
+        ),
+        pn.pane.HTML(f"<div style='font-size:12px;color:#333;max-width:300px'>{lines}</div>", margin=0),
+        width=340, styles=_card_styles(padding="6px 10px", **{"border-left": "4px solid #f5a623", "border-radius": "8px"}),
+    )
+    close.js_on_click(args=dict(card=card), code="card.visible = false;")
+    return card
+
+
+def build_input_viewer(echo_file, channel_geo=None, node_geo=None, scenario_file=None):
+    """Build the dashboard template for the channel/node viewer; a scenario file adds the Compare tab."""
     chans, nodes = _load_network(
         echo_file, channel_geo or _DEFAULT_CHANNEL_GEO, node_geo or _DEFAULT_NODE_GEO
     )
+    geo_only = _geojson_only(echo_file, channel_geo or _DEFAULT_CHANNEL_GEO, node_geo or _DEFAULT_NODE_GEO)
 
     # Channel geometries are single-part MultiLineStrings.
     lines = [[c for part in g.geoms for c in part.coords] for g in chans.geometry]
@@ -921,6 +1039,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     p.axis.visible = False
     p.grid.visible = False
     p.add_tile(_TILES)
+    _add_geojson_only_layers(p, *geo_only)
 
     chan_r = p.multi_line(
         "xs", "ys", source=chan_src, line_width=3, line_color=_CHANNEL_COLOR,
@@ -1176,7 +1295,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
                 srcnodes=sorted(src_rows),
                 req=req_src, fit=fit_div,
             ),
-            code=_CONTEXT_MENU_JS,
+            code=_CONTEXT_MENU_JS + _DRAG_JS,
         ),
     )
     p.add_tools(
@@ -1503,7 +1622,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     sidebar = pn.Column(
         layers, tools, width=_SIDEBAR_W, margin=0,
         styles={
-            "background": "white", "height": "calc(100vh - 64px)", "overflow-y": "auto", "flex": "none",
+            "background": "white", "height": "100%", "overflow-y": "auto", "flex": "none",
             "border-right": "1px solid #d9dde3", "box-shadow": "2px 0 6px rgba(0,0,0,0.08)", "z-index": "30",
         },
     )
@@ -1613,10 +1732,10 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
             bottom=10, left=10,
         ),
         sizing_mode="stretch_width", margin=0,
-        styles={"position": "relative", "height": "calc(100vh - 64px)"},
+        styles={"position": "relative", "height": "100%"},
     )
     # The map sits to the right of the sidebar, so nothing of it is drawn beneath Layers or Tools.
-    main_row = pn.Row(sidebar, map_area, sizing_mode="stretch_width", margin=0)
+    main_row = pn.Row(sidebar, map_area, sizing_mode="stretch_both", margin=0)
 
     # --- Header ---------------------------------------------------------------------
     map_tab = pn.pane.HTML(
@@ -1630,12 +1749,53 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         pn.widgets.Button(icon="help", button_type="light", width=40, margin=(8, 0)),
         pn.widgets.Button(icon="settings", button_type="light", width=40, margin=(8, 8)),
     ]
+    main = [main_row]
+    missing = _missing_geometry(echo_file, chans, nodes)
+
+    if scenario_file:
+        from dsm2ui.input_compare import build_compare_view
+
+        compare_row = build_compare_view(
+            echo_file, scenario_file, channel_geo or _DEFAULT_CHANNEL_GEO, node_geo or _DEFAULT_NODE_GEO
+        )
+        compare_row.visible = False
+        tab_css = [
+            ".bk-btn { background: transparent; border: none; border-bottom: 3px solid transparent;"
+            " border-radius: 0; height: 56px; padding: 0 18px; font-size: 14px; font-weight: 600;"
+            " color: #4b5563; box-shadow: none; }",
+            f":host(.tab-active) .bk-btn {{ color: {_BLUE}; border-bottom-color: {_BLUE}; }}",
+        ]
+        map_btn = pn.widgets.Button(
+            name="Map", icon="map", button_type="light", height=56, margin=(0, 0, 0, 24),
+            css_classes=["tab-active"], stylesheets=tab_css,
+        )
+        compare_btn = pn.widgets.Button(
+            name="Compare", icon="arrows-diff", button_type="light", height=56, margin=0, stylesheets=tab_css,
+        )
+        for btn, show_map in ((map_btn, True), (compare_btn, False)):
+            btn.js_on_click(
+                args=dict(map_row=main_row, compare_row=compare_row, map_btn=map_btn, compare_btn=compare_btn,
+                          show_map=show_map),
+                code=_TAB_JS,
+            )
+        header_items[0] = pn.Row(map_btn, compare_btn, margin=0, height=56)
+        # One wrapper so the hidden tab leaves no empty card behind it.
+        main = [pn.Column(main_row, compare_row, sizing_mode="stretch_both", margin=0)]
+
+    warnings = [
+        f"No geometry for {kind[:-1] + 's' * (len(ids) > 1)} {', '.join(map(str, ids))}, not shown on map"
+        for kind, ids in missing.items() if ids
+    ]
+    if _geojson_only_warning(*geo_only):
+        warnings.append(_geojson_only_warning(*geo_only))
+    if warnings:
+        map_area.append(_overlay(_warning_card(warnings), bottom=40, right=16))
 
     template = pn.template.FastListTemplate(
         title="DSM2 INPUT VIEWER",
         logo="data:image/svg+xml," + urllib.parse.quote(_LOGO_SVG),
         header=header_items,
-        main=[main_row],
+        main=main,
         main_layout=None,
         header_background="#ffffff",
         header_color="#1f2937",
@@ -1644,7 +1804,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
         collapsed_sidebar=True,
         raw_css=[
             ".main-content, #main, #content, .content { padding: 0 !important; }",
-            "#main .card-margin { margin: 0 !important; }",
+            "#main .card-margin { margin: 0 !important; height: 100% !important; }",
             "#sidebar, #sidebar-button { display: none !important; }",
         ],
     )
@@ -1662,10 +1822,22 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
 
 
 @click.command(name="input_viewer")
+@click.argument("files", nargs=-1, type=click.Path(dir_okay=False, exists=True, readable=True))
 @click.option(
-    "--input", "echo_file", required=True,
+    "--input", "echo_file", default=None,
     type=click.Path(dir_okay=False, exists=True, readable=True),
-    help="DSM2 hydro echo .inp file containing the CHANNEL table.",
+    help="DSM2 hydro echo .inp file containing the CHANNEL table (same as giving one FILE).",
+)
+@click.option("--compare", type=bool, default=False, help="Optional; giving two FILES or --scenario already compares.")
+@click.option(
+    "--base", "base_file", default=None,
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    help="Base hydro echo .inp file to compare from (same as the first of two FILES).",
+)
+@click.option(
+    "--scenario", "scenario_file", default=None,
+    type=click.Path(dir_okay=False, exists=True, readable=True),
+    help="Scenario hydro echo .inp file to compare against the base (same as the second of two FILES).",
 )
 @click.option(
     "--channel", "channel_geo", default=None,
@@ -1678,8 +1850,26 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None):
     help="Node GeoJSON. Defaults to the bundled file.",
 )
 @click.option("--port", default=0, show_default=True, type=int, help="Server port (0 = random).")
-def input_viewer(echo_file, channel_geo, node_geo, port):
-    """Interactive map of DSM2 channels and nodes; click a channel for its properties."""
+def input_viewer(files, echo_file, compare, base_file, scenario_file, channel_geo, node_geo, port):
+    """Interactive map of DSM2 channels and nodes; click a channel for its properties.
+
+    FILES is one hydro echo file to view, or two (base then scenario) to also get a Compare tab.
+    """
+    if len(files) > 2:
+        raise click.UsageError("Give one echo file, or two (base then scenario) to compare.")
+    if len(files) == 2:
+        base_file, scenario_file = files
+    elif files and scenario_file:
+        base_file = files[0]
+    elif files:
+        echo_file = files[0]
+    if base_file or scenario_file or compare:
+        if not (base_file and scenario_file):
+            raise click.UsageError("Comparing needs two echo files: base then scenario.")
+        echo_file = base_file
+    else:
+        if not echo_file:
+            raise click.UsageError("Give an echo file: dsm2ui input_viewer A.inp (or two files to compare).")
     pn.extension(
         notifications=True,
         disconnect_notification="Connection to the server was lost (timed out or server stopped). "
@@ -1687,8 +1877,10 @@ def input_viewer(echo_file, channel_geo, node_geo, port):
     )
     # Parse once up front; each browser session then builds its own widgets from the cache.
     _load_network(echo_file, channel_geo or _DEFAULT_CHANNEL_GEO, node_geo or _DEFAULT_NODE_GEO)
+    if scenario_file:
+        _load_echo(scenario_file)
     pn.serve(
-        lambda: build_input_viewer(echo_file, channel_geo, node_geo),
+        lambda: build_input_viewer(echo_file, channel_geo, node_geo, scenario_file),
         port=port, title="DSM2 Input Viewer", show=True,
         websocket_max_message_size=200 * 1024 * 1024,  # full-resolution BC series can be tens of MB
         compress_response=True,  # gzip the ~6 MB of BokehJS / Panel scripts; matters over SSH or port forwarding

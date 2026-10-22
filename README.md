@@ -276,20 +276,74 @@ A dashboard-style, web-based **map of the DSM2 channel network** driven by a hyd
 
 Georeferencing defaults to the bundled DSM2 v9.3 GeoJSONs (`dsm2ui/dsm2gis/`), so no shapefile paths are required.
 
-| Option | Type | Default | Description |
+| Argument / Option | Type | Default | Description |
 |---|---|---|---|
-| `--input FILE` | path | *(required)* | DSM2 hydro echo `.inp` file |
+| `FILES...` | path (one or two) | *(required)* | One hydro echo `.inp` file to view, or two (**base** then **scenario**) to also get a **Compare** tab next to **Map** |
+| `--input FILE` | path | — | Same as giving one `FILE` |
+| `--base FILE` / `--scenario FILE` | path | — | Same as giving two `FILES`; the Map tab and the base layers of the Compare tab show the base file |
+| `--compare BOOL` | bool | `False` | Optional; two `FILES` or `--scenario` already switch on the Compare tab |
 | `--channel FILE` | path | bundled centerlines GeoJSON | Channel centerline GeoJSON (feature `id` = channel number) |
 | `--node FILE` | path | bundled node GeoJSON | Node GeoJSON (feature `id` = node number) |
 | `--port PORT` | int | `0` (random) | Port for the web server |
 
 ```bash
 # Quickest start — uses the bundled GeoJSONs
-dsm2ui input_viewer --input output/hydro_echo_hist_fc_mss.inp
+dsm2ui input_viewer output/hydro_echo_hist_fc_mss.inp
 
 # Custom geometry and a fixed port
-dsm2ui input_viewer --input output/hydro_echo.inp --channel my_channels.geojson --node my_nodes.geojson --port 5006
+dsm2ui input_viewer output/hydro_echo.inp --channel my_channels.geojson --node my_nodes.geojson --port 5006
+
+# Compare a scenario against a base run (base first, then scenario)
+dsm2ui input_viewer output/hydro_echo_base.inp output/hydro_echo_scenario.inp
 ```
+
+#### Compare tab
+
+With two echo files, the **Compare** tab uses the same layout as the Map tab. **Base Layers** (Channels, Channel Nodes, Channel Direction) show the base echo file. **Diff Layers** draw in red the channels and nodes that differ from the scenario. Hovering a channel or node shows the same tooltip as in the Map tab (channel number and up → down nodes, or node number). Right-click a red channel and choose **View channel diff** to open a pop-up with the base and scenario values side by side: the channel properties, the cross-section locations that were added, removed or changed (for a location present in both files, the base and scenario elevation, area, width and wetted perimeter of every layer that differs), and the initial condition, with the differing values highlighted. The **Diff Summary** button at the top of the sidebar opens a window with a **Channels** table (columns Properties and Channel Num). It counts the differing channels and lists, at a high level, which ones changed and in what way: new or removed channel, length, Manning's n, dispersion, upnode / downnode, DX, cross-section, initial condition. A channel or node of the base echo file that has no geometry in the GeoJSON cannot be drawn; a warning card naming it appears in the bottom-right corner of the Map tab at launch until you close it.
+
+A channel is red when, compared with the base, it is new or removed, or when any of these changed:
+
+- length, Manning's n, dispersion, upnode, downnode, or DX (`CHANNEL`)
+- cross-section locations, elevation, area, width, or wetted perimeter (`XSECT_LAYER`)
+- initial condition (`CHANNEL_IC`)
+
+A node is red when it is new or removed, or when a channel that started (upnode) or ended (downnode) there in the base no longer does, because the channel was removed or its upnode / downnode moved. A node that only gains a channel (a new channel, or an existing channel reconnected to it) is not red; the channel is. Only the channel whose own properties changed is red; other channels at that node are not.
+
+The base file is always the standard: "new" means not in the base file and "removed" means not in the scenario file. The GeoJSON files describe the base network, so a channel or node that is new in the scenario has no geometry and cannot be drawn; it is still counted in the Diff Summary for channels.
+
+**Reservoirs.** Only changed reservoirs are drawn, as red squares (**Changed Reservoirs**). A reservoir is red when it is removed, or when any of these changed:
+
+- connections: a node added or removed, or its `COEF_IN` / `COEF_OUT` (`RESERVOIR_CONNECTION`); the matching connection lines turn red (**Changed Res. Connections**), or all of a removed reservoir's lines
+- surface area or bottom elevation (`RESERVOIR`)
+- the elevation vs area table (`RESERVOIR_VOL`)
+- initial stage (`RESERVOIR_IC`)
+
+Right-click a red reservoir and choose **View reservoir diff** to see the properties, the connections (per node) and the differing points of the elevation vs area table, base next to scenario. A new reservoir is not in the base network, so it is not drawn and appears only in the **Diff Summary** (Reservoirs table). Only the original (base) connection lines are drawn, and they turn red when that connection changed or was removed; a connection added in the scenario has no base line and is not drawn.
+
+**Gates.** Only changed gates are drawn, as red gate icons (**Changed Gates**), at the location the base file gives them. A gate is red when it is removed, or when any of these changed:
+
+- `FROM_OBJ`, `FROM_IDENTIFIER` or `TO_NODE` (`GATE`)
+- a weir or pipe device was added, removed or had a property changed (`GATE_WEIR_DEVICE`, `GATE_PIPE_DEVICE`)
+- an operating rule that acts on the gate (matched by `gate=` in its `ACTION`) was added or removed, or its `ACTION` or `TRIGGER` changed (`OPERATING_RULE`)
+- an `OPRULE_EXPRESSION` used by the gate's rule triggers changed
+- the **values** of an `OPRULE_TIME_SERIES` the gate's rules read changed; a series whose file name or path changed but whose data are identical is not a difference
+
+Right-click a red gate and choose **View gate diff**. The window has two tabs; it opens on the first tab that has differences:
+
+- **Gate structure** shows the location and the changed devices (every property, base next to scenario).
+- **Operating rules** shows the changed rules (`ACTION` and `TRIGGER`), the changed expressions, and, for each time series whose values differ, a chart overlaying the base and scenario series.
+
+The **Diff Summary** lists device and location changes in the **Gates** table and rule changes in a separate **Operating Rules** table. A new gate is not in the base network, so it is not drawn and appears only in the **Diff Summary** (Gates table).
+
+**Boundary and source flows.** Rows of `BOUNDARY_FLOW`, `BOUNDARY_STAGE`, `SOURCE_FLOW` and `SOURCE_FLOW_RESERVOIR` are matched by `NAME` within their table. Changed rows are drawn at their base location with the Map tab's icons in red: a triangle for boundary flow and stage (**Changed Boundary Nodes**) and a dot for source flow, both DICU and other, including source flow on a reservoir (**Changed Source Flow**; a reservoir source flow sits on the reservoir). A row is changed when its `NODE` (`RES_NAME` for `SOURCE_FLOW_RESERVOIR`), `SIGN` or `FILLIN` changed or when the **values** of its time series changed; a renamed file or path with identical data is not a difference. Rows only in the scenario are new and rows only in the base are removed. New rows are not drawn; a removed row is drawn in red at its base location, like a changed one. All of them appear in the **Diff Summary**, which has one table per input type (Boundary Flow, Boundary Stage, Source Flow, Source Flow Reservoir) with the rows Node changed (or RES_NAME changed), SIGN changed, FILLIN changed, Data changed, New and Removed.
+
+Right-click a red icon and choose **View boundary diff** or **View source flow diff** to see the changed rows at that node or reservoir: the base and scenario node (or reservoir), `SIGN` and `FILLIN` and, when the values differ, a chart overlaying the base and scenario time series. For a removed row the window shows the base row (node or reservoir, `SIGN`, `FILLIN`, file and path) next to empty scenario cells.
+
+**Changed Nodes** are drawn as a red outline with a transparent fill.
+
+**Output locations.** `OUTPUT_CHANNEL` rows are matched by `NAME`, ignoring case. For a name in both files only the set of `CHAN_NO` and `DISTANCE` values decides whether it changed; the variable, interval, period operation and file are ignored, and `length` is not equal to a number. A changed or removed location is drawn at its base position with the Map tab's pin in red (**Changed Output Locations**); hovering it shows, for each name, its base and its scenario location (channel and distance, or "removed"). A name only in the scenario is new and is not drawn. All of them appear in the **Diff Summary** in an **Output Locations** table with the rows Location changed, New and Removed.
+
+**Scalars.** The `SCALAR` table is compared in the **Diff Summary** only; nothing is drawn on the map. Scalars are matched by `NAME`, ignoring case, and a value is compared as a number when both are numeric (`0.60` equals `0.6`), otherwise as text ignoring case and surrounding spaces. A **Scalars** table lists every changed, new and removed scalar with its base and scenario value.
 
 If the connection to the server is lost (server stopped, network or tunnel dropped, idle proxy timeout), the page shows a red "Connection to the server was lost" notification; relaunch if needed and reload the page.
 
@@ -313,11 +367,12 @@ If the connection to the server is lost (server stopped, network or tunnel dropp
 #### Map and layers
 
 - **Navigate:** left-drag to pan, mouse wheel to zoom about the cursor. The buttons at the top right zoom in, zoom out, return to the full network (home), zoom to the selected channel (locate), and show/hide the Layers panel. Zooming to a location keeps it clear of any open window.
-- **Layers panel** (sidebar, top left; the map is drawn only to the right of the sidebar): switch **Channels**, **Channel Nodes**, **Channel Direction** (an arrow at each channel's midpoint pointing from upnode to downnode) and **Boundary Nodes** (purple triangles drawn inside the node circles) on and off, as well as the **Source Flow** dots: **Source Flow (DICU)** (light grey) and **Source Flow (other)** (dark grey) are small dots inside the node circles, and a node with both shows one inside the other. **Output Locations** (small red map pins) mark the `OUTPUT_CHANNEL` stations along their channels, one pin per location, and grow as you zoom in. **Hydraulic Structures** (blue gate icon, larger than a node) come from the `GATE` table: a gate whose `FROM_OBJ` is `channel` is drawn beside its `TO_NODE` on that channel, and a `reservoir` gate is drawn on its `TO_NODE`. Gate icons grow and shrink with the zoom level. **Reservoirs** (a blue square, growing with zoom) and **Reservoir Connections** (dashed lines from a reservoir to the channel nodes it connects to) are drawn from the reservoir GeoJSONs in `dsm2gis/`, limited to the reservoirs defined in the echo file's `RESERVOIR` table. The chevron collapses the box.
+- **Layers panel** (sidebar, top left; the map is drawn only to the right of the sidebar): switch **Channels**, **Channel Nodes**, **Channel Direction** (an arrow at each channel's midpoint pointing from upnode to downnode) and **Boundary Nodes** (purple triangles drawn inside the node circles) on and off, as well as the **Source Flow** dots: **Source Flow (DICU)** (light grey) and **Source Flow (other)** (dark grey) are small dots inside the node circles, and a node with both shows one inside the other. **Output Locations** (small magenta map pins) mark the `OUTPUT_CHANNEL` stations along their channels, one pin per location, and grow as you zoom in. **Hydraulic Structures** (blue gate icon, larger than a node) come from the `GATE` table: a gate whose `FROM_OBJ` is `channel` is drawn beside its `TO_NODE` on that channel, and a `reservoir` gate is drawn on its `TO_NODE`. Gate icons grow and shrink with the zoom level. **Reservoirs** (a blue square, growing with zoom) and **Reservoir Connections** (dashed lines from a reservoir to the channel nodes it connects to) are drawn from the reservoir GeoJSONs in `dsm2gis/`, limited to the reservoirs defined in the echo file's `RESERVOIR` table. The chevron collapses the box.
 - **Tools panel** (sidebar, below Layers): **Color channels by** paints the channels by a CHANNEL-table property: Length, Manning's n, Dispersion or DX, using the **Color map** you choose (Viridis, Plasma, Inferno, Cividis, Turbo, Spectral, Red-Yellow-Blue, Yellow-Orange-Red). Values fall into eight equal-width classes between the 2nd and 98th percentile (the end classes reach the minimum and maximum) so a few extreme channels do not wash out the rest. The legend lists the value range of each colour; choose **None** to restore the plain colour. Selection highlighting still works while a colouring is active.
 - **Status:** a live latitude/longitude readout (NAD 83) is shown at the bottom left.
 - **Hover:** channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`). Nodes with source flows also list how many DICU and other sources they have. Output-location pins show the station name(s), channel, and distance, e.g. `ANH — channel 51 @ 11,789 ft`. Only one tooltip is shown at a time: the channel tooltip and highlight are suppressed while the cursor is on a pin, a node, or a hydraulic structure; the pin tooltip is suppressed on a node or a hydraulic structure; and node tooltips are suppressed on a hydraulic structure. A channel gate shows the channel number, up→down nodes, and the gate name; a reservoir gate shows the node number and the gate name. Right-clicking a channel gate offers the channel info window. A reservoir icon shows only the reservoir name and its connected nodes; a connection line shows the reservoir, the node, and the in / out coefficients.
 - **Base map:** Esri World Topo Map (requires internet access).
+- **Missing in the DSM2 input:** channels and nodes that are in the GeoJSON files but not in the echo file are drawn in gray (no Layers entry). Hovering one shows "channel x in geojson but missing in dsm2 input" or "node x in geojson but missing in dsm2 input", and a warning card lists them at launch. The same gray channels and nodes appear in the Compare tab, where the echo file is the base.
 
 #### Channel information
 
