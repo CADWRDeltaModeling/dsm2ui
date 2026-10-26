@@ -272,7 +272,9 @@ dsm2ui ui map hydro_echo.inp --node nodes.geojson
 
 ### Input viewer — `input_viewer`
 
-A dashboard-style, web-based **map of the DSM2 channel network** driven by a hydro echo file. Channels are drawn as lines with their up/down nodes, positive channel direction (upnode to downnode) is denoted with arrow, and boundary-condition (BC) nodes, source flows, reservoir locations and connections, output locations, and hydraulic structures (gates) are marked. Right-click menus open pop-up windows with channel **cross sections**, BC and source-flow **time series**, and the **devices and operating rules** of a gate.
+A dashboard-style, web-based **map of the DSM2 channel network** driven by a hydro echo file. Channels are drawn as lines with their up/down nodes, positive channel direction (upnode to downnode) is denoted with arrow, and boundary-condition (BC) nodes, source flows, reservoir locations and connections, output locations, and hydraulic structures (gates) are marked.
+
+Right-click menus open pop-up windows with channel **cross sections**, BC and source-flow **time series**, reservoir information, and the **devices and operating rules** of a gate.
 
 Under **Tools**, users can **search** a channel or node by number and **color channels by** Length, Manning's n, Dispersion or DX with a choice of color maps (see [Map and layers](#map-and-layers) and [Search](#search)). 
 
@@ -340,14 +342,20 @@ If the connection to the server is lost (server stopped, network or tunnel dropp
         1.  Choose **Channel** or **Node**.
         2. Type the number and press Enter (or click the magnifier).
         3. The map zooms to the result and highlights it (channels also open the information card; nodes get a red ring).
-        A number that does not exist shows a "not found" message. Editing or deleting the number, or switching Channel/Node, clears the previous result. Only nodes that appear in the `CHANNEL` table can be found.
+
+    > **Note:**
+     A number that does not exist shows a "not found" message. Editing or deleting the number, or switching Channel/Node, clears the previous result. Only nodes that appear in the `CHANNEL` table can be found.
+
     - **Color channels by**: paints the channels by a CHANNEL-table property: Length, Manning's n, Dispersion or DX, using the **Color map** you choose. Values fall into eight equal-width classes between the 2nd and 98th percentile (the end classes reach the minimum and maximum) so a few extreme channels do not wash out the rest. The legend lists the value range of each colour; choose **None** to restore the plain colour. Selection highlighting still works while a colouring is active.
 - **Status:** a live latitude/longitude readout (NAD 83) is shown at the bottom left.
-- **Hover:** channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`). Nodes with source flows also list how many DICU and other sources they have. Output-location pins show the station name(s), channel, and distance, e.g. `ANH — channel 51 @ 11,789 ft`. Only one tooltip is shown at a time: the channel tooltip and highlight are suppressed while the cursor is on a pin, a node, or a hydraulic structure; the pin tooltip is suppressed on a node or a hydraulic structure; and node tooltips are suppressed on a hydraulic structure. A channel gate shows the channel number, up→down nodes, and the gate name; a reservoir gate shows the node number and the gate name. Right-clicking a channel gate offers the channel info window. A reservoir icon shows only the reservoir name and its connected nodes; a connection line shows the reservoir, the node, and the in / out coefficients.
+- **Hover:** 
+    - channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`). 
+    - Nodes with source flows also list how many DICU and other sources they have. 
+    - Output-location pins show the station name(s), channel, and distance, e.g. `ANH — channel 51 @ 11,789 ft`.
 - **Base map:** Esri World Topo Map (requires internet access).
-- **Warning:**
-    - channels and nodes that are in the GeoJSON files but not in the echo file are drawn in gray (no Layers entry). Hovering one shows "channel x in geojson but missing in dsm2 input" or "node x in geojson but missing in dsm2 input"
-    The same gray channels and nodes appear in the Compare tab, where the echo file is the base.
+- **Warning Message:**
+    - channels and nodes that are in the GeoJSON files but not in the echo file are drawn in gray (no Layers entry). Hovering one shows "channel x in geojson but missing in dsm2 input" or "node x in geojson but missing in dsm2 input".
+    - The same gray channels and nodes appear in the Compare tab, where the echo file is the base.
     - channels and nodes that are in dsm2 echo file but not in GeoJSON files produce a warning card lists them at launch. 
 
 #### Channel information
@@ -368,9 +376,10 @@ The window can be dragged by its title; the title and channel summary stay pinne
 
 #### Boundary-condition data — right-click a BC node (or a channel ending at one) → **View BC data**
 
-Opens a **Boundary Condition** window with the DSS time series named by the `FILE` and `PATH` columns of the `BOUNDARY_FLOW` / `BOUNDARY_STAGE` row:
+**Boundary Condition** window with the DSS time series named by the `FILE` and `PATH` columns of the `BOUNDARY_FLOW` / `BOUNDARY_STAGE` row:
 
-- Name, type, node, sign, fill-in, units, interval, data period, model run period, min/mean/max, and missing-value count; if a node has several BC inputs, a drop-down selects between them.
+- Name, type, node, sign, fill-in, units, interval, data period, model run period, min/mean/max, and missing-value count
+- if a node has several BC inputs, a drop-down selects between them.
 - The chart shows the **full record** in the DSS file. Choose a display mode:
 
 | Mode | Plot |
@@ -382,36 +391,45 @@ Opens a **Boundary Condition** window with the DSS time series named by the `FIL
 
 - **Full record** and **Model run period** buttons set the visible time window (the run period comes from `START_DATE`/`END_DATE`); pan and zoom work along the time axis.
 - **Export CSV** saves the series as currently displayed.
-- Relative `FILE` names are resolved from the study directory (the parent of the folder holding the echo file), then from the echo file's folder, then the current directory; `${VAR}` references are expanded from `ENVVAR`.
 
 The BC node is ringed on the map while its window is open. The window can be dragged by its title, like the cross-section window.
 
 #### Source flow data — right-click a source-flow dot → **View source flow data**
 
-The option appears only when the cursor is on (or very close to) a source-flow dot, not when you right-click a channel, and it is always a single entry for that node.
+Source-flow nodes come from the `SOURCE_FLOW` table and are marked with small grey dots (see the Layers box).
 
-Source-flow nodes come from the `SOURCE_FLOW` table and are marked with small grey dots (see the Layers box). Source flows of a reservoir (`SOURCE_FLOW_RESERVOIR`) belong to the reservoir, not to a node: they are not drawn on node circles and are not counted in the node hover totals. A reservoir that has source flows shows the same dots as a node, at the corner of its icon and at the same fixed size as the node dots: a light grey dot for DICU flows (e.g. the Clifton Court BBID flows) with a smaller dark grey one for other flows (e.g. the SWP flow). Each follows the **Reservoirs** layer and its own **Source Flow (DICU)** / **Source Flow (other)** layer. Right-click the reservoir icon and choose **View source flow data** (offered only for reservoirs that have such flows, next to **View reservoir**) to open the same window titled `SOURCE FLOW – RESERVOIR <name>`, with a **Reservoir** field in the header (e.g. the Clifton Court BBID and SWP flows). A source is **DICU** when its name starts with `dicu` (e.g. `dicu_div_206`); everything else is **other** (e.g. `ccc`, `stockton`).
+The **Source Flow** window is the same as the BC window — same display modes, buttons, CSV export, and file resolution — and reads the `FILE` / `PATH` of each `SOURCE_FLOW` row. 
 
-The **Source Flow** window is the same as the BC window — same display modes, buttons, CSV export, and file resolution — and reads the `FILE` / `PATH` of each `SOURCE_FLOW` row. Because a node usually has several sources (DICU diversion, drain and seepage plus any others), a drop-down lists them as `name (DICU)` / `name (Other)`. The header also shows the sign and the DICU/Other group. A `FILE` of `constant` is shown as a flat line at the constant value over the model run period. The node is ringed on the map while the window is open.
+> **Note**:
+Because a node usually has several sources (DICU diversion, drain and seepage plus any others), a drop-down lists them as `name (DICU)` / `name (Other)`. The header also shows the sign and the DICU/Other group.
 
-**Operating rules on boundary and source flows.** If an operating rule sets the flow's value (`SET ext_flow(name=<NAME>) …`, where `<NAME>` is the `NAME` of the `SOURCE_FLOW` / `BOUNDARY_*` row), an **Operating rules** section appears under the input details of the BC and Source Flow windows. It uses the same rule blocks as the Hydraulic Structure window (see below): a badge for the trigger, the trigger written in words (e.g. "stage in channel 185 at 0 ft ≤ 2.0"), the value it sets (e.g. "0 cfs" or the series times −1), an expandable "Rule text", and a chart for each time series a rule reads. A series that is the same DSS record as the one plotted in the window is not charted again. DICU diversions and seepage controlled by the channel 185 stage (`dicu_div_151_off` / `_on`, etc.) are an example. The section is hidden when no rule acts on the selected input.
+Source flows of a reservoir (`SOURCE_FLOW_RESERVOIR`) belong to the reservoir, not to a node: they are not drawn on node circles and are not counted in the node hover totals. A reservoir that has source flows shows the same dots as a node, at the corner of its icon: a light grey dot for DICU flows (e.g. the Clifton Court BBID flows) with a smaller dark grey one for other flows (e.g. the SWP flow). Each follows the **Reservoirs** layer and its own **Source Flow (DICU)** / **Source Flow (other)** layer. Right-click the reservoir icon and choose **View source flow data** to open the same window titled `SOURCE FLOW – RESERVOIR <name>`, with a **Reservoir** field in the header (e.g. the Clifton Court BBID and SWP flows).
+
+
+> ***Operating rules on boundary and source flows*** 
+If an operating rule sets the flow's value (`SET ext_flow(name=<NAME>) …`, where `<NAME>` is the `NAME` of the `SOURCE_FLOW` / `BOUNDARY_*` row), an *Operating Rules* section appears under the input details of the BC and Source Flow windows.
+It uses the same rule blocks as the Hydraulic Structure window (see below):
+> - a badge for the trigger, the trigger written in words (e.g. "stage in channel 185 at 0 ft ≤ 2.0")
+> - the value it sets (e.g. "0 cfs" or the series times −1)
+> - an expandable "Rule text", and a chart for each time series a rule reads. 
 
 #### Hydraulic structures — right-click a gate icon → **View hydraulic structure**
-
-The option appears for every hydraulic-structure icon, whether it sits on a channel or on a reservoir node. On a channel gate it is listed together with **View channel info**; on a reservoir gate it is listed with **View source flow data** when the node has source flows.
 
 The **Hydraulic Structure** window shows the gate name, its channel or reservoir, and the node, followed by two tabs. The map zooms to the gate, which is highlighted with a red glow and outline (like a selected channel) until the window is closed, and the window can be dragged by its title. If several gates share a location, a drop-down selects which one is shown.
 
 - **Devices tab** lists one table of its weir devices (`GATE_WEIR_DEVICE`: device, number of devices, width, elevation, height, flow coefficients, default operation) and one of its pipe devices (`GATE_PIPE_DEVICE`: device, number of devices, radius, elevation, flow coefficients, default operation). Rows are matched to the gate by `GATE_NAME`.
 <br>
-- **Operating rules tab** summarises the rules in `OPERATING_RULE` that act on the gate (matched by `gate=` in the rule's `ACTION`), grouped by device and by the quantity they control (`gate_op`, `gate_coef`, `gate_install`, `gate_elev`, `gate_width`, `gate_height`, `gate_nduplicate`). The `from_node` and `to_node` twins of a rule are merged into one row. Each row has a badge: 
+- **Operating rules tab** summarises the rules in `OPERATING_RULE` that act on the gate (matched by `gate=` in the rule's `ACTION`), grouped by device and by the quantity they control (`gate_op`, `gate_coef`, `gate_install`, `gate_elev`, `gate_width`, `gate_height`, `gate_nduplicate`). The `from_node` and `to_node` twins of a rule are merged into one row. 
+
+    1.Each row has a badge: 
     - **Trigger: True** (trigger `TRUE`: the gate follows a time series or is set to a value from the start of the run)
     - **Trigger: Schedule** (date triggers such as `DATETIME < 20SEP2018 12:00` / `>=`, shown as a table of "Before" / "From" dates with the value set and any ramp)
     - **Trigger: Condition** (any other trigger, written in words, e.g. "stage in channel 185 at 0 ft ≤ 2.0", with the named expressions from `OPRULE_EXPRESSION` it uses listed underneath)
-    - **Not summarised** (a rule the viewer cannot interpret, shown as its raw text). 
-<br>
-    "Rule text" expands the exact `ACTION` / `TRIGGER` as specified in echo file.
-    `OPRULE_TIME_SERIES` source of each series the rule uses. Directly under each rule there is one chart per time series the rule reads (in its value or its trigger, including through named expressions). Each chart shows the DSS file and path (or constant value), fill-in, minimum / mean / maximum and record period, and a step chart that opens on the model run period. It can be zoomed and panned with the chart toolbar (pan, box zoom, wheel zoom, reset; hover for date and value), and the **Model run period** and **Full record** buttons jump between the two views. Rules that set `ext_flow` are not tied to a gate and are not shown in this window (they appear in the BC and Source Flow windows, above).
+    - **Not summarised** (a rule the viewer cannot interpret, shown as its raw text).
+
+    2. "Rule text" expands the exact `ACTION` / `TRIGGER` as specified in echo file.
+
+    3.  `OPRULE_TIME_SERIES`: directly under each rule there is one chart per time series the rule reads (in its value or its trigger, including through named expressions). Each chart shows the DSS file and path (or constant value), fill-in, minimum / mean / maximum and record period, and a step chart that opens on the model run period. It can be zoomed and panned with the chart toolbar (pan, box zoom, wheel zoom, reset; hover for date and value), and the **Model run period** and **Full record** buttons jump between the two views. Rules that set `ext_flow` are not tied to a gate and are not shown in this window (they appear in the BC and Source Flow windows, above).
 
 #### Reservoirs — right-click a reservoir icon → **View reservoir**
 
@@ -425,70 +443,90 @@ Opens a **Reservoir** window for the reservoir. The map zooms to the reservoir a
 - **Connections:** a table of the nodes the reservoir touches, either through a connection (`COEF_IN` / `COEF_OUT`) or through a gate.
 - **Elevation vs area:** the `RESERVOIR_VOL` curve (area in acres on the x axis, elevation in ft on the y axis), with dashed lines at the bottom elevation and the initial stage. Hover a point for its elevation, area and volume; the chart toolbar pans and zooms. **Show Table** lists the points with a volume column derived from the area curve (trapezoidal rule from the lowest elevation, as DSM2 does), and **Export CSV** saves them.
 
-The window can be dragged by its title.
-
-> **Note:** only one pop-up window is open at a time. BC, source-flow, and operating-rule series are read with `pyhecdss` (regular and irregular `IR-*` records; the HEC-DSS missing-value flags `-901` / `-902` are ignored in the operating-rule charts); the tidal filter uses `vtools.functions.filter.cosine_lanczos`.
-
 ### Compare tab
 
 With two echo files, the **Compare** tab uses the same layout as the Map tab.
 
-- **Base Layers** (Channels, Channel Nodes, Channel Direction) show the base echo file, with the same hover tooltips as the Map tab.
+- **Base Layers** (Channels, Channel Nodes, Channel Direction) show channel, node, and channel direction from the base echo file, with the same hover tooltips as the Map tab.
 - **Diff Layers** draw in red what differs between the scenario and the base; each has a "Changed ..." checkbox.
 - **Right-click** a red item and choose its **View ... diff** to open a pop-up with the base and scenario values side by side, the differing values highlighted.
 - **Diff Summary** (button at the top of the sidebar) opens a window with one table per category, listing at a high level which items changed and in what way.
 
-The base file is always the standard: "new" means not in the base file and "removed" means not in the scenario file. Changed and removed items are drawn at their base location. New items have no base location, so they are not drawn and appear only in the **Diff Summary**. A channel or node of the base echo file that has no geometry in the GeoJSON cannot be drawn; a warning card naming it appears in the bottom-right corner of the Map tab at launch until you close it.
+The base file is always the standard: "new" means not in the base file and "removed" means not in the scenario file. Changed and removed items are drawn at their base location. 
+
+>**Notes:**
+    1. New items have no base location, so they are not drawn and appear only in the **Diff Summary**. 
+    2. A channel or node of the base echo file that has no geometry in the GeoJSON cannot be drawn; a warning card naming it appears in the bottom-right corner of the Map tab at launch until you close it.
 
 #### Channels and nodes
 
-- **Layers:** **Changed Channels** (red lines) and **Changed Nodes** (red outline, transparent fill).
-- **A channel is red** when it is removed or when any of these changed: length, Manning's n, dispersion, upnode, downnode or DX (`CHANNEL`); cross-section locations, elevation, area, width or wetted perimeter (`XSECT_LAYER`); the initial condition (`CHANNEL_IC`).
-- **A node is red** when it is removed, or when a channel that started (upnode) or ended (downnode) there in the base no longer does because the channel was removed or its upnode / downnode moved.
-- **View channel diff:** the channel properties, the cross-section locations that were added, removed or changed (for a location in both files, the base and scenario elevation, area, width and wetted perimeter of every layer that differs), and the initial condition.
-- **Diff Summary:** a **Channels** table (Properties, Channel Num) with new or removed channel, length, Manning's n, dispersion, upnode / downnode, DX, cross-section and initial condition.
+- **Layers names:** **Changed Channels** and **Changed Nodes**
+    1. **Changed Channels** show up when it is removed or when any of these changed: length, Manning's n, dispersion, upnode, downnode or DX (`CHANNEL`); cross-section locations, elevation, area, width or wetted perimeter (`XSECT_LAYER`); the initial condition (`CHANNEL_IC`).
+    2. **Changed Nodes** show up when it is removed, or when a channel that started (upnode) or ended (downnode) there in the base no longer does because the channel was removed or its upnode / downnode moved.
+- **View channel diff:** right-click on `changed channels` on the map to view detailed channel differences, including:
+    1. channel properties
+    2. the cross-section locations that were added, removed or changed (for a location in both files, the base and scenario elevation, area, width and wetted perimeter of every layer that differs)
+    3. the initial condition.
 
 #### Reservoirs
 
-- **Layers:** **Changed Reservoirs** (red squares) and **Changed Res. Connections** (red dashed lines).
-- **A reservoir is red** when it is removed or when any of these changed: connections, i.e. a node added or removed or its `COEF_IN` / `COEF_OUT` (`RESERVOIR_CONNECTION`); surface area or bottom elevation (`RESERVOIR`); the elevation vs area table (`RESERVOIR_VOL`); the initial stage (`RESERVOIR_IC`).
-- **Connection lines:** only the base lines are drawn. A line turns red when that connection changed or was removed (all lines of a removed reservoir turn red); a connection added in the scenario has no base line.
-- **View reservoir diff:** the properties, the connections (per node) and the differing points of the elevation vs area table.
-- **Diff Summary:** a **Reservoirs** table.
+- **Layers:** **Changed Reservoirs** and **Changed Res. Connections**
+    1. **Changed Reservoirs** show up when it is removed or when any of these changed: 
+        1. connections, i.e. a node added or removed or its `COEF_IN` / `COEF_OUT` (`RESERVOIR_CONNECTION`); 
+        2. surface area or bottom elevation (`RESERVOIR`); 
+        3. the elevation vs area table (`RESERVOIR_VOL`); 
+        4. the initial stage (`RESERVOIR_IC`).
+    2. **Changed Res. Connections** show up when that connection changed or was removed (all lines of a removed reservoir turn red); a connection added in the scenario has no base line so it's not shown up in map but in **Diff Summary** table
+- **View reservoir diff:** right click on `Changed Reservoirs` to view detailed reservoir differences, including: the properties, the connections (per node) and the differing points of the elevation vs area table.
 
 #### Gates
 
-- **Layer:** **Changed Gates** (red gate icons).
-- **A gate is red** when it is removed or when any of these changed:
-  - `FROM_OBJ`, `FROM_IDENTIFIER` or `TO_NODE` (`GATE`)
-  - a weir or pipe device was added, removed or had a property changed (`GATE_WEIR_DEVICE`, `GATE_PIPE_DEVICE`)
-  - an operating rule that acts on the gate (matched by `gate=` in its `ACTION`) was added or removed, or its `ACTION` or `TRIGGER` changed (`OPERATING_RULE`)
-  - an `OPRULE_EXPRESSION` used by the gate's rule triggers changed
-  - the **values** of an `OPRULE_TIME_SERIES` the gate's rules read changed; a series whose file name or path changed but whose data are identical is not a difference
-- **View gate diff:** a window with two tabs that opens on the first tab that has differences.
-  - **Gate structure:** the location and the changed devices, every property base next to scenario.
-  - **Operating rules:** the changed rules (`ACTION` and `TRIGGER`), the changed expressions and, for each time series whose values differ, a chart overlaying the base and scenario series.
-- **Diff Summary:** location and device changes in a **Gates** table, rule changes in a separate **Operating Rules** table.
+- **Layer:** **Changed Gates**
+    1. **Changed Gates** show up when it is removed or when any of these changed:
+        1. `FROM_OBJ`, `FROM_IDENTIFIER` or `TO_NODE` (`GATE`);
+        2. a weir or pipe device was added, removed or had a property changed (`GATE_WEIR_DEVICE`, `GATE_PIPE_DEVICE`);
+        3. an operating rule that acts on the gate (matched by `gate=` in its `ACTION`) was added or removed, or its `ACTION` or `TRIGGER` changed (`OPERATING_RULE`);
+        4. an `OPRULE_EXPRESSION` used by the gate's rule triggers changed;
+        5. the **values** of an `OPRULE_TIME_SERIES` the gate's rules read changed; a series whose file name or path changed but whose data are identical is not a difference.
+- **View gate diff:** right-click on `Changed Gates` to view detailed gate differences in a window with two tabs. It opens on the first tab that has differences:
+    1. **Gate structure** tab: the location and the changed devices, every property base next to scenario.
+    2. **Operating rules** tab: the changed rules (`ACTION` and `TRIGGER`), the changed expressions and, for each time series whose values differ, a chart overlaying the base and scenario series.
 
 #### Boundary and source flows
 
-- **Layers:** **Changed Boundary Nodes** (red triangle, for boundary flow and stage) and **Changed Source Flow** (red dot, for DICU and other source flow; a source flow on a reservoir sits on the reservoir). The icons are the Map tab's, and hovering shows the Map tab's tooltips.
-- **Matching:** rows of `BOUNDARY_FLOW`, `BOUNDARY_STAGE`, `SOURCE_FLOW` and `SOURCE_FLOW_RESERVOIR` are matched by `NAME` within their table.
-- **A row is changed** when its `NODE` (`RES_NAME` for `SOURCE_FLOW_RESERVOIR`), `SIGN` or `FILLIN` changed, or when the **values** of its time series changed; a renamed file or path with identical data is not a difference.
-- **Removed rows** are drawn like changed ones, at their base location.
-- **View boundary diff / View source flow diff:** the changed rows at that node or reservoir, with the base and scenario node (or reservoir), `SIGN` and `FILLIN` and, when the values differ, a chart overlaying the base and scenario time series. A removed row shows the base row (node or reservoir, `SIGN`, `FILLIN`, file and path) next to empty scenario cells.
-- **Diff Summary:** one table per input type (Boundary Flow, Boundary Stage, Source Flow, Source Flow Reservoir) with the rows Node changed (or RES_NAME changed), SIGN changed, FILLIN changed, Data changed, New and Removed.
+- **Layers:** **Changed Boundary Nodes** and **Changed Source Flow**
+    1. **Changed Boundary Nodes** show up at the base node of a boundary flow or boundary stage row (`BOUNDARY_FLOW`, `BOUNDARY_STAGE`) that is changed or removed.
+    2. **Changed Source Flow** show up for a source flow row, DICU or other, that is changed or removed: at its base node (`SOURCE_FLOW`) or on its base reservoir (`SOURCE_FLOW_RESERVOIR`).
+> **Notes**: changes are tracked by `NAME` within their table, and a row is changed when any of these changed:
+    1. `NODE` (`RES_NAME` for `SOURCE_FLOW_RESERVOIR`);
+    2. `SIGN`;
+    3. `FILLIN`;
+    4. the **values** of its time series; a renamed file or path with identical data is not a difference.
+- **View boundary diff / View source flow diff:** right-click on `Changed Boundary Nodes` or `Changed Source Flow` to view the changed and removed rows at that node or reservoir, including:
+    1. the base and scenario node (or reservoir), `SIGN` and `FILLIN`
+    2. when the values differ, a chart overlaying the base and scenario time series
+    3. for a removed row, the base row (node or reservoir, `SIGN`, `FILLIN`, file and path) next to empty scenario cells.
 
 #### Output locations
 
-- **Layer:** **Changed Output Locations** (the Map tab's pin, in red).
-- **Matching:** `OUTPUT_CHANNEL` rows are matched by `NAME`, ignoring case. For a name in both files only the set of `CHAN_NO` and `DISTANCE` values decides whether it changed; the variable, interval, period operation and file are ignored, and `length` is not equal to a number.
-- **Changed and removed locations** are drawn at their base position. Hovering a pin shows, for each name, its base and its scenario location (channel and distance, or "removed").
-- **Diff Summary:** an **Output Locations** table with the rows Location changed, New and Removed.
+- **Layer:** **Changed Output Locations**
+    1. **Changed Output Locations** show up at the base position of a name that is removed or whose location changed. 
+>**Notes**: `OUTPUT_CHANNEL` rows are matched by `NAME`, ignoring case; for a name in both files only the set of `CHAN_NO` and `DISTANCE` values decides whether it changed. The variable, interval, period operation and file are ignored.
+- **Hover:** there is no right-click window. Hovering a pin shows, for each name, its base and its scenario location (channel and distance, or "removed").
 
-#### Scalars
+#### Diff Summary
 
-The `SCALAR` table is compared in the **Diff Summary** only; nothing is drawn on the map. Scalars are matched by `NAME`. A **Scalars** table lists every changed, new and removed scalar with its base and scenario value.
+The **Diff Summary** button at the top of the sidebar opens a window with one table per category, listing at a high level which items differ and in what way. Categories without differences are left out.
+
+> **New items are not shown on the map.** They have no base location, so they appear only in the Diff Summary (the "New" row of each table). Changed and removed items are drawn on the map and also listed here.
+
+1. **Channels:** new or removed channel, and which properties changed (length, Manning's n, dispersion, upnode / downnode, DX, cross-section, initial condition).
+2. **Reservoirs:** new or removed reservoir, and what changed (connections, area / bottom elevation, elevation vs area, initial condition).
+3. **Gates:** new or removed gate, and location or device changes.
+4. **Operating Rules:** rule changes of gates (rule added or removed, `ACTION`, `TRIGGER`, expression, time series).
+5. **Boundary Flow, Boundary Stage, Source Flow, Source Flow Reservoir:** one table per input type, with the rows Node changed (or RES_NAME changed), SIGN changed, FILLIN changed, Data changed, New and Removed.
+6. **Output Locations:** the rows Location changed, New and Removed.
+7. **Scalars:** the `SCALAR` table is compared in the Diff Summary only; nothing is drawn on the map. Scalars are matched by `NAME`, and the table lists every changed, new and removed scalar with its base and scenario value.
 
 ---
 
