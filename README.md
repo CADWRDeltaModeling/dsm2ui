@@ -321,7 +321,7 @@ If the connection to the server is lost (server stopped, network or tunnel dropp
 | `OPERATING_RULE`, `OPRULE_EXPRESSION`, `OPRULE_TIME_SERIES` | Operating rules of each gate and of each boundary / source flow (`ext_flow`), the named expressions they use, and the DSS series they read |
 | `ENVVAR` | `START_DATE` / `END_DATE` (model run period) |
 
-### Map tab
+#### **Map tab**
 
 #### Map and panels
 
@@ -353,10 +353,6 @@ If the connection to the server is lost (server stopped, network or tunnel dropp
     - Nodes with source flows also list how many DICU and other sources they have. 
     - Output-location pins show the station name(s), channel, and distance, e.g. `ANH — channel 51 @ 11,789 ft`.
 - **Base map:** Esri World Topo Map (requires internet access).
-- **Warning Message:**
-    - channels and nodes that are in the GeoJSON files but not in the echo file are drawn in gray (no Layers entry). Hovering one shows "channel x in geojson but missing in dsm2 input" or "node x in geojson but missing in dsm2 input".
-    - The same gray channels and nodes appear in the Compare tab, where the echo file is the base.
-    - channels and nodes that are in dsm2 echo file but not in GeoJSON files produce a warning card lists them at launch. 
 
 #### Channel information
 
@@ -443,7 +439,7 @@ Opens a **Reservoir** window for the reservoir. The map zooms to the reservoir a
 - **Connections:** a table of the nodes the reservoir touches, either through a connection (`COEF_IN` / `COEF_OUT`) or through a gate.
 - **Elevation vs area:** the `RESERVOIR_VOL` curve (area in acres on the x axis, elevation in ft on the y axis), with dashed lines at the bottom elevation and the initial stage. Hover a point for its elevation, area and volume; the chart toolbar pans and zooms. **Show Table** lists the points with a volume column derived from the area curve (trapezoidal rule from the lowest elevation, as DSM2 does), and **Export CSV** saves them.
 
-### Compare tab
+#### **Compare tab**
 
 With two echo files, the **Compare** tab uses the same layout as the Map tab.
 
@@ -527,6 +523,38 @@ The **Diff Summary** button at the top of the sidebar opens a window with one ta
 5. **Boundary Flow, Boundary Stage, Source Flow, Source Flow Reservoir:** one table per input type, with the rows Node changed (or RES_NAME changed), SIGN changed, FILLIN changed, Data changed, New and Removed.
 6. **Output Locations:** the rows Location changed, New and Removed.
 7. **Scalars:** the `SCALAR` table is compared in the Diff Summary only; nothing is drawn on the map. Scalars are matched by `NAME`, and the table lists every changed, new and removed scalar with its base and scenario value.
+
+#### **Error handling and warnings**
+
+A problem with one input is reported where it occurs in the interative map, and the rest of the viewer keeps working.
+
+**Startup and echo-file content**
+
+- **Bad command line:** a missing file, more than two files, or only one file for a comparison stops the command with a usage message before the server starts.
+- **Missing optional table:** a table that is not in the echo file (for example `OUTPUT_CHANNEL`, `GATE`, `BOUNDARY_*`, `SOURCE_FLOW*`, `XSECT_LAYER`, `RESERVOIR*`) is treated as empty, so that layer just has no items. The `CHANNEL` table is required; without it the viewer does not start.
+- **Channels and nodes without geometry:** those in the echo file but not in the GeoJSON files are not drawn, and a warning card lists them at launch. Those in the GeoJSON files but not in the echo file are drawn in gray with a hover message and are listed in the same card.
+- **Elements that cannot be placed:** a gate whose channel is not in the network or whose node is not an end of that channel, an output location on a channel without geometry, and a boundary or source flow at a node without geometry are left off the map, without a message.
+
+**Time series windows and charts** (BC, source flow and operating-rule series)
+
+- **DSS file not found:** a red message such as "Could not read the time series: DSS file not found: <name>" would show up to replace the chart. The rest of the window, such as the name, node, sign and operating rules, is still shown, and the other charts are not affected.
+- **DSS path not in the file:** the same message, "path not found in DSS file: <path>" would show up to replace the chart.
+- **Constant series without a run period:** message "constant input, but the echo file has no run period" would show up.
+- **Empty series:** a rule chart for a series with no values (or only the -901 / -902 missing flags) says "The series has no data."
+- **No model run period** (`START_DATE` / `END_DATE` missing from `ENVVAR`): the run period shows as n/a, the **Model run period** button is disabled and the chart opens on the full record.
+- **Tidal filter not possible** (irregular or too short data): the original series is shown with a note.
+- **Rules:** a series a rule refers to but does not define shows "Series <name> is not defined."; a rule the viewer cannot interpret is shown as raw text under **Not summarised**.
+- **Search:** a number that does not exist shows a "not found" message.
+
+**Compare tab**
+
+- **Same definition, same file:** a time series with the same file (under the same folder with same file name), path and fill-in in both echo files that resolves to the same DSS file is treated as unchanged without reading it. The series is read and compared only when the actual file names and pathes differ.
+- **File missing, same definition:** if both echo files give the same file, path and fill-in but the DSS file cannot be found (for either echo file), the series is treated as unchanged, with no warning message in the Compare tab. The Map tab's BC and source flow windows do show "DSS file not found" for the same case.
+- **Data unreadable, different definition:** the series is listed as changed, and its chart is replaced by "values could not be compared (<reason>)".
+- **Items without a map location:** changed items that cannot be placed on the map (see above) are still listed in the Diff Summary.
+
+**Connection** 
+- **Lost connection to server**: a red "Connection to the server was lost" notification appears; relaunch the command if needed and reload the page.
 
 ---
 
