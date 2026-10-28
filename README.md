@@ -416,11 +416,11 @@ The **Hydraulic Structure** window shows the gate name, its channel or reservoir
 - **Devices tab** lists one table of its weir devices (`GATE_WEIR_DEVICE`: device, number of devices, width, elevation, height, flow coefficients, default operation) and one of its pipe devices (`GATE_PIPE_DEVICE`: device, number of devices, radius, elevation, flow coefficients, default operation). Rows are matched to the gate by `GATE_NAME`.
 - **Operating rules tab** summarises the rules in `OPERATING_RULE` that act on the gate (matched by `gate=` in the rule's `ACTION`), grouped by device and by the quantity they control (`gate_op`, `gate_coef`, `gate_install`, `gate_elev`, `gate_width`, `gate_height`, `gate_nduplicate`). The `from_node` and `to_node` twins of a rule are merged into one row. 
 
-    1.Each row has a badge: 
-    - **Trigger: True** (trigger `TRUE`: the gate follows a time series or is set to a value from the start of the run)
-    - **Trigger: Schedule** (date triggers such as `DATETIME < 20SEP2018 12:00` / `>=`, shown as a table of "Before" / "From" dates with the value set and any ramp)
-    - **Trigger: Condition** (any other trigger, written in words, e.g. "stage in channel 185 at 0 ft ≤ 2.0", with the named expressions from `OPRULE_EXPRESSION` it uses listed underneath)
-    - **Not summarised** (a rule the viewer cannot interpret, shown as its raw text).
+    1. Each row has a badge: 
+        - **Trigger: True** (trigger `TRUE`: the gate follows a time series or is set to a value from the start of the run)
+        - **Trigger: Schedule** (date triggers such as `DATETIME < 20SEP2018 12:00` / `>=`, shown as a table of "Before" / "From" dates with the value set and any ramp)
+        - **Trigger: Condition** (any other trigger, written in words, e.g. "stage in channel 185 at 0 ft ≤ 2.0", with the named expressions from `OPRULE_EXPRESSION` it uses listed underneath)
+        - **Not summarised** (a rule the viewer cannot interpret, shown as its raw text).
 
     2. "Rule text" expands the exact `ACTION` / `TRIGGER` as specified in echo file.
 
