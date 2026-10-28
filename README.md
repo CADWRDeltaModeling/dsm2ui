@@ -414,7 +414,6 @@ It uses the same rule blocks as the Hydraulic Structure window (see below):
 The **Hydraulic Structure** window shows the gate name, its channel or reservoir, and the node, followed by two tabs. The map zooms to the gate, which is highlighted with a red glow and outline (like a selected channel) until the window is closed, and the window can be dragged by its title. If several gates share a location, a drop-down selects which one is shown.
 
 - **Devices tab** lists one table of its weir devices (`GATE_WEIR_DEVICE`: device, number of devices, width, elevation, height, flow coefficients, default operation) and one of its pipe devices (`GATE_PIPE_DEVICE`: device, number of devices, radius, elevation, flow coefficients, default operation). Rows are matched to the gate by `GATE_NAME`.
-<br>
 - **Operating rules tab** summarises the rules in `OPERATING_RULE` that act on the gate (matched by `gate=` in the rule's `ACTION`), grouped by device and by the quantity they control (`gate_op`, `gate_coef`, `gate_install`, `gate_elev`, `gate_width`, `gate_height`, `gate_nduplicate`). The `from_node` and `to_node` twins of a rule are merged into one row. 
 
     1.Each row has a badge: 
