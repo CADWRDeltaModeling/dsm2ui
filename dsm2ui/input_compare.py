@@ -24,8 +24,8 @@ from dsm2ui.input_viewer import (
     _MOUSE_COORD_JS, _NODE_COLOR, _OUTPUT_SIZE_JS, _PIN_RED_URL, _SIDEBAR_W, _TILES, _ZOOM_JS,
     _add_geojson_only_layers, _arrow_data,
     _build_reservoirs, _card_styles, _geojson_only, _icon_button, _load_boundary_rows, _load_echo, _load_geo,
-    _load_gates, _load_network, _load_source_rows, _orient_lines, _overlay, _panel_styles, _read_bc_series,
-    _resolve_dss, _swatch,
+    _line_coords, _load_gates, _load_network, _load_source_rows, _orient_lines, _overlay, _panel_styles,
+    _read_bc_series, _resolve_dss, _swatch,
 )
 from dsm2ui.oprule_diff import default_series_differs
 from dsm2ui.output_diff import diff_outputs
@@ -283,7 +283,7 @@ def _diff_geometry(diff, channel_geo, node_geo):
     for chan in diff.channels:
         if chan not in chan_geo.index:
             continue
-        coords = [c for part in chan_geo.geometry[chan].geoms for c in part.coords]
+        coords = _line_coords(chan_geo.geometry[chan])
         rec = diff.scenario.rows.get(chan) or diff.base.rows[chan]
         chan_cols["xs"].append([c[0] for c in coords])
         chan_cols["ys"].append([c[1] for c in coords])
@@ -404,7 +404,7 @@ def build_compare_view(base_file, scenario_file, channel_geo, node_geo):
     output_diff = diff_outputs(_load_echo(base_file), _load_echo(scenario_file))
     scalar_diff = diff_scalars(_load_echo(base_file), _load_echo(scenario_file))
 
-    lines = [[c for part in g.geoms for c in part.coords] for g in chans.geometry]
+    lines = [_line_coords(g) for g in chans.geometry]
     lines = _orient_lines(lines, chans, nodes)
     chan_src = ColumnDataSource({
         "xs": [[c[0] for c in ln] for ln in lines], "ys": [[c[1] for c in ln] for ln in lines],

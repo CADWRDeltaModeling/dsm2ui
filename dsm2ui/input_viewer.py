@@ -44,6 +44,13 @@ _RESERVOIR_IDS = {
 }
 _TILES = "Esri.WorldTopoMap"
 
+
+def _line_coords(geom):
+    """Flatten a LineString or MultiLineString into one coordinate list."""
+    parts = geom.geoms if hasattr(geom, "geoms") else [geom]
+    return [c for part in parts for c in part.coords]
+
+
 _BLUE = "#1a73e8"
 _CHANNEL_COLOR = "#f5c518"
 _NODE_COLOR = "#5fa83a"
@@ -615,7 +622,7 @@ def _build_reservoirs(echo_file, nodes):
 
     conn = {"xs": [], "ys": [], "info": [], "name": [], "node": []}
     for rec in conns.to_dict("records"):
-        coords = [c for part in rec["geometry"].geoms for c in part.coords]
+        coords = _line_coords(rec["geometry"])
         ends = (coords[0], coords[-1])
         # The end nearest a reservoir point is the reservoir end; the other end is at a channel node.
         _, k, i = min(
@@ -987,7 +994,7 @@ def _geojson_only(echo_file, channel_geo, node_geo):
     chan_gdf, node_gdf = _load_geo(channel_geo), _load_geo(node_geo)
     chan_cols = {"xs": [], "ys": [], "chan": []}
     for chan in sorted(set(chan_gdf.index) - set(table["CHAN_NO"].astype(int))):
-        coords = [c for part in chan_gdf.geometry[chan].geoms for c in part.coords]
+        coords = _line_coords(chan_gdf.geometry[chan])
         chan_cols["xs"].append([c[0] for c in coords])
         chan_cols["ys"].append([c[1] for c in coords])
         chan_cols["chan"].append(chan)
@@ -1047,8 +1054,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None, scenario_file
     )
     geo_only = _geojson_only(echo_file, channel_geo or _DEFAULT_CHANNEL_GEO, node_geo or _DEFAULT_NODE_GEO)
 
-    # Channel geometries are single-part MultiLineStrings.
-    lines = [[c for part in g.geoms for c in part.coords] for g in chans.geometry]
+    lines = [_line_coords(g) for g in chans.geometry]
     lines = _orient_lines(lines, chans, nodes)
     chan_data = {col: chans[col].tolist() for col, _, _, _ in _INFO_FIELDS}
     chan_data["xs"] = [[c[0] for c in ln] for ln in lines]
