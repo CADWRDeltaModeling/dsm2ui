@@ -67,7 +67,14 @@ class ChannelDiff:
 
 
 def _same(a, b):
-    return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-9)
+    a, b = float(a), float(b)
+    if math.isnan(a) and math.isnan(b):  # DX can be unavailable in both files
+        return True
+    return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
+
+
+def _text(fmt, value):
+    return "n/a" if math.isnan(value) else fmt.format(value)
 
 
 def _channel_rows(tables):
@@ -173,8 +180,8 @@ def _detail(base, scen, chan):
         unit = _UNITS.get(col, "")
         fields.append({
             "label": label,
-            "base": None if b is None else fmt.format(b[col]) + unit,
-            "scenario": None if s is None else fmt.format(s[col]) + unit,
+            "base": None if b is None else _text(fmt, b[col]) + unit,
+            "scenario": None if s is None else _text(fmt, s[col]) + unit,
             "changed": b is None or s is None or not _same(b[col], s[col]),
         })
     return {
@@ -264,7 +271,7 @@ def diff_channels(base_tables, scenario_tables):
             channels[chan] = ["New channel"]
             continue
         reasons = [
-            f"{label}: {fmt.format(base[chan][col])} \u2192 {fmt.format(scen[chan][col])}"
+            f"{label}: {_text(fmt, base[chan][col])} \u2192 {_text(fmt, scen[chan][col])}"
             for col, label, fmt in _CHANNEL_FIELDS
             if not _same(base[chan][col], scen[chan][col])
         ]

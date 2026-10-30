@@ -461,9 +461,40 @@ def _load_oprules(echo_file):
     return parse_rules(records("OPERATING_RULE"), expressions), series
 
 
+def _add_dx(tables, echo_file):
+    """Give CHANNEL a DX column when the echo file has none.
+
+    Older echo files set DX with the SCALAR ``deltax``: a number is the DX of every channel, and a file name is a CSV
+    without header (channel number, DX) in the study directory. DX stays NaN where it cannot be found.
+    """
+    channel = tables.get("CHANNEL")
+    if channel is None or "DX" in channel.columns:
+        return
+    scalar = tables.get("SCALAR")
+    hits = [] if scalar is None else [
+        str(value).strip() for name, value in zip(scalar["NAME"], scalar["VALUE"]) if str(name).lower() == "deltax"
+    ]
+    dx = pd.Series(float("nan"), index=channel.index)
+    if hits:
+        try:
+            dx = pd.Series(float(hits[0]), index=channel.index)
+        except ValueError:
+            envvar = tables.get("ENVVAR")
+            env = dict(zip(envvar["NAME"], envvar["VALUE"])) if envvar is not None else {}
+            try:
+                path = _resolve_file(echo_file, hits[0], env, "file")
+                table = pd.read_csv(path, header=None, usecols=[0, 1]).apply(pd.to_numeric, errors="coerce").dropna()
+                dx = channel["CHAN_NO"].astype(int).map(dict(zip(table[0].astype(int), table[1]))).astype(float)
+            except (OSError, ValueError, pd.errors.ParserError) as exc:  # FileNotFoundError is an OSError
+                logging.getLogger(__name__).warning("DX not read from deltax = %s: %s", hits[0], exc)
+    tables["CHANNEL"] = channel.assign(DX=dx)
+
+
 @functools.lru_cache(maxsize=4)
 def _load_echo(echo_file):
-    return load_echo_file(echo_file)
+    tables = load_echo_file(echo_file)
+    _add_dx(tables, echo_file)
+    return tables
 
 
 @functools.lru_cache(maxsize=4)
@@ -656,9 +687,8 @@ def _echo_env(echo_file):
     return dict(zip(envvar["NAME"], envvar["VALUE"])) if envvar is not None else {}
 
 
-def _resolve_dss(echo_file, name):
-    """Locate a BC DSS file; relative names are relative to the study dir (parent of the echo's folder)."""
-    env = _echo_env(echo_file)
+def _resolve_file(echo_file, name, env, what):
+    """Locate a file named in an echo file; relative names are relative to the study dir (parent of the echo's folder)."""
     name = re.sub(
         r"\$\{(\w+)\}", lambda m: str(env.get(m.group(1), os.environ.get(m.group(1), m.group(0)))), name
     )
@@ -667,7 +697,12 @@ def _resolve_dss(echo_file, name):
         cand = (base / name).resolve()
         if cand.is_file():
             return str(cand)
-    raise FileNotFoundError(f"DSS file not found: {name}")
+    raise FileNotFoundError(f"{what} not found: {name}")
+
+
+def _resolve_dss(echo_file, name):
+    """Locate a BC DSS file; relative names are relative to the study dir (parent of the echo's folder)."""
+    return _resolve_file(echo_file, name, _echo_env(echo_file), "DSS file")
 
 
 def _run_window(echo_file):
@@ -836,21 +871,30 @@ def _channel_color_scales(chans):
         vmin, vmax = float(vals.min()), float(vals.max())
         lo, hi = (float(v) for v in vals.quantile([0.02, 0.98]))
         edges = [lo + (hi - lo) * i / n for i in range(n + 1)]
-        bins = [0 if hi <= lo else min(max(int((v - lo) / (hi - lo) * n), 0), n - 1) for v in vals]
+        bins = [
+            None if v != v else 0 if hi <= lo else min(max(int((v - lo) / (hi - lo) * n), 0), n - 1) for v in vals
+        ]  # NaN (value not available) has no class
         bounds = [vmin] + edges[1:-1] + [vmax]
+        constant = vmin == vmax  # every channel has the same value: one colour and one legend row
         out[key] = {}
         for ck, ramp in ramps.items():
-            rows = "".join(
-                f"<div style='display:flex;align-items:center;margin:1px 0'>"
-                f"<span style='width:22px;height:12px;background:{ramp[i]};border:1px solid #bbb;margin-right:8px'></span>"
-                f"<span>{fmt.format(bounds[i])} \u2013 {fmt.format(bounds[i + 1])}</span></div>"
-                for i in range(n)
-            )
-            out[key][ck] = ([ramp[b] for b in bins], (
+            swatch = "<span style='width:22px;height:12px;background:{};border:1px solid #bbb;margin-right:8px'></span>"
+            if constant:
+                rows = f"<div style='display:flex;align-items:center;margin:1px 0'>{swatch.format(ramp[n // 2])}<span>{fmt.format(vmin)}</span></div>"
+                colors = [ramp[n // 2] if v == v else _MISSING_COLOR for v in vals]
+                note = "All channels have the same value."
+            else:
+                rows = "".join(
+                    f"<div style='display:flex;align-items:center;margin:1px 0'>{swatch.format(ramp[i])}"
+                    f"<span>{fmt.format(bounds[i])} \u2013 {fmt.format(bounds[i + 1])}</span></div>"
+                    for i in range(n)
+                )
+                colors = [ramp[b] if b is not None else _MISSING_COLOR for b in bins]
+                note = "Classes span the 2nd\u201398th percentile; the end classes reach the minimum and maximum."
+            out[key][ck] = (colors, (
                 "<div style='font-size:11px;color:#444;width:228px'>"
                 f"<div style='font-weight:600;margin-bottom:2px'>{html.escape(heading)}{html.escape(unit)}</div>{rows}"
-                "<div style='color:#777;margin-top:3px'>Classes span the 2nd\u201398th percentile; the end classes "
-                "reach the minimum and maximum.</div></div>"
+                f"<div style='color:#777;margin-top:3px'>{note}</div></div>"
             ))
     return out
 
@@ -1338,7 +1382,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None, scenario_file
             "<tr style='border-bottom:1px solid #e5e7eb'>"
             f"<td style='padding:9px 0;color:#222'>{html.escape(label)}</td>"
             f"<td style='padding:9px 0;text-align:right;color:{_BLUE};font-weight:500'>"
-            f"{fmt.format(int(row[col]) if fmt.endswith('d}') else row[col])}{unit}</td></tr>"
+            f"{'n/a' if row[col] != row[col] else fmt.format(int(row[col]) if fmt.endswith('d}') else row[col]) + unit}</td></tr>"
             for col, label, fmt, unit in _INFO_FIELDS
         )
         info_body.object = f"<table style='width:100%;border-collapse:collapse'>{rows}</table>"
@@ -1751,6 +1795,7 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None, scenario_file
     ]
     main = [main_row]
     missing = _missing_geometry(echo_file, chans, nodes)
+    n_no_dx = int(chans["DX"].isna().sum())
 
     if scenario_file:
         from dsm2ui.input_compare import build_compare_view
@@ -1788,6 +1833,11 @@ def build_input_viewer(echo_file, channel_geo=None, node_geo=None, scenario_file
     ]
     if _geojson_only_warning(*geo_only):
         warnings.append(_geojson_only_warning(*geo_only))
+    if n_no_dx:
+        warnings.append(
+            f"DX is not available for {n_no_dx} channel{'s' * (n_no_dx > 1)}: the echo file has no DX column and "
+            "the deltax scalar is missing, its file was not found, or the file does not list the channel"
+        )
     if warnings:
         map_area.append(_overlay(_warning_card(warnings), bottom=40, right=16))
 

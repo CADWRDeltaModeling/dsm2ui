@@ -309,6 +309,7 @@ If the connection to the server is lost (server stopped, network or tunnel dropp
 | Table | Used for |
 |---|---|
 | `CHANNEL` | Channel length, Manning's n, dispersion, up/down nodes, DX; joined to the GeoJSON by channel number |
+| `SCALAR` | `deltax`, which gives DX for older echo files whose `CHANNEL` table has no DX column: a number is the DX of every channel, and a CSV file name points to `variable_dx.csv` (see Error handling and warnings) |
 | `XSECT_LAYER` | Cross-section data (`DIST`, `ELEV`, `AREA`, `WIDTH`, `WET_PERIM`) |
 | `BOUNDARY_FLOW`, `BOUNDARY_STAGE` | Boundary nodes and their DSS `FILE` / `PATH` |
 | `SOURCE_FLOW` | Source-flow nodes and their DSS `FILE` / `PATH` (a `FILE` of `constant` uses the `PATH` value as a fixed flow) |
@@ -346,7 +347,7 @@ If the connection to the server is lost (server stopped, network or tunnel dropp
     > **Note:**
      A number that does not exist shows a "not found" message. Editing or deleting the number, or switching Channel/Node, clears the previous result. Only nodes that appear in the `CHANNEL` table can be found.
 
-    - **Color channels by**: paints the channels by a CHANNEL-table property: Length, Manning's n, Dispersion or DX, using the **Color map** you choose. Values fall into eight equal-width classes between the 2nd and 98th percentile (the end classes reach the minimum and maximum) so a few extreme channels do not wash out the rest. The legend lists the value range of each colour; choose **None** to restore the plain colour. Selection highlighting still works while a colouring is active.
+    - **Color channels by**: paints the channels by a CHANNEL-table property: Length, Manning's n, Dispersion or DX, using the **Color map** you choose. Values fall into eight equal-width classes between the 2nd and 98th percentile (the end classes reach the minimum and maximum) so a few extreme channels do not wash out the rest. The legend lists the value range of each colour. If every channel has the same value (for example a single DX for all channels), all channels get one colour and the legend has one row. Choose **None** to restore the plain colour. Selection highlighting still works while a colouring is active.
 - **Status:** a live latitude/longitude readout (NAD 83) is shown at the bottom left.
 - **Hover:** 
     - channels show channel number and up→down nodes, nodes show the node number, and BC nodes show the node number and their BC inputs (e.g. `sac (flow)`). 
@@ -531,6 +532,7 @@ A problem with one input is reported where it occurs in the interative map, and 
 
 - **Bad command line:** a missing file, more than two files, or only one file for a comparison stops the command with a usage message before the server starts.
 - **Missing optional table:** a table that is not in the echo file (for example `OUTPUT_CHANNEL`, `GATE`, `BOUNDARY_*`, `SOURCE_FLOW*`, `XSECT_LAYER`, `RESERVOIR*`) is treated as empty, so that layer just has no items. The `CHANNEL` table is required; without it the viewer does not start.
+- **DX in older echo files:** when the `CHANNEL` table has no DX column, DX comes from the `SCALAR` named `deltax`. If DX cannot be found (no `deltax`, file not found, unreadable, or a channel missing from the file), it shows as n/a, the channel gets a gray color in "color channels by DX", it is not counted as a difference in the Compare tab, and a warning card at launch says how many channels are affected.
 - **Channels and nodes without geometry:** those in the echo file but not in the GeoJSON files are not drawn, and a warning card lists them at launch. Those in the GeoJSON files but not in the echo file are drawn in gray with a hover message and are listed in the same card.
 - **Elements that cannot be placed:** a gate whose channel is not in the network or whose node is not an end of that channel, an output location on a channel without geometry, and a boundary or source flow at a node without geometry are left off the map, without a message.
 
